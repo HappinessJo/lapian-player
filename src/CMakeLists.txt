@@ -39,7 +39,9 @@ target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
 add_library(lapian_media STATIC
   media/MediaInfo.h
   media/MediaProbe.cpp
-  media/MediaProbe.h)
+  media/MediaProbe.h
+  media/VideoDecoder.cpp
+  media/VideoDecoder.h)
 lapian_apply_common_options(lapian_media)
 target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_media PUBLIC lapian::ffmpeg)
@@ -75,6 +77,14 @@ lapian_apply_common_options(lapian_media_probe)
 target_link_libraries(lapian_media_probe PRIVATE lapian_media)
 lapian_copy_ffmpeg_dlls(lapian_media_probe)
 lapian_set_output_dir(lapian_media_probe)
+
+# T1.2 解码探针（控制台；只解码首帧/N 帧并打印元数据，不渲染、不入分发）
+add_executable(lapian_decode_probe
+  tools/decode_probe/main.cpp)
+lapian_apply_common_options(lapian_decode_probe)
+target_link_libraries(lapian_decode_probe PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_decode_probe)
+lapian_set_output_dir(lapian_decode_probe)
 
 # T0.3 精确 seek 探针（控制台；不渲染、不缓存，只测关键帧回退+解码到目标帧的成本）
 add_executable(lapian_seek_probe

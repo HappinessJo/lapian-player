@@ -23,3 +23,14 @@ add_test(NAME lapian_media_probe_test COMMAND lapian_media_probe_test)
 set_tests_properties(lapian_media_probe_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T1.2 视频解码测试：素材/硬解缺失时返回 77，由 CTest 标记 SKIP。
+add_executable(lapian_video_decoder_test video_decoder_test.cpp)
+lapian_apply_common_options(lapian_video_decoder_test)
+target_link_libraries(lapian_video_decoder_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_video_decoder_test)
+
+add_test(NAME lapian_video_decoder_test COMMAND lapian_video_decoder_test)
+set_tests_properties(lapian_video_decoder_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
