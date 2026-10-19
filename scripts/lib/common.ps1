@@ -41,8 +41,9 @@ function Find-QtRoot {
 
 function Test-FfmpegRoot([string]$Path) {
   if (-not $Path) { return $false }
-  return ((Test-Path (Join-Path $Path 'include\libavformat\avformat.h')) -and
-          (Test-Path (Join-Path $Path 'lib\avformat.lib')))
+  # MSVC 版 FFmpeg 的导入库可能落在 bin/（MSYS2 install 的产物），两处都认
+  $hasLib = (Test-Path (Join-Path $Path 'lib\avformat.lib')) -or (Test-Path (Join-Path $Path 'bin\avformat.lib'))
+  return ((Test-Path (Join-Path $Path 'include\libavformat\avformat.h')) -and $hasLib)
 }
 
 function Find-FfmpegRoot {

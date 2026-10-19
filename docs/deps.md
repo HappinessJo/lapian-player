@@ -19,10 +19,10 @@
 | Visual Studio | 2022 Community 17.14.36623.8（MSVC 14.44.35207，Windows SDK 10.0.26100.0） | `E:\VS\C++` | 用户预装 |
 | CMake | **3.31.6（便携）** | `third_party\cmake\3.31.6\cmake\data\bin\cmake.exe` | `scripts\fetch-cmake.ps1`（PyPI 轮子） |
 | Qt | **6.8.3** msvc2022_64（qtbase + qttools） | `third_party\Qt\6.8.3\msvc2022_64` | `scripts\fetch-qt.ps1`（aqtinstall 3.3.0） |
-| FFmpeg | 阶段 A：BtbN `n8.1.3` LGPL shared（**临时脚手架，不随发布**）；T0.1 完成态：**7.1.1 最小构建** | `third_party\ffmpeg\prebuilt\…` / `third_party\ffmpeg\build-msvc\…` | `scripts\build-ffmpeg.ps1` |
+| FFmpeg | **7.1.1 最小构建**（LGPL-2.1+、shared、`--disable-network`、D3D11VA） | `third_party\ffmpeg\build-msvc\ffmpeg-7.1.1-minimal`（8.6MB） | `scripts\build-ffmpeg.ps1` |
 | Python | 3.14.2 | 系统 `py -3` | 用户预装 |
 | Catch2 | 推迟到 T1.1 | — | 见 §6 |
-| MSYS2 | 仅构建 FFmpeg 时需要 | 见 `scripts\build-ffmpeg.ps1` | 官方 tarball |
+| MSYS2 | 2026-10 基础包 + make 4.4.1 / nasm 3.02 | `E:\msys64` | `scripts\build-ffmpeg.ps1` 自动下载（TUNA 镜像） |
 
 > **为什么 CMake 不用系统自带的 4.2.0**：本机 CMake 4.2.0 在 configure 阶段直接崩溃
 > （`0xC0000409`）；3.31.6 可正常工作。见 §5。
@@ -32,20 +32,21 @@
 ```
 third_party/            构建依赖（.gitignore，不入库）
   Qt/6.8.3/msvc2022_64/
-  ffmpeg/prebuilt/…     阶段 A 临时
-  ffmpeg/build-msvc/…   阶段 B 产物（include/ lib/ bin/）
+  ffmpeg/build-msvc/ffmpeg-7.1.1-minimal/   最小构建（include/ lib/ bin/）
   cmake/3.31.6/
-  ninja/…               备用生成器
 build/                  CMake 构建目录（.gitignore）
 dist/                   打包产物（.gitignore）
+E:\msys64               MSYS2（仅构建 FFmpeg 用）
+E:\ffmpeg-build         FFmpeg 源码/中间产物/install
 ```
 
 ## 4. 构建入口
 
 ```powershell
-# 首次：拉 CMake 与 Qt（需要网络）
+# 首次：拉 CMake、Qt、FFmpeg 最小构建（需要网络）
 powershell -ExecutionPolicy Bypass -File scripts\fetch-cmake.ps1
 powershell -ExecutionPolicy Bypass -File scripts\fetch-qt.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build-ffmpeg.ps1
 
 # 一键 Release 构建 + 测试 + 打包 + 自检 + 体积
 powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Clean
@@ -62,6 +63,12 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Clean
 5. **Python 3.14 的 `tempfile.mkdtemp`**：本机以 `0o700` 建目录后连本人也不可写，导致 pip/aqt 解包失败。`scripts\python\sitecustomize.py` 把 `mkdtemp` 改为 `0o777`（仅构建期，置于 `PYTHONPATH`）。
 6. **aqtinstall 需要命名管道**（多进程下载）：在受限沙箱下会失败；需在放行（完全权限）模式下运行 `fetch-qt.ps1`。
 7. **`windeployqt` 会多带 QtNetwork/TLS/网络插件与 D3dcompiler_47**：构建脚本在部署后删除，并由 `check-imports.ps1` 断言不存在。
+8. **FFmpeg + MSVC 构建**（`scripts\build-ffmpeg.ps1` 已处理）：
+   - 必须用 `bash -c` 而不是 `bash -lc`，否则 MSYS2 的 `/etc/profile` 重置 PATH，找不到 `cl`；
+   - MSYS2 的 `/usr/bin/link.exe` 会遮蔽 MSVC 链接器，构建前改名；
+   - `--disable-autodetect` 会关掉 D3D11VA，必须显式 `--enable-d3d11va`；
+   - 中文 VS 的 `CC_IDENT` 写进 `config.h` 后会让 RC 编译器报 `RC2001`，configure 后改写为 ASCII（`VSLANG=1033` 对 cl 横幅无效）；
+   - MSYS2 的 `make install` 把 `.lib/.def` 放在 `bin/`，脚本归位到 `lib/`（CMake 也同时兼容 `bin/`）。
 
 ## 6. 依赖策略
 
