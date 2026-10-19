@@ -28,6 +28,13 @@ lapian_apply_common_options(lapian_core)
 target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_core PUBLIC d3d11 dxgi)
 
+# T2.1 帧数学核心：纯 C++，不依赖 Qt/FFmpeg，先单测再接到 UI/解码。
+add_library(lapian_framemath STATIC
+  core/FrameMath.cpp
+  core/FrameMath.h)
+lapian_apply_common_options(lapian_framemath)
+target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # T1.1 媒体探测核心：纯 C++ + FFmpeg，不依赖 Qt，便于单测与后续复用。
 add_library(lapian_media STATIC
   media/MediaInfo.h

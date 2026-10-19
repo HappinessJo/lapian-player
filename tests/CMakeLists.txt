@@ -7,6 +7,12 @@ target_link_libraries(lapian_smoke PRIVATE Qt6::Core)
 
 add_test(NAME lapian_smoke COMMAND lapian_smoke)
 
+# T2.1 CFR 帧映射/总帧数/NDF 时间码测试；纯 C++，无 Qt/FFmpeg 依赖。
+add_executable(lapian_frame_math_test frame_math_test.cpp)
+lapian_apply_common_options(lapian_frame_math_test)
+target_link_libraries(lapian_frame_math_test PRIVATE lapian_framemath)
+add_test(NAME lapian_frame_math_test COMMAND lapian_frame_math_test)
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)
