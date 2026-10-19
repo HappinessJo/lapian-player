@@ -8,8 +8,10 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QStandardPaths>
@@ -20,6 +22,7 @@
 #include <QWidget>
 
 #include <cstddef>
+#include <cstdio>
 #include <memory>
 #include <string>
 
@@ -88,21 +91,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(play_action_, &QAction::triggered, this, &MainWindow::TogglePlayback);
   addAction(play_action_);
 
+  // 步进键由 GfxWidget 自己处理（300ms 后 70ms 连发）；不再设 QAction 快捷键，
+  // 避免 QAction 与 GfxWidget 双触发。
   prev_action_ = new QAction(QStringLiteral("上一帧"), this);
-  prev_action_->setShortcuts(
-      {QKeySequence(Qt::Key_PageUp), QKeySequence(Qt::Key_Left)});
-  prev_action_->setShortcutContext(Qt::WindowShortcut);
   prev_action_->setEnabled(false);
   connect(prev_action_, &QAction::triggered, this, &MainWindow::StepBackward);
   addAction(prev_action_);
 
   next_action_ = new QAction(QStringLiteral("下一帧"), this);
-  next_action_->setShortcuts(
-      {QKeySequence(Qt::Key_PageDown), QKeySequence(Qt::Key_Right)});
-  next_action_->setShortcutContext(Qt::WindowShortcut);
   next_action_->setEnabled(false);
   connect(next_action_, &QAction::triggered, this, &MainWindow::StepForward);
   addAction(next_action_);
+
+  goto_action_ = new QAction(QStringLiteral("跳到帧..."), this);
+  goto_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+G")));
+  goto_action_->setShortcutContext(Qt::WindowShortcut);
+  goto_action_->setEnabled(false);
+  connect(goto_action_, &QAction::triggered, this, &MainWindow::ShowGotoDialog);
+  addAction(goto_action_);
 
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
@@ -125,6 +131,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(gfx_, &GfxWidget::stepRequested, this, [this](int delta) {
     GoToFrame(current_frame_ + delta);
   });
+  connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
 }
 
 MainWindow::~MainWindow() = default;
@@ -149,6 +156,9 @@ void MainWindow::ShowEmptyState() {
   }
   if (next_action_ != nullptr) {
     next_action_->setEnabled(false);
+  }
+  if (goto_action_ != nullptr) {
+    goto_action_->setEnabled(false);
   }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
@@ -205,6 +215,7 @@ void MainWindow::OpenFile(const QString& path) {
   const bool can_seek = session_->index().IsReady() && !session_->index().empty();
   prev_action_->setEnabled(can_seek);
   next_action_->setEnabled(can_seek);
+  goto_action_->setEnabled(can_seek);
 
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -223,6 +234,81 @@ void MainWindow::OpenFile(const QString& path) {
   } else {
     statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
   }
+}
+
+void MainWindow::ShowGotoDialog() {
+  if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
+    return;
+  }
+  bool ok = false;
+  const QString input = QInputDialog::getText(
+      this, QStringLiteral("跳到帧"),
+      QStringLiteral("帧号（0 基）或 HH:MM:SS:FF"),
+      QLineEdit::Normal, QString::number(current_frame_), &ok);
+  if (!ok) {
+    return;
+  }
+  const QString text = input.trimmed();
+  if (text.isEmpty()) {
+    return;
+  }
+  if (!ApplyGotoText(text)) {
+    QMessageBox::warning(this, QStringLiteral("跳转失败"),
+                         QStringLiteral("无法识别帧号或 HH:MM:SS:FF"));
+  }
+}
+
+bool MainWindow::ApplyGotoText(const QString& text) {
+  if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
+    return false;
+  }
+
+  std::int64_t target = -1;
+  bool numeric = false;
+  const std::int64_t as_number = text.toLongLong(&numeric);
+  if (numeric) {
+    target = as_number;
+  } else {
+    const lapian::media::MediaInfo& info = session_->info();
+    const lapian::core::FrameRate rate(info.video.frame_rate.num, info.video.frame_rate.den);
+    if (session_->IsVfrSuspect()) {
+      int hours = 0;
+      int minutes = 0;
+      int seconds = 0;
+      int frames = 0;
+      const QByteArray bytes = text.toLatin1();
+      if (std::sscanf(bytes.constData(), "%d:%d:%d:%d", &hours, &minutes, &seconds, &frames) !=
+          4) {
+        return false;
+      }
+      const double nominal = rate.valid() ? static_cast<double>(rate.NominalFps()) : 30.0;
+      const double time_seconds = hours * 3600.0 + minutes * 60.0 + seconds +
+                                  static_cast<double>(frames) / nominal;
+      target = session_->index().FrameOfPts(
+          static_cast<std::int64_t>(time_seconds * 1'000'000.0));
+    } else {
+      const lapian::core::TimecodeFormatter formatter(rate);
+      if (!formatter.valid() || !formatter.Parse(text.toStdString(), &target)) {
+        return false;
+      }
+    }
+  }
+
+  if (target < 0) {
+    return false;
+  }
+  const std::int64_t last_frame =
+      static_cast<std::int64_t>(session_->index().size()) - 1;
+  const std::int64_t clamped = lapian::core::ClampFrame(target, last_frame);
+  GoToFrame(clamped);
+  if (clamped != target) {
+    statusBar()->showMessage(QStringLiteral("帧号越界，已到边界 %1").arg(clamped), 4000);
+  }
+  return true;
+}
+
+void MainWindow::GoToInputForTest(const QString& text) {
+  ApplyGotoText(text.trimmed());
 }
 
 void MainWindow::TogglePlayback() {

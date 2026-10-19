@@ -6,7 +6,9 @@
 
 struct AVFrame;
 struct ID3D11Device;
+class QFocusEvent;
 class QKeyEvent;
+class QTimer;
 
 namespace lapian::gfx {
 class D3D11Device;
@@ -34,12 +36,15 @@ class GfxWidget : public QWidget {
   void deviceError(const QString& message);
   void playPauseRequested();
   void stepRequested(int delta);
+  void gotoRequested();
 
  protected:
   void showEvent(QShowEvent* event) override;
   void paintEvent(QPaintEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
+  void keyReleaseEvent(QKeyEvent* event) override;
+  void focusOutEvent(QFocusEvent* event) override;
 
  private:
   bool EnsureReady();
@@ -51,4 +56,7 @@ class GfxWidget : public QWidget {
   std::unique_ptr<lapian::gfx::VideoRenderer> video_renderer_;
   bool init_failed_ = false;
   bool device_lost_reported_ = false;
+  QTimer* step_timer_ = nullptr;
+  int step_direction_ = 0;
+  bool step_repeat_started_ = false;
 };

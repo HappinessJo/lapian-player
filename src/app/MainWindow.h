@@ -35,6 +35,8 @@ class MainWindow : public QMainWindow {
   void GoToFrame(std::int64_t frame);
   // T1.5 自动化验证入口，等价于按一次 Space；不改变默认“打开不播放”。
   void StartPlaybackForTest();
+  // T2.6 自动化验证入口：与 Ctrl+G 输入框使用同一套解析。
+  void GoToInputForTest(const QString& text);
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -42,6 +44,7 @@ class MainWindow : public QMainWindow {
 
  private slots:
   void OpenDialog();
+  void ShowGotoDialog();
   void StepBackward();
   void StepForward();
   void TogglePlayback();
@@ -53,6 +56,7 @@ class MainWindow : public QMainWindow {
 
  private:
   void ShowEmptyState();
+  bool ApplyGotoText(const QString& text);
   void ShowOpenError(const QString& message);
   void SaveCurrentStatePlaceholder();
 
@@ -63,6 +67,7 @@ class MainWindow : public QMainWindow {
   QAction* play_action_ = nullptr;
   QAction* prev_action_ = nullptr;
   QAction* next_action_ = nullptr;
+  QAction* goto_action_ = nullptr;
   QString base_info_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;

@@ -1,10 +1,12 @@
 #include "app/GfxWidget.h"
 
 #include <QDebug>
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QTimer>
 
 #include <cmath>
 #include <string>
@@ -28,6 +30,19 @@ GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
   setAutoFillBackground(false);
   setMinimumSize(480, 270);
   setFocusPolicy(Qt::StrongFocus);
+
+  step_timer_ = new QTimer(this);
+  step_timer_->setTimerType(Qt::PreciseTimer);
+  connect(step_timer_, &QTimer::timeout, this, [this]() {
+    if (step_direction_ == 0) {
+      return;
+    }
+    if (!step_repeat_started_) {
+      step_repeat_started_ = true;
+      step_timer_->setInterval(70);
+    }
+    emit stepRequested(step_direction_);
+  });
 }
 
 GfxWidget::~GfxWidget() = default;
@@ -166,20 +181,51 @@ void GfxWidget::resizeEvent(QResizeEvent* event) {
 }
 
 void GfxWidget::keyPressEvent(QKeyEvent* event) {
+  if (event->modifiers().testFlag(Qt::ControlModifier) && event->key() == Qt::Key_G &&
+      !event->isAutoRepeat()) {
+    emit gotoRequested();
+    event->accept();
+    return;
+  }
   if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
     emit playPauseRequested();
     event->accept();
     return;
   }
-  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left) {
-    emit stepRequested(-1);
-    event->accept();
-    return;
-  }
-  if (event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
-    emit stepRequested(1);
+  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left ||
+      event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
+    if (event->isAutoRepeat()) {
+      event->accept();  // 忽略 OS 重复，连发由自己的定时器控制
+      return;
+    }
+    step_direction_ =
+        (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left) ? -1 : 1;
+    step_repeat_started_ = false;
+    emit stepRequested(step_direction_);  // 首次立即
+    step_timer_->start(300);              // 300ms 后开始 ≥12Hz 连发
     event->accept();
     return;
   }
   QWidget::keyPressEvent(event);
+}
+
+void GfxWidget::keyReleaseEvent(QKeyEvent* event) {
+  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left ||
+      event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
+    if (!event->isAutoRepeat()) {
+      step_timer_->stop();
+      step_direction_ = 0;
+      step_repeat_started_ = false;
+    }
+    event->accept();
+    return;
+  }
+  QWidget::keyReleaseEvent(event);
+}
+
+void GfxWidget::focusOutEvent(QFocusEvent* event) {
+  step_timer_->stop();
+  step_direction_ = 0;
+  step_repeat_started_ = false;
+  QWidget::focusOutEvent(event);
 }
