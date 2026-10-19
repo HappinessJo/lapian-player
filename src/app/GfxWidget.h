@@ -33,6 +33,7 @@ class GfxWidget : public QWidget {
   void deviceReady(const QString& summary);
   void deviceError(const QString& message);
   void playPauseRequested();
+  void stepRequested(int delta);
 
  protected:
   void showEvent(QShowEvent* event) override;

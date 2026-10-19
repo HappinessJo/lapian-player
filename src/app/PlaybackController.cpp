@@ -41,6 +41,18 @@ double PlaybackController::PtsToSeconds(std::int64_t pts) const {
          static_cast<double>(time_base.den);
 }
 
+void PlaybackController::SetPosition(std::int64_t frame, std::int64_t pts_us) {
+  Pause();
+  current_frame_ = static_cast<int>(frame);
+  current_pts_seconds_ = static_cast<double>(pts_us) / 1.0e6;
+  start_media_seconds_ = current_pts_seconds_;
+  end_ = false;
+  has_pending_ = false;
+  pending_frame_ = 0;
+  pending_pts_seconds_ = 0.0;
+  pending_info_ = lapian::media::DecodedFrameInfo{};
+}
+
 void PlaybackController::Play() {
   if (session_ == nullptr || !session_->IsOpen() || playing_ || end_) {
     return;

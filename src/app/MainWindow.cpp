@@ -30,6 +30,7 @@ extern "C" {
 #include "app/GfxWidget.h"
 #include "app/InfoBar.h"
 #include "app/PlaybackController.h"
+#include "core/FrameMath.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
 
@@ -87,6 +88,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(play_action_, &QAction::triggered, this, &MainWindow::TogglePlayback);
   addAction(play_action_);
 
+  prev_action_ = new QAction(QStringLiteral("上一帧"), this);
+  prev_action_->setShortcuts(
+      {QKeySequence(Qt::Key_PageUp), QKeySequence(Qt::Key_Left)});
+  prev_action_->setShortcutContext(Qt::WindowShortcut);
+  prev_action_->setEnabled(false);
+  connect(prev_action_, &QAction::triggered, this, &MainWindow::StepBackward);
+  addAction(prev_action_);
+
+  next_action_ = new QAction(QStringLiteral("下一帧"), this);
+  next_action_->setShortcuts(
+      {QKeySequence(Qt::Key_PageDown), QKeySequence(Qt::Key_Right)});
+  next_action_->setShortcutContext(Qt::WindowShortcut);
+  next_action_->setEnabled(false);
+  connect(next_action_, &QAction::triggered, this, &MainWindow::StepForward);
+  addAction(next_action_);
+
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
   connect(playback_.get(), &PlaybackController::stateChanged, this,
@@ -105,6 +122,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(gfx_, &GfxWidget::deviceReady, this, &MainWindow::OnDeviceReady);
   connect(gfx_, &GfxWidget::deviceError, this, &MainWindow::OnDeviceError, Qt::QueuedConnection);
   connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
+  connect(gfx_, &GfxWidget::stepRequested, this, [this](int delta) {
+    GoToFrame(current_frame_ + delta);
+  });
 }
 
 MainWindow::~MainWindow() = default;
@@ -124,6 +144,13 @@ void MainWindow::ShowEmptyState() {
     play_action_->setEnabled(false);
     play_action_->setText(QStringLiteral("播放"));
   }
+  if (prev_action_ != nullptr) {
+    prev_action_->setEnabled(false);
+  }
+  if (next_action_ != nullptr) {
+    next_action_->setEnabled(false);
+  }
+  current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
   statusBar()->showMessage(QStringLiteral("将视频拖到这里，或按 Ctrl+O 打开"));
@@ -173,7 +200,11 @@ void MainWindow::OpenFile(const QString& path) {
   SaveCurrentStatePlaceholder();
   session_ = std::move(candidate);
   playback_->SetSession(session_.get());
+  current_frame_ = 0;
   play_action_->setEnabled(true);
+  const bool can_seek = session_->index().IsReady() && !session_->index().empty();
+  prev_action_->setEnabled(can_seek);
+  next_action_->setEnabled(can_seek);
 
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -214,6 +245,43 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
   if (info_bar_ != nullptr) {
     info_bar_->SetFrame(frame_index);
   }
+  current_frame_ = frame_index;
+}
+
+void MainWindow::StepBackward() {
+  if (session_ != nullptr && session_->IsOpen()) {
+    GoToFrame(current_frame_ - 1);
+  }
+}
+
+void MainWindow::StepForward() {
+  if (session_ != nullptr && session_->IsOpen()) {
+    GoToFrame(current_frame_ + 1);
+  }
+}
+
+void MainWindow::GoToFrame(std::int64_t frame) {
+  if (session_ == nullptr || !session_->IsOpen() || !session_->index().IsReady() ||
+      session_->index().empty()) {
+    return;
+  }
+  const std::int64_t last_frame =
+      static_cast<std::int64_t>(session_->index().size()) - 1;
+  const std::int64_t target = lapian::core::ClampFrame(frame, last_frame);
+  playback_->Pause();
+
+  lapian::media::DecodedFrameInfo info;
+  std::string error;
+  if (!session_->SeekToFrame(target, &info, &error)) {
+    statusBar()->showMessage(QStringLiteral("跳帧失败：") + QString::fromStdString(error), 5000);
+    return;
+  }
+
+  gfx_->SetVideoFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees);
+  info_bar_->SetFrame(static_cast<int>(target));
+  playback_->SetPosition(target, info.pts_us);
+  current_frame_ = target;
+  statusBar()->showMessage(QStringLiteral("第 %1 帧").arg(target), 2000);
 }
 
 void MainWindow::OnPlaybackStateChanged(bool playing) {

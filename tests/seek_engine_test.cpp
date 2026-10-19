@@ -152,6 +152,8 @@ int main() {
   TestFile(device, "media/V9.mp4", {0, 1, 24, 59, 100, 119}, "V9");
   TestFile(device, "media/proxy/proxy-V1.mp4", {0, 1, 24, 100, 359, 719}, "proxy-V1");
   TestFile(device, "media/测试.mp4", {0, 1, 100, 1000, 3000, 4572}, "real-1080p30");
+  TestFile(device, "build/test-media/real-gop2s-full.mp4", {0, 1, 100, 1000, 3000, 4572},
+           "2s-GOP");
   TestFallback(device);
 
   if (g_failures > 0) {

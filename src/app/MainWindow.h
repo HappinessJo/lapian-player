@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QString>
 
+#include <cstdint>
 #include <memory>
 
 struct AVFrame;
@@ -30,6 +31,8 @@ class MainWindow : public QMainWindow {
 
   // 打开本地文件；成功才替换当前会话，失败保留旧画面。
   void OpenFile(const QString& path);
+  // 跳到 0 基帧号；成功时画面/信息栏同步。T2.4/T2.6 共用。
+  void GoToFrame(std::int64_t frame);
   // T1.5 自动化验证入口，等价于按一次 Space；不改变默认“打开不播放”。
   void StartPlaybackForTest();
 
@@ -39,6 +42,8 @@ class MainWindow : public QMainWindow {
 
  private slots:
   void OpenDialog();
+  void StepBackward();
+  void StepForward();
   void TogglePlayback();
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
@@ -56,8 +61,11 @@ class MainWindow : public QMainWindow {
   QLabel* status_label_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* play_action_ = nullptr;
+  QAction* prev_action_ = nullptr;
+  QAction* next_action_ = nullptr;
   QString base_info_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;
+  std::int64_t current_frame_ = 0;
   bool error_shown_ = false;
 };

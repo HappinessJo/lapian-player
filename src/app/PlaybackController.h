@@ -23,6 +23,8 @@ class PlaybackController : public QObject {
   ~PlaybackController() override;
 
   void SetSession(lapian::media::MediaSession* session);
+  // T2.4：seek 后同步播放位置；解码器已经停在目标帧之后。
+  void SetPosition(std::int64_t frame, std::int64_t pts_us);
   void Play();
   void Pause();
   void Toggle();

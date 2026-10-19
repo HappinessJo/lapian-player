@@ -171,5 +171,15 @@ void GfxWidget::keyPressEvent(QKeyEvent* event) {
     event->accept();
     return;
   }
+  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left) {
+    emit stepRequested(-1);
+    event->accept();
+    return;
+  }
+  if (event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
+    emit stepRequested(1);
+    event->accept();
+    return;
+  }
   QWidget::keyPressEvent(event);
 }
