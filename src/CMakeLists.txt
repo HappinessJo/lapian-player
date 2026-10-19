@@ -60,7 +60,9 @@ qt_add_executable(lapian WIN32
   app/MainWindow.cpp
   app/MainWindow.h
   app/GfxWidget.cpp
-  app/GfxWidget.h)
+  app/GfxWidget.h
+  app/PlaybackController.cpp
+  app/PlaybackController.h)
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")

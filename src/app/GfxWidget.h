@@ -6,6 +6,7 @@
 
 struct AVFrame;
 struct ID3D11Device;
+class QKeyEvent;
 
 namespace lapian::gfx {
 class D3D11Device;
@@ -31,11 +32,13 @@ class GfxWidget : public QWidget {
  signals:
   void deviceReady(const QString& summary);
   void deviceError(const QString& message);
+  void playPauseRequested();
 
  protected:
   void showEvent(QShowEvent* event) override;
   void paintEvent(QPaintEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
+  void keyPressEvent(QKeyEvent* event) override;
 
  private:
   bool EnsureReady();

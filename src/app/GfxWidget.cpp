@@ -1,6 +1,7 @@
 #include "app/GfxWidget.h"
 
 #include <QDebug>
+#include <QKeyEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -162,4 +163,13 @@ void GfxWidget::resizeEvent(QResizeEvent* event) {
     UpdateSwapChainSize();
     update();
   }
+}
+
+void GfxWidget::keyPressEvent(QKeyEvent* event) {
+  if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+    emit playPauseRequested();
+    event->accept();
+    return;
+  }
+  QWidget::keyPressEvent(event);
 }

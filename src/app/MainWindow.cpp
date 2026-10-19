@@ -26,6 +26,7 @@ extern "C" {
 }
 
 #include "app/GfxWidget.h"
+#include "app/PlaybackController.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
 
@@ -69,6 +70,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(open_action_, &QAction::triggered, this, &MainWindow::OpenDialog);
   addAction(open_action_);
 
+  play_action_ = new QAction(QStringLiteral("播放"), this);
+  play_action_->setShortcut(Qt::Key_Space);
+  play_action_->setShortcutContext(Qt::WindowShortcut);
+  play_action_->setEnabled(false);
+  connect(play_action_, &QAction::triggered, this, &MainWindow::TogglePlayback);
+  addAction(play_action_);
+
+  playback_ = std::make_unique<PlaybackController>(this);
+  connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
+  connect(playback_.get(), &PlaybackController::stateChanged, this,
+          &MainWindow::OnPlaybackStateChanged);
+  connect(playback_.get(), &PlaybackController::reachedEnd, this, &MainWindow::OnPlaybackEnded);
+
   status_label_ = new QLabel(this);
   status_label_->setObjectName(QStringLiteral("statusInfo"));
   status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -80,14 +94,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
   connect(gfx_, &GfxWidget::deviceReady, this, &MainWindow::OnDeviceReady);
   connect(gfx_, &GfxWidget::deviceError, this, &MainWindow::OnDeviceError, Qt::QueuedConnection);
+  connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
 }
 
 MainWindow::~MainWindow() = default;
 
 void MainWindow::ShowEmptyState() {
+  if (playback_ != nullptr) {
+    playback_->Pause();
+    playback_->SetSession(nullptr);
+  }
   if (gfx_ != nullptr) {
     gfx_->ClearVideoFrame();
   }
+  if (play_action_ != nullptr) {
+    play_action_->setEnabled(false);
+    play_action_->setText(QStringLiteral("播放"));
+  }
+  media_status_prefix_.clear();
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
   statusBar()->showMessage(QStringLiteral("将视频拖到这里，或按 Ctrl+O 打开"));
@@ -115,6 +139,10 @@ void MainWindow::OpenFile(const QString& path) {
     return;
   }
 
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
+
   const QByteArray utf8 = path.toUtf8();
   const std::string path_utf8(utf8.constData(), static_cast<std::size_t>(utf8.size()));
 
@@ -132,6 +160,8 @@ void MainWindow::OpenFile(const QString& path) {
   // T1.4 占位：当前还没有标记/备注可写；T6 在这里保存旧文件状态。
   SaveCurrentStatePlaceholder();
   session_ = std::move(candidate);
+  playback_->SetSession(session_.get());
+  play_action_->setEnabled(true);
 
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -141,14 +171,15 @@ void MainWindow::OpenFile(const QString& path) {
   setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
 
   const QString vfr = session_->IsVfrSuspect() ? QStringLiteral(" · VFR") : QString();
-  status_label_->setText(
-      QStringLiteral("%1 · %2×%3 · %4fps · %5 · 第 0 帧%6")
+  media_status_prefix_ =
+      QStringLiteral("%1 · %2×%3 · %4fps · %5%6")
           .arg(file_info.fileName())
           .arg(info.video.width)
           .arg(info.video.height)
           .arg(info.video.frame_rate.ToDouble(), 0, 'f', 3)
           .arg(frame.hardware ? QStringLiteral("硬解") : QStringLiteral("软解"))
-          .arg(vfr));
+          .arg(vfr);
+  status_label_->setText(media_status_prefix_ + QStringLiteral(" · 第 0 帧"));
 
   if (session_->IsVfrSuspect()) {
     statusBar()->showMessage(
@@ -156,6 +187,38 @@ void MainWindow::OpenFile(const QString& path) {
   } else {
     statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
   }
+}
+
+void MainWindow::TogglePlayback() {
+  if (playback_ == nullptr || !session_ || !session_->IsOpen()) {
+    return;
+  }
+  playback_->Toggle();
+}
+
+void MainWindow::StartPlaybackForTest() {
+  if (playback_ != nullptr && session_ && session_->IsOpen() && !playback_->IsPlaying()) {
+    playback_->Play();
+  }
+}
+
+void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
+  if (gfx_ != nullptr && frame != nullptr) {
+    gfx_->SetVideoFrame(frame, rotation);
+  }
+  status_label_->setText(media_status_prefix_ +
+                         QStringLiteral(" · 第 %1 帧").arg(frame_index));
+}
+
+void MainWindow::OnPlaybackStateChanged(bool playing) {
+  play_action_->setText(playing ? QStringLiteral("暂停") : QStringLiteral("播放"));
+  statusBar()->showMessage(playing ? QStringLiteral("播放中") : QStringLiteral("已暂停"), 2000);
+}
+
+void MainWindow::OnPlaybackEnded() {
+  play_action_->setText(QStringLiteral("播放"));
+  play_action_->setEnabled(false);
+  statusBar()->showMessage(QStringLiteral("播放结束"), 5000);
 }
 
 void MainWindow::ShowOpenError(const QString& message) {

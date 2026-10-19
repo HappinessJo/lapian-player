@@ -5,11 +5,14 @@
 
 #include <memory>
 
+struct AVFrame;
+
 class QAction;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
 class GfxWidget;
+class PlaybackController;
 
 namespace lapian::media {
 class MediaSession;
@@ -26,6 +29,8 @@ class MainWindow : public QMainWindow {
 
   // 打开本地文件；成功才替换当前会话，失败保留旧画面。
   void OpenFile(const QString& path);
+  // T1.5 自动化验证入口，等价于按一次 Space；不改变默认“打开不播放”。
+  void StartPlaybackForTest();
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -33,6 +38,10 @@ class MainWindow : public QMainWindow {
 
  private slots:
   void OpenDialog();
+  void TogglePlayback();
+  void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
+  void OnPlaybackStateChanged(bool playing);
+  void OnPlaybackEnded();
   void OnDeviceReady(const QString& summary);
   void OnDeviceError(const QString& message);
 
@@ -44,7 +53,10 @@ class MainWindow : public QMainWindow {
   GfxWidget* gfx_ = nullptr;
   QLabel* status_label_ = nullptr;
   QAction* open_action_ = nullptr;
+  QAction* play_action_ = nullptr;
   QString base_info_;
+  QString media_status_prefix_;
   std::unique_ptr<lapian::media::MediaSession> session_;
+  std::unique_ptr<PlaybackController> playback_;
   bool error_shown_ = false;
 };

@@ -17,10 +17,13 @@ int main(int argc, char* argv[]) {
 
   // T1.4：支持 --file <path> 与系统文件关联传入的第一个本地路径。
   QString file_path;
+  bool auto_play = false;
   const QStringList arguments = QCoreApplication::arguments();
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--play")) {
+      auto_play = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -29,8 +32,11 @@ int main(int argc, char* argv[]) {
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
-    QTimer::singleShot(0, &window, [&window, file_path]() {
+    QTimer::singleShot(0, &window, [&window, file_path, auto_play]() {
       window.OpenFile(file_path);
+      if (auto_play) {
+        window.StartPlaybackForTest();
+      }
     });
   }
   return QApplication::exec();
