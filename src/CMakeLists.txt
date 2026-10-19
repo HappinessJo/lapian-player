@@ -60,6 +60,8 @@ add_library(lapian_media STATIC
   media/MediaProbe.h
   media/MediaSession.cpp
   media/MediaSession.h
+  media/PreviewDecoder.cpp
+  media/PreviewDecoder.h
   media/SeekEngine.cpp
   media/SeekEngine.h
   media/VideoDecoder.cpp

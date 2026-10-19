@@ -12,6 +12,7 @@ class QAction;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
+class QTimer;
 class GfxWidget;
 class InfoBar;
 class PlaybackController;
@@ -19,6 +20,7 @@ class TimelineWidget;
 
 namespace lapian::media {
 class MediaSession;
+class PreviewDecoder;
 }
 
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
@@ -54,6 +56,7 @@ class MainWindow : public QMainWindow {
   void OnScrubStarted(qint64 frame);
   void OnScrubTargetChanged(qint64 frame);
   void OnScrubFinished(qint64 frame);
+  void OnPreviewTick();
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
   void OnPlaybackEnded();
@@ -65,6 +68,7 @@ class MainWindow : public QMainWindow {
   bool ApplyGotoText(const QString& text);
   bool IsTextInputFocused() const;
   void ShowScrubTarget(std::int64_t frame);
+  void StopPreview();
   void ShowOpenError(const QString& message);
   void SaveCurrentStatePlaceholder();
 
@@ -82,6 +86,8 @@ class MainWindow : public QMainWindow {
   QString base_info_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;
+  std::unique_ptr<lapian::media::PreviewDecoder> preview_;
+  QTimer* preview_timer_ = nullptr;
   std::int64_t current_frame_ = 0;
   bool error_shown_ = false;
 };

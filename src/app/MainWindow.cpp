@@ -20,6 +20,7 @@
 #include <QStatusBar>
 #include <QString>
 #include <QTextEdit>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -31,6 +32,7 @@
 
 extern "C" {
 #include <libavutil/avutil.h>
+#include <libavutil/frame.h>
 }
 
 #include "app/GfxWidget.h"
@@ -40,6 +42,7 @@ extern "C" {
 #include "core/FrameMath.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
+#include "media/PreviewDecoder.h"
 
 namespace {
 
@@ -136,6 +139,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
           &MainWindow::OnPlaybackStateChanged);
   connect(playback_.get(), &PlaybackController::reachedEnd, this, &MainWindow::OnPlaybackEnded);
 
+  preview_timer_ = new QTimer(this);
+  preview_timer_->setInterval(16);
+  preview_timer_->setTimerType(Qt::PreciseTimer);
+  connect(preview_timer_, &QTimer::timeout, this, &MainWindow::OnPreviewTick);
+
   status_label_ = new QLabel(this);
   status_label_->setObjectName(QStringLiteral("statusInfo"));
   status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -161,6 +169,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() = default;
 
 void MainWindow::ShowEmptyState() {
+  StopPreview();
+  preview_.reset();
   if (playback_ != nullptr) {
     playback_->Pause();
     playback_->SetSession(nullptr);
@@ -241,6 +251,9 @@ void MainWindow::OpenFile(const QString& path) {
 
   // T1.4 占位：当前还没有标记/备注可写；T6 在这里保存旧文件状态。
   SaveCurrentStatePlaceholder();
+  // 旧预览器持有旧索引指针，必须在替换 session 之前停掉。
+  StopPreview();
+  preview_.reset();
   session_ = std::move(candidate);
   playback_->SetSession(session_.get());
   current_frame_ = 0;
@@ -273,6 +286,13 @@ void MainWindow::OpenFile(const QString& path) {
         QStringLiteral("可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"), 8000);
   } else {
     statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
+  }
+
+  // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
+  if (can_seek) {
+    preview_ = std::make_unique<lapian::media::PreviewDecoder>();
+    preview_->Configure(session_->path_utf8(), info.video.stream_index,
+                        &session_->index());
   }
 }
 
@@ -355,6 +375,13 @@ void MainWindow::TogglePlayback() {
   if (playback_ == nullptr || !session_ || !session_->IsOpen()) {
     return;
   }
+  // 拖动中按 Space：先放弃预览，避免预览帧在播放开始后覆盖画面。
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    preview_timer_->stop();
+    if (preview_ != nullptr) {
+      preview_->End();
+    }
+  }
   playback_->Toggle();
 }
 
@@ -403,7 +430,13 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     playback_->Pause();
   }
   ShowScrubTarget(frame);
-  statusBar()->showMessage(QStringLiteral("拖动定位：松开后精确到帧"), 1000);
+  if (preview_ != nullptr) {
+    preview_->Begin(frame);
+    if (preview_timer_ != nullptr && !preview_timer_->isActive()) {
+      preview_timer_->start();
+    }
+  }
+  statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
 }
 
 void MainWindow::OnScrubTargetChanged(qint64 frame) {
@@ -411,29 +444,49 @@ void MainWindow::OnScrubTargetChanged(qint64 frame) {
     return;
   }
   ShowScrubTarget(frame);
+  if (preview_ != nullptr) {
+    preview_->UpdateTarget(frame);
+  }
 }
 
 void MainWindow::OnScrubFinished(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
     return;
   }
+  if (preview_timer_ != nullptr) {
+    preview_timer_->stop();
+  }
+  if (preview_ != nullptr) {
+    preview_->End();
+  }
   const std::int64_t last_frame =
       static_cast<std::int64_t>(session_->index().size()) - 1;
   const std::int64_t target =
       lapian::core::ClampFrame(frame, last_frame);
-  if (target == current_frame_) {
-    // 目标就是当前已呈现帧，不需要再解码一次；把拖拽期间的临时 UI 收回。
-    if (timeline_ != nullptr) {
-      timeline_->SetCurrentFrame(current_frame_);
-    }
-    if (info_bar_ != nullptr) {
-      info_bar_->SetFrame(static_cast<int>(current_frame_));
-    }
-    statusBar()->showMessage(
-        QStringLiteral("已暂停在第 %1 帧").arg(static_cast<qlonglong>(current_frame_)), 2000);
+  // 预览帧可能是降采样的，且不一定正好是目标帧；松手必须回到精确帧。
+  GoToFrame(target);
+}
+
+void MainWindow::StopPreview() {
+  if (preview_timer_ != nullptr) {
+    preview_timer_->stop();
+  }
+  if (preview_ != nullptr) {
+    preview_->Close();
+  }
+}
+
+void MainWindow::OnPreviewTick() {
+  if (preview_ == nullptr || session_ == nullptr || !session_->IsOpen() ||
+      gfx_ == nullptr) {
     return;
   }
-  GoToFrame(target);
+  AVFrame* frame = preview_->TakeLatestFrame();
+  if (frame == nullptr) {
+    return;
+  }
+  gfx_->SetVideoFrame(frame, session_->info().rotation.counterclockwise_degrees);
+  av_frame_free(&frame);
 }
 
 void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
