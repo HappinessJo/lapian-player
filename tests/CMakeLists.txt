@@ -67,3 +67,14 @@ add_test(NAME lapian_frame_index_test COMMAND lapian_frame_index_test)
 set_tests_properties(lapian_frame_index_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T2.3 精确 seek：关键帧 backward + 目标帧 PTS + 降级计数。
+add_executable(lapian_seek_engine_test seek_engine_test.cpp)
+lapian_apply_common_options(lapian_seek_engine_test)
+target_link_libraries(lapian_seek_engine_test PRIVATE lapian_core lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_seek_engine_test)
+
+add_test(NAME lapian_seek_engine_test COMMAND lapian_seek_engine_test)
+set_tests_properties(lapian_seek_engine_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)

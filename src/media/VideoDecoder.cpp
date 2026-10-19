@@ -19,6 +19,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/pixdesc.h>
 }
 #if defined(_MSC_VER)
@@ -286,6 +287,9 @@ struct VideoDecoder::Impl {
       info->pts = 0;
     }
     info->duration = frame->duration;
+    const AVRational time_base = format->streams[video_stream]->time_base;
+    info->pts_us = av_rescale_q(info->pts, time_base, AV_TIME_BASE_Q);
+    info->duration_us = av_rescale_q(frame->duration, time_base, AV_TIME_BASE_Q);
     info->key_frame = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
     info->hardware = frame->hw_frames_ctx != nullptr || frame->format == AV_PIX_FMT_D3D11;
     info->av_frame = frame;
@@ -375,6 +379,25 @@ struct VideoDecoder::Impl {
     *error = "解码循环超过上限";
     return false;
   }
+
+  bool SeekToPts(std::int64_t pts_us, std::string* error) {
+    if (!IsOpen()) {
+      *error = "解码器未打开";
+      return false;
+    }
+    const AVRational time_base = format->streams[video_stream]->time_base;
+    const std::int64_t target = av_rescale_q(pts_us, AV_TIME_BASE_Q, time_base);
+    const int ret = av_seek_frame(format, video_stream, target, AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) {
+      *error = "seek 失败: " + AvErrorText(ret);
+      return false;
+    }
+    avcodec_flush_buffers(decoder);
+    av_frame_unref(frame);
+    eof_sent = false;
+    packet_valid = false;
+    return true;
+  }
 };
 
 VideoDecoder::VideoDecoder() : impl_(std::make_unique<Impl>()) {}
@@ -455,6 +478,14 @@ bool VideoDecoder::DecodeNextFrame(DecodedFrameInfo* info, std::string* error) {
   }
   error->clear();
   return impl_->DecodeInternal(false, info, error);
+}
+
+bool VideoDecoder::SeekToPts(std::int64_t pts_us, std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  error->clear();
+  return impl_->SeekToPts(pts_us, error);
 }
 
 bool VideoDecoder::IsOpen() const { return impl_->IsOpen(); }

@@ -16,8 +16,10 @@ struct DecodedFrameInfo {
   int pixel_format = -1;  // AVPixelFormat
   std::string pixel_format_name;
   int bit_depth = 8;
-  std::int64_t pts = 0;
-  std::int64_t duration = 0;
+  std::int64_t pts = 0;         // 流 time_base
+  std::int64_t duration = 0;    // 流 time_base
+  std::int64_t pts_us = 0;      // AV_TIME_BASE 微秒
+  std::int64_t duration_us = 0; // AV_TIME_BASE 微秒
   bool key_frame = false;
   bool hardware = false;
   const AVFrame* av_frame = nullptr;
@@ -44,6 +46,8 @@ class VideoDecoder {
 
   bool DecodeFirstFrame(DecodedFrameInfo* info, std::string* error);
   bool DecodeNextFrame(DecodedFrameInfo* info, std::string* error);
+  // T2.3：seek 到目标 PTS 之前最近关键帧；之后用 DecodeNextFrame 向前解码。
+  bool SeekToPts(std::int64_t pts_us, std::string* error);
 
   bool IsOpen() const;
   bool HardwareActive() const;

@@ -50,6 +50,8 @@ add_library(lapian_media STATIC
   media/MediaProbe.h
   media/MediaSession.cpp
   media/MediaSession.h
+  media/SeekEngine.cpp
+  media/SeekEngine.h
   media/VideoDecoder.cpp
   media/VideoDecoder.h)
 lapian_apply_common_options(lapian_media)
