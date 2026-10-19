@@ -34,3 +34,14 @@ add_test(NAME lapian_video_decoder_test COMMAND lapian_video_decoder_test)
 set_tests_properties(lapian_video_decoder_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T1.3 离屏渲染测试：D3D11 RTV 回读，不建窗口。
+add_executable(lapian_video_renderer_test video_renderer_test.cpp)
+lapian_apply_common_options(lapian_video_renderer_test)
+target_link_libraries(lapian_video_renderer_test PRIVATE lapian_core lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_video_renderer_test)
+
+add_test(NAME lapian_video_renderer_test COMMAND lapian_video_renderer_test)
+set_tests_properties(lapian_video_renderer_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)

@@ -10,11 +10,13 @@
 
 #include "platform/gfx/D3D11Device.h"
 #include "platform/gfx/SwapChain.h"
+#include "platform/gfx/VideoRenderer.h"
 
 using lapian::gfx::D3D11Device;
 using lapian::gfx::DeviceInfo;
 using lapian::gfx::FeatureLevelName;
 using lapian::gfx::SwapChain;
+using lapian::gfx::VideoRenderer;
 
 GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
   // 独立 HWND + 自己绘制（D3D11 交换链），Qt 不在这个区域上画任何东西
@@ -33,7 +35,8 @@ bool GfxWidget::EnsureReady() {
   if (init_failed_) {
     return false;
   }
-  if (device_ && swap_chain_ && device_->IsValid() && swap_chain_->IsValid()) {
+  if (device_ && swap_chain_ && video_renderer_ && device_->IsValid() &&
+      swap_chain_->IsValid()) {
     return true;
   }
 
@@ -50,6 +53,14 @@ bool GfxWidget::EnsureReady() {
   if (!swap_chain_->Create(device_->device(), reinterpret_cast<HWND>(winId()), &error)) {
     init_failed_ = true;
     qWarning() << "D3D11 交换链创建失败:" << QString::fromStdString(error);
+    emit deviceError(QString::fromStdString(error));
+    return false;
+  }
+
+  video_renderer_ = std::make_unique<VideoRenderer>();
+  if (!video_renderer_->Initialize(device_->device(), swap_chain_->context(), &error)) {
+    init_failed_ = true;
+    qWarning() << "视频渲染器初始化失败:" << QString::fromStdString(error);
     emit deviceError(QString::fromStdString(error));
     return false;
   }
@@ -81,17 +92,53 @@ void GfxWidget::PresentFrame() {
   if (!swap_chain_ || !swap_chain_->IsValid()) {
     return;
   }
-  const HRESULT hr = swap_chain_->Render();
+  HRESULT hr = E_FAIL;
+  if (video_renderer_ && video_renderer_->HasFrame()) {
+    video_renderer_->Render(swap_chain_->render_target_view(), swap_chain_->width(),
+                            swap_chain_->height());
+    hr = swap_chain_->Present();
+  } else {
+    hr = swap_chain_->Render();
+  }
+
   if (D3D11Device::IsDeviceLost(hr)) {
     if (!device_lost_reported_) {
       device_lost_reported_ = true;
       qWarning() << "D3D11 设备丢失，销毁后等待重建";
       emit deviceError(QStringLiteral("显卡设备丢失（驱动重置或远程会话切换），已尝试重建。"));
     }
+    video_renderer_.reset();
     swap_chain_.reset();
     device_.reset();
     update();
   }
+}
+
+void GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees) {
+  if (!EnsureReady() || !video_renderer_) {
+    return;
+  }
+  std::string error;
+  if (!video_renderer_->SetFrame(frame, rotation_counterclockwise_degrees, &error)) {
+    qWarning() << "设置视频帧失败:" << QString::fromStdString(error);
+    emit deviceError(QString::fromStdString(error));
+    return;
+  }
+  update();
+}
+
+void GfxWidget::ClearVideoFrame() {
+  if (video_renderer_) {
+    video_renderer_->ClearFrame();
+  }
+  update();
+}
+
+ID3D11Device* GfxWidget::d3d_device() {
+  if (!EnsureReady() || !device_) {
+    return nullptr;
+  }
+  return device_->device();
 }
 
 void GfxWidget::showEvent(QShowEvent* event) {

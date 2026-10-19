@@ -468,4 +468,4 @@ B 站拉取、自动分镜、吸管取色、频谱视图、拖动音频擦洗、
 - ADR：[ADR-001 解码/渲染管线](docs/adr/ADR-001-decode-render-pipeline.md)、[ADR-002 时钟源](docs/adr/ADR-002-clock-source.md)、[ADR-003 VFR 帧模型](docs/adr/ADR-003-vfr-frame-model.md)、[ADR-004 依赖/许可/分发](docs/adr/ADR-004-dependency-and-licensing.md)、[ADR-005 预览与缓存](docs/adr/ADR-005-preview-and-cache.md)、[ADR-006 持久化](docs/adr/ADR-006-persistence.md)。
 - 任务：`tasks.md`（已按 v0.3 更新验收值）。
 - 规格：`spec.md` **v0.3 已应用**；P6/P7 方案 A 见 [spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)。
-- 下一步：T1.1/T1.2/T2.1 已完成代码；M1 开 **T1.3**（D3D11 渲染），M2 开 **T2.2**（VFR 检测/PTS 索引）。
+- 下一步：T1.1/T1.2/T1.3/T2.1 已完成代码；M1 开 **T1.4**（打开入口）与 **T1.5**（播放/时钟），M2 开 **T2.2**（VFR 检测/PTS 索引）。

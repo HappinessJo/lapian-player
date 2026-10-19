@@ -174,4 +174,11 @@ HRESULT SwapChain::Render() {
   return swap_chain_->Present(1, 0);
 }
 
+HRESULT SwapChain::Present() {
+  if (!swap_chain_) {
+    return E_FAIL;
+  }
+  return swap_chain_->Present(1, 0);
+}
+
 }  // namespace lapian::gfx

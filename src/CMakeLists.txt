@@ -23,10 +23,16 @@ add_library(lapian_core STATIC
   platform/gfx/D3D11Device.cpp
   platform/gfx/D3D11Device.h
   platform/gfx/SwapChain.cpp
-  platform/gfx/SwapChain.h)
+  platform/gfx/SwapChain.h
+  platform/gfx/VideoRenderer.cpp
+  platform/gfx/VideoRenderer.h
+  platform/gfx/VideoRenderer.hlsl
+  platform/gfx/VideoShaders.h)
 lapian_apply_common_options(lapian_core)
 target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_core PUBLIC d3d11 dxgi)
+target_link_libraries(lapian_core PUBLIC d3d11 dxgi lapian::ffmpeg)
+# 着色器已离线用 fxc 编译进 VideoShaders.h；不要让 MSBuild 再按默认 main 入口编译 .hlsl。
+set_source_files_properties(platform/gfx/VideoRenderer.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
 
 # T2.1 帧数学核心：纯 C++，不依赖 Qt/FFmpeg，先单测再接到 UI/解码。
 add_library(lapian_framemath STATIC
@@ -56,7 +62,7 @@ qt_add_executable(lapian WIN32
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(lapian PRIVATE lapian_core lapian::ffmpeg Qt6::Widgets)
+target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian::ffmpeg Qt6::Widgets)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 

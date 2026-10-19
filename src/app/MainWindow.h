@@ -14,6 +14,9 @@ class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(QWidget* parent = nullptr);
 
+  // T1.3 临时入口：命令行 --file 打开并显示首帧；T1.4 会替换为正式打开流程。
+  void LoadFileForTest(const QString& path);
+
  private slots:
   void OnDeviceReady(const QString& summary);
   void OnDeviceError(const QString& message);

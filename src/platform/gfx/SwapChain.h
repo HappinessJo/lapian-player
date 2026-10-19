@@ -28,12 +28,16 @@ class SwapChain {
 
   // 清屏 + Present(1, 0)；返回 HRESULT，设备丢失由调用方处理。
   HRESULT Render();
+  // T1.3：外部渲染器画完 RTV 后只调用 Present。
+  HRESULT Present();
 
   void Reset();
 
   bool IsValid() const { return swap_chain_ != nullptr; }
   UINT width() const { return width_; }
   UINT height() const { return height_; }
+  ID3D11RenderTargetView* render_target_view() const { return render_target_.Get(); }
+  ID3D11DeviceContext* context() const { return context_.Get(); }
 
  private:
   bool CreateRenderTargetView(std::string* error);

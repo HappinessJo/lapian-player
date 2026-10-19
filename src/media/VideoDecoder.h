@@ -5,6 +5,7 @@
 #include <string>
 
 struct AVFrame;
+struct ID3D11Device;
 
 namespace lapian::media {
 
@@ -35,6 +36,10 @@ class VideoDecoder {
   // video_stream_index < 0 时选第一条视频流。失败返回 false + 可读错误。
   bool Open(const std::string& utf8_path, int video_stream_index, bool prefer_hardware,
             std::string* error);
+  // T1.3：硬解必须和渲染器共用同一个 D3D11 设备，否则纹理不能跨设备拷贝。
+  bool OpenWithD3D11Device(const std::string& utf8_path, int video_stream_index,
+                           ID3D11Device* d3d11_device, bool prefer_hardware,
+                           std::string* error);
   void Close();
 
   bool DecodeFirstFrame(DecodedFrameInfo* info, std::string* error);

@@ -1,5 +1,7 @@
 #include "media/VideoDecoder.h"
 
+#include <d3d11.h>
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -16,6 +18,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/pixdesc.h>
 }
 #if defined(_MSC_VER)
@@ -86,6 +89,7 @@ struct VideoDecoder::Impl {
   bool packet_valid = false;
   std::string path;
   int requested_stream = -1;
+  ID3D11Device* external_device = nullptr;
 
   ~Impl() { Close(); }
 
@@ -112,7 +116,7 @@ struct VideoDecoder::Impl {
   bool IsOpen() const { return format != nullptr && decoder != nullptr && frame != nullptr; }
 
   bool OpenInternal(const std::string& utf8_path, int stream_index, bool prefer_hardware,
-                    std::string* error) {
+                    ID3D11Device* shared_d3d11_device, std::string* error) {
     AVFormatContext* raw_format = nullptr;
     int ret = avformat_open_input(&raw_format, utf8_path.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -167,12 +171,31 @@ struct VideoDecoder::Impl {
 
       if (hardware) {
         AVBufferRef* device = nullptr;
-        const int hw_ret =
-            av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
-        if (hw_ret < 0 || device == nullptr) {
+        if (shared_d3d11_device != nullptr) {
+          device = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
           if (device != nullptr) {
-            av_buffer_unref(&device);
+            auto* hw_device = reinterpret_cast<AVHWDeviceContext*>(device->data);
+            auto* d3d11_device =
+                reinterpret_cast<AVD3D11VADeviceContext*>(hw_device->hwctx);
+            // FFmpeg 的 hwdevice 释放路径会 Release 这个设备；先加引用，
+            // 避免把渲染器/窗口持有的设备提前释放。
+            shared_d3d11_device->AddRef();
+            d3d11_device->device = shared_d3d11_device;
+            if (av_hwdevice_ctx_init(device) < 0) {
+              av_buffer_unref(&device);
+            }
           }
+        } else {
+          const int hw_ret =
+              av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+          if (hw_ret < 0) {
+            if (device != nullptr) {
+              av_buffer_unref(&device);
+            }
+            device = nullptr;
+          }
+        }
+        if (device == nullptr) {
           avcodec_free_context(&context);
           return nullptr;
         }
@@ -233,6 +256,7 @@ struct VideoDecoder::Impl {
     packet_valid = false;
     path = utf8_path;
     requested_stream = selected;
+    external_device = shared_d3d11_device;
     return true;
   }
 
@@ -242,7 +266,7 @@ struct VideoDecoder::Impl {
     Close();
     path = saved_path;
     requested_stream = saved_stream;
-    return OpenInternal(saved_path, saved_stream, false, error);
+    return OpenInternal(saved_path, saved_stream, false, external_device, error);
   }
 
   bool FillInfo(DecodedFrameInfo* info) {
@@ -366,7 +390,30 @@ bool VideoDecoder::Open(const std::string& utf8_path, int video_stream_index, bo
   impl_->Close();
   impl_->path = utf8_path;
   impl_->requested_stream = video_stream_index;
-  if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, error)) {
+  impl_->external_device = nullptr;
+  if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, nullptr, error)) {
+    return true;
+  }
+  impl_->Close();
+  return false;
+}
+
+bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_stream_index,
+                                       ID3D11Device* d3d11_device, bool prefer_hardware,
+                                       std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  error->clear();
+  if (prefer_hardware && d3d11_device == nullptr) {
+    *error = "硬件解码需要与渲染器共用的 D3D11 设备";
+    return false;
+  }
+  impl_->Close();
+  impl_->path = utf8_path;
+  impl_->requested_stream = video_stream_index;
+  impl_->external_device = d3d11_device;
+  if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, d3d11_device, error)) {
     return true;
   }
   impl_->Close();
