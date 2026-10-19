@@ -6,3 +6,14 @@ target_compile_definitions(lapian_smoke PRIVATE LAPIAN_VERSION="${PROJECT_VERSIO
 target_link_libraries(lapian_smoke PRIVATE Qt6::Core)
 
 add_test(NAME lapian_smoke COMMAND lapian_smoke)
+
+# T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
+add_executable(lapian_media_probe_test media_probe_test.cpp)
+lapian_apply_common_options(lapian_media_probe_test)
+target_link_libraries(lapian_media_probe_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_media_probe_test)
+
+add_test(NAME lapian_media_probe_test COMMAND lapian_media_probe_test)
+set_tests_properties(lapian_media_probe_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)

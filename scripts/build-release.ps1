@@ -41,7 +41,9 @@ $cmakeArgs = @(
 Invoke-Tool -Exe $cmake -Arguments $cmakeArgs -Description 'CMake 配置'
 
 Write-Host '=== 2/7 构建（Release） ==='
-Invoke-Tool -Exe $cmake -Arguments @('--build', $BuildDir, '--config', 'Release', '--parallel') -Description '构建'
+# 本机 MSBuild 并行构建会无诊断地以退出码 1 结束（0 错误、0 警告），单线程可稳定通过；
+# 构建耗时不是首期指标，这里优先保证 build-release.ps1 可重复。
+Invoke-Tool -Exe $cmake -Arguments @('--build', $BuildDir, '--config', 'Release') -Description '构建'
 
 if (-not $SkipTests) {
   Write-Host '=== 3/7 单元测试 ==='

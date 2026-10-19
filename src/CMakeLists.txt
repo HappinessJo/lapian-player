@@ -28,6 +28,15 @@ lapian_apply_common_options(lapian_core)
 target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_core PUBLIC d3d11 dxgi)
 
+# T1.1 媒体探测核心：纯 C++ + FFmpeg，不依赖 Qt，便于单测与后续复用。
+add_library(lapian_media STATIC
+  media/MediaInfo.h
+  media/MediaProbe.cpp
+  media/MediaProbe.h)
+lapian_apply_common_options(lapian_media)
+target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_media PUBLIC lapian::ffmpeg)
+
 # 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
 qt_add_executable(lapian WIN32
   app/main.cpp
@@ -51,6 +60,14 @@ target_compile_definitions(lapian_env_check PRIVATE LAPIAN_VERSION="${PROJECT_VE
 target_link_libraries(lapian_env_check PRIVATE lapian_core lapian::ffmpeg Qt6::Core)
 lapian_copy_ffmpeg_dlls(lapian_env_check)
 lapian_set_output_dir(lapian_env_check)
+
+# T1.1 媒体探测开发工具（控制台；只读元数据，不渲染、不解码、不入分发）
+add_executable(lapian_media_probe
+  tools/media_probe/main.cpp)
+lapian_apply_common_options(lapian_media_probe)
+target_link_libraries(lapian_media_probe PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_media_probe)
+lapian_set_output_dir(lapian_media_probe)
 
 # T0.3 精确 seek 探针（控制台；不渲染、不缓存，只测关键帧回退+解码到目标帧的成本）
 add_executable(lapian_seek_probe
