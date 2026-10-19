@@ -15,6 +15,7 @@
 #endif
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/log.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -254,6 +255,10 @@ struct PreviewDecoder::Impl {
   }
 
   void Run() {
+    // 预览频繁 seek 会触发 H.264 “missing picture in access unit” 警告；
+    // 只保留 error 级别，避免刷屏影响 UI/日志与测量。
+    av_log_set_level(AV_LOG_ERROR);
+
     std::string local_path;
     int local_stream = -1;
     {

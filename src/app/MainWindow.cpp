@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
@@ -464,7 +465,18 @@ void MainWindow::OnScrubFinished(qint64 frame) {
   const std::int64_t target =
       lapian::core::ClampFrame(frame, last_frame);
   // 预览帧可能是降采样的，且不一定正好是目标帧；松手必须回到精确帧。
+  const bool timing = qEnvironmentVariableIsSet("LAPIAN_TIMING_LOG");
+  QElapsedTimer release_timer;
+  if (timing) {
+    release_timer.start();
+  }
   GoToFrame(target);
+  if (timing) {
+    std::fprintf(stderr, "T2.10 release_exact_ms=%lld frame=%lld\n",
+                 static_cast<long long>(release_timer.elapsed()),
+                 static_cast<long long>(target));
+    std::fflush(stderr);
+  }
 }
 
 void MainWindow::StopPreview() {
@@ -481,12 +493,22 @@ void MainWindow::OnPreviewTick() {
       gfx_ == nullptr) {
     return;
   }
+  const bool timing = qEnvironmentVariableIsSet("LAPIAN_TIMING_LOG");
+  QElapsedTimer tick_timer;
+  if (timing) {
+    tick_timer.start();
+  }
   AVFrame* frame = preview_->TakeLatestFrame();
   if (frame == nullptr) {
     return;
   }
   gfx_->SetVideoFrame(frame, session_->info().rotation.counterclockwise_degrees);
   av_frame_free(&frame);
+  if (timing && tick_timer.elapsed() > 200) {
+    std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",
+                 static_cast<long long>(tick_timer.elapsed()));
+    std::fflush(stderr);
+  }
 }
 
 void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
