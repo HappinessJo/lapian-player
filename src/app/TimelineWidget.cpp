@@ -2,8 +2,10 @@
 
 #include <QColor>
 #include <QFont>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPointF>
 #include <QPolygonF>
 #include <QRectF>
 #include <QResizeEvent>
@@ -53,6 +55,10 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
 void TimelineWidget::Clear() { SetFrameCount(0); }
 
 void TimelineWidget::SetFrameCount(std::int64_t count) {
+  if (scrubbing_) {
+    scrubbing_ = false;
+    follow_playhead_ = follow_before_scrub_;
+  }
   current_frame_ = 0;
   fit_mode_ = true;
   model_.SetFrameCount(count);
@@ -111,6 +117,66 @@ void TimelineWidget::SetPixelsPerFrame(double pixels_per_frame) {
   fit_mode_ = model_.IsAtFit();
   SyncScrollBar();
   update();
+}
+
+std::int64_t TimelineWidget::FrameAtPosition(const QPointF& position) const {
+  if (model_.frame_count() <= 0) {
+    return 0;
+  }
+  const double ratio = devicePixelRatioF();
+  double x = position.x();
+  if (ratio > 0.0) {
+    // 高 DPI 下先对齐到物理像素，再做帧格 floor。
+    x = std::floor(x * ratio) / ratio;
+  }
+  return model_.FrameAtX(x);
+}
+
+void TimelineWidget::mousePressEvent(QMouseEvent* event) {
+  if (event->button() != Qt::LeftButton || model_.frame_count() <= 0) {
+    QWidget::mousePressEvent(event);
+    return;
+  }
+  if (!scrubbing_) {
+    follow_before_scrub_ = follow_playhead_;
+    follow_playhead_ = false;
+  }
+  scrubbing_ = true;
+  drag_target_frame_ = FrameAtPosition(event->position());
+  SetCurrentFrame(drag_target_frame_);
+  emit scrubStarted(static_cast<qint64>(drag_target_frame_));
+  event->accept();
+}
+
+void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
+  if (!scrubbing_ || !(event->buttons() & Qt::LeftButton)) {
+    QWidget::mouseMoveEvent(event);
+    return;
+  }
+  const std::int64_t target = FrameAtPosition(event->position());
+  if (target != drag_target_frame_) {
+    drag_target_frame_ = target;
+    SetCurrentFrame(drag_target_frame_);
+    emit scrubTargetChanged(static_cast<qint64>(drag_target_frame_));
+  }
+  event->accept();
+}
+
+void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
+  if (event->button() != Qt::LeftButton || !scrubbing_) {
+    QWidget::mouseReleaseEvent(event);
+    return;
+  }
+  const std::int64_t target = FrameAtPosition(event->position());
+  if (target != drag_target_frame_) {
+    drag_target_frame_ = target;
+    SetCurrentFrame(drag_target_frame_);
+    emit scrubTargetChanged(static_cast<qint64>(drag_target_frame_));
+  }
+  scrubbing_ = false;
+  follow_playhead_ = follow_before_scrub_;
+  emit scrubFinished(static_cast<qint64>(drag_target_frame_));
+  event->accept();
 }
 
 int TimelineWidget::RulerHeight() const {

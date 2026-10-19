@@ -4,7 +4,9 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPointF>
 
 #include <algorithm>
 #include <cmath>
@@ -164,6 +166,55 @@ void TestWidgetViewState() {
   Check(NearlyEqual(widget.pixels_per_frame(), 0.0), "空时间轴缩放无效果");
 }
 
+void TestPointerInteraction() {
+  TimelineWidget widget;
+  widget.resize(1280, 72);
+  widget.SetFrameCount(720);
+  widget.SetPixelsPerFrame(8.0);
+
+  Check(widget.FrameAtPosition(QPointF(-1.0, 30.0)) == 0,
+        "负坐标命中首帧");
+  Check(widget.FrameAtPosition(QPointF(0.0, 30.0)) == 0,
+        "x=0 命中第 0 帧");
+  Check(widget.FrameAtPosition(QPointF(7.999, 30.0)) == 0,
+        "第 0 帧右边界内命中第 0 帧");
+  Check(widget.FrameAtPosition(QPointF(8.0, 30.0)) == 1,
+        "x=8 命中第 1 帧");
+  Check(widget.FrameAtPosition(QPointF(80.0, 30.0)) == 10,
+        "x=80 命中第 10 帧");
+
+  qint64 started = -1;
+  qint64 changed = -1;
+  qint64 finished = -1;
+  QObject::connect(&widget, &TimelineWidget::scrubStarted,
+                   [&started](qint64 frame) { started = frame; });
+  QObject::connect(&widget, &TimelineWidget::scrubTargetChanged,
+                   [&changed](qint64 frame) { changed = frame; });
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(80.0, 30.0),
+                    QPointF(80.0, 30.0), Qt::LeftButton, Qt::LeftButton,
+                    Qt::NoModifier);
+  QApplication::sendEvent(&widget, &press);
+  Check(started == 10, "按下时间轴发出目标帧 10");
+  Check(widget.current_frame() == 10, "按下后播放头到第 10 帧");
+
+  QMouseEvent move(QEvent::MouseMove, QPointF(160.0, 30.0),
+                   QPointF(160.0, 30.0), Qt::NoButton, Qt::LeftButton,
+                   Qt::NoModifier);
+  QApplication::sendEvent(&widget, &move);
+  Check(changed == 20, "拖动到 x=160 目标帧为 20");
+  Check(widget.current_frame() == 20, "拖动中播放头跟随目标帧");
+
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(160.0, 30.0),
+                      QPointF(160.0, 30.0), Qt::LeftButton, Qt::NoButton,
+                      Qt::NoModifier);
+  QApplication::sendEvent(&widget, &release);
+  Check(finished == 20, "松手发出最终目标帧 20");
+  Check(widget.current_frame() == 20, "松手后播放头仍在第 20 帧");
+}
+
 void TestPaintBenchmark() {
   TimelineWidget widget;
   widget.resize(1920, 72);
@@ -219,6 +270,7 @@ int main(int argc, char** argv) {
   std::printf("T2.7 时间轴测试\n");
   TestModel();
   TestWidgetViewState();
+  TestPointerInteraction();
   TestPaintBenchmark();
 
   if (g_failures > 0) {

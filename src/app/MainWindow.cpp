@@ -152,6 +152,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     GoToFrame(current_frame_ + delta);
   });
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
+  connect(timeline_, &TimelineWidget::scrubStarted, this, &MainWindow::OnScrubStarted);
+  connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
+          &MainWindow::OnScrubTargetChanged);
+  connect(timeline_, &TimelineWidget::scrubFinished, this, &MainWindow::OnScrubFinished);
 }
 
 MainWindow::~MainWindow() = default;
@@ -385,6 +389,53 @@ void MainWindow::ZoomTimelineOut() {
   }
 }
 
+void MainWindow::ShowScrubTarget(std::int64_t frame) {
+  if (info_bar_ != nullptr) {
+    info_bar_->SetFrame(static_cast<int>(frame));
+  }
+}
+
+void MainWindow::OnScrubStarted(qint64 frame) {
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return;
+  }
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
+  ShowScrubTarget(frame);
+  statusBar()->showMessage(QStringLiteral("拖动定位：松开后精确到帧"), 1000);
+}
+
+void MainWindow::OnScrubTargetChanged(qint64 frame) {
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return;
+  }
+  ShowScrubTarget(frame);
+}
+
+void MainWindow::OnScrubFinished(qint64 frame) {
+  if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
+    return;
+  }
+  const std::int64_t last_frame =
+      static_cast<std::int64_t>(session_->index().size()) - 1;
+  const std::int64_t target =
+      lapian::core::ClampFrame(frame, last_frame);
+  if (target == current_frame_) {
+    // 目标就是当前已呈现帧，不需要再解码一次；把拖拽期间的临时 UI 收回。
+    if (timeline_ != nullptr) {
+      timeline_->SetCurrentFrame(current_frame_);
+    }
+    if (info_bar_ != nullptr) {
+      info_bar_->SetFrame(static_cast<int>(current_frame_));
+    }
+    statusBar()->showMessage(
+        QStringLiteral("已暂停在第 %1 帧").arg(static_cast<qlonglong>(current_frame_)), 2000);
+    return;
+  }
+  GoToFrame(target);
+}
+
 void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
   if (gfx_ != nullptr && frame != nullptr) {
     gfx_->SetVideoFrame(frame, rotation);
@@ -423,6 +474,13 @@ void MainWindow::GoToFrame(std::int64_t frame) {
   lapian::media::DecodedFrameInfo info;
   std::string error;
   if (!session_->SeekToFrame(target, &info, &error)) {
+    // 拖动时 UI 已先显示目标帧；失败必须退回实际呈现帧，不能把目标当结果。
+    if (timeline_ != nullptr) {
+      timeline_->SetCurrentFrame(current_frame_);
+    }
+    if (info_bar_ != nullptr) {
+      info_bar_->SetFrame(static_cast<int>(current_frame_));
+    }
     statusBar()->showMessage(QStringLiteral("跳帧失败：") + QString::fromStdString(error), 5000);
     return;
   }

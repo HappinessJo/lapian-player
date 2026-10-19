@@ -51,6 +51,9 @@ class MainWindow : public QMainWindow {
   void TogglePlayback();
   void ZoomTimelineIn();
   void ZoomTimelineOut();
+  void OnScrubStarted(qint64 frame);
+  void OnScrubTargetChanged(qint64 frame);
+  void OnScrubFinished(qint64 frame);
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
   void OnPlaybackEnded();
@@ -61,6 +64,7 @@ class MainWindow : public QMainWindow {
   void ShowEmptyState();
   bool ApplyGotoText(const QString& text);
   bool IsTextInputFocused() const;
+  void ShowScrubTarget(std::int64_t frame);
   void ShowOpenError(const QString& message);
   void SaveCurrentStatePlaceholder();
 
