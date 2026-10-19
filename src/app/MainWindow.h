@@ -15,6 +15,7 @@ class QLabel;
 class GfxWidget;
 class InfoBar;
 class PlaybackController;
+class TimelineWidget;
 
 namespace lapian::media {
 class MediaSession;
@@ -48,6 +49,8 @@ class MainWindow : public QMainWindow {
   void StepBackward();
   void StepForward();
   void TogglePlayback();
+  void ZoomTimelineIn();
+  void ZoomTimelineOut();
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
   void OnPlaybackEnded();
@@ -57,10 +60,12 @@ class MainWindow : public QMainWindow {
  private:
   void ShowEmptyState();
   bool ApplyGotoText(const QString& text);
+  bool IsTextInputFocused() const;
   void ShowOpenError(const QString& message);
   void SaveCurrentStatePlaceholder();
 
   GfxWidget* gfx_ = nullptr;
+  TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   QLabel* status_label_ = nullptr;
   QAction* open_action_ = nullptr;
@@ -68,6 +73,8 @@ class MainWindow : public QMainWindow {
   QAction* prev_action_ = nullptr;
   QAction* next_action_ = nullptr;
   QAction* goto_action_ = nullptr;
+  QAction* zoom_in_action_ = nullptr;
+  QAction* zoom_out_action_ = nullptr;
   QString base_info_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;

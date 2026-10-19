@@ -78,3 +78,14 @@ add_test(NAME lapian_seek_engine_test COMMAND lapian_seek_engine_test)
 set_tests_properties(lapian_seek_engine_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T2.7 时间轴几何 + 43.2 万帧离屏绘制基准（offscreen，避免弹窗）。
+add_executable(lapian_timeline_test timeline_test.cpp)
+lapian_apply_common_options(lapian_timeline_test)
+target_link_libraries(lapian_timeline_test PRIVATE lapian_timeline)
+
+add_test(NAME lapian_timeline_test COMMAND lapian_timeline_test)
+set_tests_properties(lapian_timeline_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+  SKIP_RETURN_CODE 77)

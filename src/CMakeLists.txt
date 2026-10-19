@@ -41,6 +41,16 @@ add_library(lapian_framemath STATIC
 lapian_apply_common_options(lapian_framemath)
 target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# T2.7 时间轴：纯 C++ 几何模型 + Qt Widgets 控件，产品与测试共用。
+add_library(lapian_timeline STATIC
+  core/TimelineModel.cpp
+  core/TimelineModel.h
+  app/TimelineWidget.cpp
+  app/TimelineWidget.h)
+lapian_apply_common_options(lapian_timeline)
+target_include_directories(lapian_timeline PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_timeline PUBLIC Qt6::Widgets)
+
 # T1.1 媒体探测核心：纯 C++ + FFmpeg，不依赖 Qt，便于单测与后续复用。
 add_library(lapian_media STATIC
   media/FrameIndex.cpp
@@ -72,8 +82,8 @@ qt_add_executable(lapian WIN32
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath lapian::ffmpeg
-                                     Qt6::Widgets)
+target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
+                                     lapian_timeline lapian::ffmpeg Qt6::Widgets)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 

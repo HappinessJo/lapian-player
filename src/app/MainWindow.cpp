@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QByteArray>
 #include <QDebug>
 #include <QDir>
@@ -14,9 +15,11 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPlainTextEdit>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QString>
+#include <QTextEdit>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -33,6 +36,7 @@ extern "C" {
 #include "app/GfxWidget.h"
 #include "app/InfoBar.h"
 #include "app/PlaybackController.h"
+#include "app/TimelineWidget.h"
 #include "core/FrameMath.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
@@ -74,8 +78,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   central_layout->setContentsMargins(0, 0, 0, 0);
   central_layout->setSpacing(0);
   gfx_ = new GfxWidget(central);
+  timeline_ = new TimelineWidget(central);
   info_bar_ = new InfoBar(central);
   central_layout->addWidget(gfx_, 1);
+  central_layout->addWidget(timeline_);
   central_layout->addWidget(info_bar_);
   setCentralWidget(central);
 
@@ -109,6 +115,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   goto_action_->setEnabled(false);
   connect(goto_action_, &QAction::triggered, this, &MainWindow::ShowGotoDialog);
   addAction(goto_action_);
+
+  zoom_in_action_ = new QAction(QStringLiteral("放大时间轴"), this);
+  zoom_in_action_->setShortcut(QKeySequence(QStringLiteral("+")));
+  zoom_in_action_->setShortcutContext(Qt::WindowShortcut);
+  zoom_in_action_->setEnabled(false);
+  connect(zoom_in_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineIn);
+  addAction(zoom_in_action_);
+
+  zoom_out_action_ = new QAction(QStringLiteral("缩小时间轴"), this);
+  zoom_out_action_->setShortcut(QKeySequence(QStringLiteral("-")));
+  zoom_out_action_->setShortcutContext(Qt::WindowShortcut);
+  zoom_out_action_->setEnabled(false);
+  connect(zoom_out_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineOut);
+  addAction(zoom_out_action_);
 
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
@@ -144,6 +164,9 @@ void MainWindow::ShowEmptyState() {
   if (gfx_ != nullptr) {
     gfx_->ClearVideoFrame();
   }
+  if (timeline_ != nullptr) {
+    timeline_->Clear();
+  }
   if (info_bar_ != nullptr) {
     info_bar_->Clear();
   }
@@ -159,6 +182,12 @@ void MainWindow::ShowEmptyState() {
   }
   if (goto_action_ != nullptr) {
     goto_action_->setEnabled(false);
+  }
+  if (zoom_in_action_ != nullptr) {
+    zoom_in_action_->setEnabled(false);
+  }
+  if (zoom_out_action_ != nullptr) {
+    zoom_out_action_->setEnabled(false);
   }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
@@ -216,6 +245,13 @@ void MainWindow::OpenFile(const QString& path) {
   prev_action_->setEnabled(can_seek);
   next_action_->setEnabled(can_seek);
   goto_action_->setEnabled(can_seek);
+
+  // T2.7：时间轴先用当前索引的帧数；索引为空时不画假刻度。
+  const std::int64_t timeline_frames =
+      static_cast<std::int64_t>(session_->index().size());
+  timeline_->SetFrameCount(timeline_frames);
+  zoom_in_action_->setEnabled(timeline_frames > 0);
+  zoom_out_action_->setEnabled(timeline_frames > 0);
 
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -324,12 +360,40 @@ void MainWindow::StartPlaybackForTest() {
   }
 }
 
+bool MainWindow::IsTextInputFocused() const {
+  QWidget* focus = QApplication::focusWidget();
+  return qobject_cast<QLineEdit*>(focus) != nullptr ||
+         qobject_cast<QTextEdit*>(focus) != nullptr ||
+         qobject_cast<QPlainTextEdit*>(focus) != nullptr;
+}
+
+void MainWindow::ZoomTimelineIn() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  if (timeline_ != nullptr) {
+    timeline_->ZoomIn();
+  }
+}
+
+void MainWindow::ZoomTimelineOut() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  if (timeline_ != nullptr) {
+    timeline_->ZoomOut();
+  }
+}
+
 void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
   if (gfx_ != nullptr && frame != nullptr) {
     gfx_->SetVideoFrame(frame, rotation);
   }
   if (info_bar_ != nullptr) {
     info_bar_->SetFrame(frame_index);
+  }
+  if (timeline_ != nullptr) {
+    timeline_->SetCurrentFrame(frame_index);
   }
   current_frame_ = frame_index;
 }
@@ -365,6 +429,7 @@ void MainWindow::GoToFrame(std::int64_t frame) {
 
   gfx_->SetVideoFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees);
   info_bar_->SetFrame(static_cast<int>(target));
+  timeline_->SetCurrentFrame(target);
   playback_->SetPosition(target, info.pts_us);
   current_frame_ = target;
   statusBar()->showMessage(QStringLiteral("第 %1 帧").arg(target), 2000);
