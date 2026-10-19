@@ -1,0 +1,53 @@
+# 复制 FFmpeg 运行时 DLL 到目标目录（构建后即可直接运行）
+function(lapian_copy_ffmpeg_dlls target)
+  if(LAPIAN_FFMPEG_RUNTIME_DLLS)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${LAPIAN_FFMPEG_RUNTIME_DLLS}
+              "$<TARGET_FILE_DIR:${target}>"
+      COMMENT "复制 FFmpeg 运行时 DLL")
+  endif()
+endfunction()
+
+# 可执行文件统一输出到 build/bin，打包脚本不依赖生成器的默认布局
+set(LAPIAN_RUNTIME_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin")
+function(lapian_set_output_dir target)
+  set_target_properties(${target} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${LAPIAN_RUNTIME_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${LAPIAN_RUNTIME_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${LAPIAN_RUNTIME_OUTPUT_DIR}")
+endfunction()
+
+# 不含 Qt 的底层库（D3D11），可被测试与自检程序复用
+add_library(lapian_core STATIC
+  platform/gfx/D3D11Device.cpp
+  platform/gfx/D3D11Device.h
+  platform/gfx/SwapChain.cpp
+  platform/gfx/SwapChain.h)
+lapian_apply_common_options(lapian_core)
+target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_core PUBLIC d3d11 dxgi)
+
+# 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
+qt_add_executable(lapian WIN32
+  app/main.cpp
+  app/MainWindow.cpp
+  app/MainWindow.h
+  app/GfxWidget.cpp
+  app/GfxWidget.h)
+lapian_apply_common_options(lapian)
+target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
+target_link_libraries(lapian PRIVATE lapian_core lapian::ffmpeg Qt6::Widgets)
+lapian_copy_ffmpeg_dlls(lapian)
+lapian_set_output_dir(lapian)
+
+# 环境自检（控制台）：Qt/FFmpeg/D3D11 版本与可用性，构建脚本据此判定
+add_executable(lapian_env_check
+  tools/env_check/main.cpp)
+lapian_apply_common_options(lapian_env_check)
+target_include_directories(lapian_env_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(lapian_env_check PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
+target_link_libraries(lapian_env_check PRIVATE lapian_core lapian::ffmpeg Qt6::Core)
+lapian_copy_ffmpeg_dlls(lapian_env_check)
+lapian_set_output_dir(lapian_env_check)

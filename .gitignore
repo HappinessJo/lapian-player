@@ -1,0 +1,22 @@
+# 构建产物
+/build/
+/dist/
+/out/
+
+# 第三方依赖（由 scripts 拉取，不入库）
+/third_party/
+/.venv/
+/.deps/
+
+# IDE / 工具
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# ��־
+*.log
