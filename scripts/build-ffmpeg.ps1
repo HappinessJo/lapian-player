@@ -1,4 +1,4 @@
-# 构建 FFmpeg 7.1 最小版（LGPL、动态链接、D3D11VA）
+﻿# 构建 FFmpeg 7.1 最小版（LGPL、动态链接、D3D11VA）
 #
 # 本机踩过的坑（脚本已处理）：
 #   1. 用 MSYS2 + MSVC 工具链（--toolchain=msvc），不引入 MinGW 运行时

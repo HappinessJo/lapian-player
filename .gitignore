@@ -8,6 +8,9 @@
 /.venv/
 /.deps/
 
+# 验收素材（本地存放，不入库）
+/media/
+
 # IDE / 工具
 .vs/
 .vscode/
@@ -18,5 +21,5 @@ CMakeUserPresets.json
 Thumbs.db
 desktop.ini
 
-# ��־
+# 日志
 *.log
