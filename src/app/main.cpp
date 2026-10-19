@@ -15,12 +15,14 @@ int main(int argc, char* argv[]) {
   QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
   QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
 
-  // T1.3 临时调试入口：--file <path>；正式打开入口在 T1.4。
+  // T1.4：支持 --file <path> 与系统文件关联传入的第一个本地路径。
   QString file_path;
   const QStringList arguments = QCoreApplication::arguments();
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
+    } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
+      file_path = arguments[i];
     }
   }
 
@@ -28,7 +30,7 @@ int main(int argc, char* argv[]) {
   window.show();
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, file_path]() {
-      window.LoadFileForTest(file_path);
+      window.OpenFile(file_path);
     });
   }
   return QApplication::exec();
