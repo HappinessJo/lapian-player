@@ -16,6 +16,8 @@
 #include <QStatusBar>
 #include <QString>
 #include <QUrl>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <cstddef>
 #include <memory>
@@ -26,6 +28,7 @@ extern "C" {
 }
 
 #include "app/GfxWidget.h"
+#include "app/InfoBar.h"
 #include "app/PlaybackController.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
@@ -62,8 +65,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   resize(1280, 720);
   setAcceptDrops(true);
 
-  gfx_ = new GfxWidget(this);
-  setCentralWidget(gfx_);
+  auto* central = new QWidget(this);
+  auto* central_layout = new QVBoxLayout(central);
+  central_layout->setContentsMargins(0, 0, 0, 0);
+  central_layout->setSpacing(0);
+  gfx_ = new GfxWidget(central);
+  info_bar_ = new InfoBar(central);
+  central_layout->addWidget(gfx_, 1);
+  central_layout->addWidget(info_bar_);
+  setCentralWidget(central);
 
   open_action_ = new QAction(QStringLiteral("打开视频..."), this);
   open_action_->setShortcut(QKeySequence::Open);
@@ -107,11 +117,13 @@ void MainWindow::ShowEmptyState() {
   if (gfx_ != nullptr) {
     gfx_->ClearVideoFrame();
   }
+  if (info_bar_ != nullptr) {
+    info_bar_->Clear();
+  }
   if (play_action_ != nullptr) {
     play_action_->setEnabled(false);
     play_action_->setText(QStringLiteral("播放"));
   }
-  media_status_prefix_.clear();
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
   statusBar()->showMessage(QStringLiteral("将视频拖到这里，或按 Ctrl+O 打开"));
@@ -170,16 +182,9 @@ void MainWindow::OpenFile(const QString& path) {
   const QFileInfo file_info(path);
   setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
 
-  const QString vfr = session_->IsVfrSuspect() ? QStringLiteral(" · VFR") : QString();
-  media_status_prefix_ =
-      QStringLiteral("%1 · %2×%3 · %4fps · %5%6")
-          .arg(file_info.fileName())
-          .arg(info.video.width)
-          .arg(info.video.height)
-          .arg(info.video.frame_rate.ToDouble(), 0, 'f', 3)
-          .arg(frame.hardware ? QStringLiteral("硬解") : QStringLiteral("软解"))
-          .arg(vfr);
-  status_label_->setText(media_status_prefix_ + QStringLiteral(" · 第 0 帧"));
+  info_bar_->SetMedia(info, session_->IsVfrSuspect());
+  status_label_->setText(base_info_ + QStringLiteral(" · ") +
+                         (frame.hardware ? QStringLiteral("硬解") : QStringLiteral("软解")));
 
   if (session_->IsVfrSuspect()) {
     statusBar()->showMessage(
@@ -206,8 +211,9 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
   if (gfx_ != nullptr && frame != nullptr) {
     gfx_->SetVideoFrame(frame, rotation);
   }
-  status_label_->setText(media_status_prefix_ +
-                         QStringLiteral(" · 第 %1 帧").arg(frame_index));
+  if (info_bar_ != nullptr) {
+    info_bar_->SetFrame(frame_index);
+  }
 }
 
 void MainWindow::OnPlaybackStateChanged(bool playing) {

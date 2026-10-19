@@ -12,6 +12,7 @@ class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
 class GfxWidget;
+class InfoBar;
 class PlaybackController;
 
 namespace lapian::media {
@@ -51,11 +52,11 @@ class MainWindow : public QMainWindow {
   void SaveCurrentStatePlaceholder();
 
   GfxWidget* gfx_ = nullptr;
+  InfoBar* info_bar_ = nullptr;
   QLabel* status_label_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* play_action_ = nullptr;
   QString base_info_;
-  QString media_status_prefix_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;
   bool error_shown_ = false;

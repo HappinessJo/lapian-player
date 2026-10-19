@@ -61,12 +61,15 @@ qt_add_executable(lapian WIN32
   app/MainWindow.h
   app/GfxWidget.cpp
   app/GfxWidget.h
+  app/InfoBar.cpp
+  app/InfoBar.h
   app/PlaybackController.cpp
   app/PlaybackController.h)
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian::ffmpeg Qt6::Widgets)
+target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath lapian::ffmpeg
+                                     Qt6::Widgets)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 
