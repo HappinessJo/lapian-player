@@ -56,3 +56,14 @@ add_test(NAME lapian_media_session_test COMMAND lapian_media_session_test)
 set_tests_properties(lapian_media_session_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T2.2 PTS 索引：纯索引单测 + 真实文件 demux。
+add_executable(lapian_frame_index_test frame_index_test.cpp)
+lapian_apply_common_options(lapian_frame_index_test)
+target_link_libraries(lapian_frame_index_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_frame_index_test)
+
+add_test(NAME lapian_frame_index_test COMMAND lapian_frame_index_test)
+set_tests_properties(lapian_frame_index_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)

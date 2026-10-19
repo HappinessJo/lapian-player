@@ -43,6 +43,8 @@ target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
 
 # T1.1 媒体探测核心：纯 C++ + FFmpeg，不依赖 Qt，便于单测与后续复用。
 add_library(lapian_media STATIC
+  media/FrameIndex.cpp
+  media/FrameIndex.h
   media/MediaInfo.h
   media/MediaProbe.cpp
   media/MediaProbe.h
@@ -52,7 +54,7 @@ add_library(lapian_media STATIC
   media/VideoDecoder.h)
 lapian_apply_common_options(lapian_media)
 target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_media PUBLIC lapian::ffmpeg)
+target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath)
 
 # 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
 qt_add_executable(lapian WIN32
