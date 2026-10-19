@@ -81,6 +81,8 @@ function Disable-MsysLink([string]$Root) {
 }
 
 $bash = Ensure-Msys2 $Msys2Root
+# 直接启动 bash 时不会自动带上 /usr/bin；sed/pacman/make 都在这里
+$env:PATH = "$Msys2Root\usr\bin;$env:PATH"
 Ensure-Msys2Tools $bash
 Disable-MsysLink $Msys2Root
 
@@ -110,7 +112,7 @@ $configureOptions = @(
   '--enable-decoder=h264,hevc,vp9,av1,aac,mp3,opus,pcm_s16le,pcm_s24le,pcm_f32le,pcm_s16be,pcm_s24be,pcm_u8',
   '--enable-parser=h264,hevc,vp9,av1,aac,opus',
   '--enable-d3d11va',
-  '--enable-hwaccel=h264_d3d11va,hevc_d3d11va,vp9_d3d11va,av1_d3d11va',
+  '--enable-hwaccel=h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2,vp9_d3d11va,vp9_d3d11va2,av1_d3d11va,av1_d3d11va2',
   '--enable-swscale', '--enable-swresample',
   '--x86asmexe=nasm'
 ) -join ' '
@@ -130,9 +132,11 @@ $patched = $lines | ForEach-Object {
 }
 Set-Content -LiteralPath $configHeader -Value $patched -Encoding ASCII
 
-Write-Host '[5/6] make -j + make install（首次约 5–10 分钟）...'
+Write-Host '[5/6] make clean + make -j + make install（首次约 5–10 分钟）...'
 $makeLog = Join-Path $BuildRoot 'make.log'
-Invoke-MsysBuildStep -Command "cd '$msysSource' && make -j$Jobs && make install" -LogPath $makeLog -What 'make'
+# 必须 make clean：configure 改变组件集（例如加 d3d11va2）时，MSVC 的依赖跟踪
+# 可能不重建 avcodec，产出仍是旧 DLL。
+Invoke-MsysBuildStep -Command "cd '$msysSource' && make clean && make -j$Jobs && make install" -LogPath $makeLog -What 'make'
 
 $dlls = @(Get-ChildItem (Join-Path $installDir 'bin') -Filter '*.dll' -ErrorAction SilentlyContinue)
 if ($dlls.Count -eq 0) { throw "安装目录里没有 DLL：$installDir\bin" }

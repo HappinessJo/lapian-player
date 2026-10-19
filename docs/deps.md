@@ -68,7 +68,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Clean
    - MSYS2 的 `/usr/bin/link.exe` 会遮蔽 MSVC 链接器，构建前改名；
    - `--disable-autodetect` 会关掉 D3D11VA，必须显式 `--enable-d3d11va`；
    - 中文 VS 的 `CC_IDENT` 写进 `config.h` 后会让 RC 编译器报 `RC2001`，configure 后改写为 ASCII（`VSLANG=1033` 对 cl 横幅无效）；
-   - MSYS2 的 `make install` 把 `.lib/.def` 放在 `bin/`，脚本归位到 `lib/`（CMake 也同时兼容 `bin/`）。
+   - MSYS2 的 `make install` 把 `.lib/.def` 放在 `bin/`，脚本归位到 `lib/`（CMake 也同时兼容 `bin/`）；
+   - **必须同时启用 `d3d11va2`**：只开 `d3d11va`（vld）时，自定义 `get_format` 选 `AV_PIX_FMT_D3D11` 会报 `Invalid pixfmt for hwaccel`；探针优先使用 `d3d11va2` 的 `AV_PIX_FMT_D3D11`；
+   - **改变组件集后必须 `make clean`**：MSVC 的依赖跟踪可能不重建 `avcodec`，产出仍是旧 DLL；
+   - `build\release\bin` 的 FFmpeg DLL 只在目标重新链接时由 POST_BUILD 复制；切换 FFmpeg 后要手动同步或重新构建。
 
 ## 6. 依赖策略
 

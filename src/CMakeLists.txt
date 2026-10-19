@@ -51,3 +51,11 @@ target_compile_definitions(lapian_env_check PRIVATE LAPIAN_VERSION="${PROJECT_VE
 target_link_libraries(lapian_env_check PRIVATE lapian_core lapian::ffmpeg Qt6::Core)
 lapian_copy_ffmpeg_dlls(lapian_env_check)
 lapian_set_output_dir(lapian_env_check)
+
+# T0.3 精确 seek 探针（控制台；不渲染、不缓存，只测关键帧回退+解码到目标帧的成本）
+add_executable(lapian_seek_probe
+  tools/seek_probe/main.cpp)
+lapian_apply_common_options(lapian_seek_probe)
+target_link_libraries(lapian_seek_probe PRIVATE lapian::ffmpeg)
+lapian_copy_ffmpeg_dlls(lapian_seek_probe)
+lapian_set_output_dir(lapian_seek_probe)
