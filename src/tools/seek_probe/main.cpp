@@ -59,6 +59,35 @@ struct Sample {
 // 解码器登记的硬件像素格式（D3D11VA 是 d3d11va_vld，不是 d3d11）
 AVPixelFormat g_hw_pix_fmt = AV_PIX_FMT_NONE;
 
+std::string WideToUtf8(const std::wstring& wide) {
+  if (wide.empty()) {
+    return std::string();
+  }
+  const int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                                       static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+  if (size <= 0) {
+    return std::string();
+  }
+  std::string result(static_cast<size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()), result.data(), size,
+                      nullptr, nullptr);
+  return result;
+}
+
+std::wstring Utf8ToWide(const std::string& utf8) {
+  if (utf8.empty()) {
+    return std::wstring();
+  }
+  const int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
+                                       nullptr, 0);
+  if (size <= 0) {
+    return std::wstring();
+  }
+  std::wstring result(static_cast<size_t>(size), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), result.data(), size);
+  return result;
+}
+
 void PrintUsage() {
   std::printf(
       "用法: lapian_seek_probe --file <视频> [--samples 20] [--hw on|off] [--seed 1] [--csv out.csv]\n");
@@ -127,7 +156,7 @@ AVPixelFormat GetPreferredHwFormat(AVCodecContext* /*ctx*/,
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   Options opts;
   if (!ParseArgs(argc, argv, &opts)) {
     return 2;
@@ -434,8 +463,11 @@ int main(int argc, char** argv) {
   std::printf("EXACT=%d\n", ok_count == opts.samples ? 1 : 0);
 
   if (!opts.csv.empty()) {
+    std::printf("CSV_PATH=%s\n", opts.csv.c_str());
     FILE* f = nullptr;
-    if (fopen_s(&f, opts.csv.c_str(), "wb") == 0 && f != nullptr) {
+    const std::wstring csv_wide = Utf8ToWide(opts.csv);
+    const errno_t open_err = _wfopen_s(&f, csv_wide.c_str(), L"wb");
+    if (open_err == 0 && f != nullptr) {
       std::fprintf(f,
                    "sample,target_frame,target_pts,actual_pts,delta_frames,decode_ms,"
                    "frames_decoded,ok\n");
@@ -447,10 +479,29 @@ int main(int argc, char** argv) {
       }
       std::fclose(f);
       std::printf("CSV=%s\n", opts.csv.c_str());
+    } else {
+      std::printf("CSV_ERR=%d\n", static_cast<int>(open_err));
     }
+  } else {
+    std::printf("CSV_NOT_SET=1\n");
   }
 
   avcodec_free_context(&dec);
   avformat_close_input(&fmt);
   return ok_count == opts.samples ? 0 : 1;
+}
+
+// 宽字符入口：中文路径按 UTF-8 传给 FFmpeg，CSV 用宽路径写
+int wmain(int argc, wchar_t** wargv) {
+  std::vector<std::string> store;
+  store.reserve(static_cast<size_t>(argc));
+  for (int i = 0; i < argc; ++i) {
+    store.push_back(WideToUtf8(wargv[i]));
+  }
+  std::vector<char*> argv;
+  argv.reserve(store.size());
+  for (std::string& s : store) {
+    argv.push_back(s.data());
+  }
+  return Run(static_cast<int>(argv.size()), argv.data());
 }

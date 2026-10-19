@@ -59,8 +59,13 @@ foreach ($file in $Files) {
   foreach ($hw in @($true, $false)) {
     $label = if ($hw) { 'hw' } else { 'sw' }
     $csv = Join-Path $OutDir ("{0}-{1}.csv" -f $name, $label)
+    # 探针进程在本机无法写 docs\ 目录（EACCES，cmd/python 正常），先写 build\ 再拷回
+    $tmpCsvDir = Join-Path $repo 'build\seek-tmp'
+    New-Item -ItemType Directory -Force -Path $tmpCsvDir | Out-Null
+    $tmpCsv = Join-Path $tmpCsvDir ("{0}-{1}.csv" -f $name, $label)
     Write-Host ("=== {0} [{1}] ===" -f $name, $label)
-    $d = Invoke-Probe -File $file -Hw $hw -CsvPath $csv
+    $d = Invoke-Probe -File $file -Hw $hw -CsvPath $tmpCsv
+    if (Test-Path $tmpCsv) { Copy-Item -LiteralPath $tmpCsv -Destination $csv -Force }
     $row = [pscustomobject]@{
       file        = $name
       mode        = $label
