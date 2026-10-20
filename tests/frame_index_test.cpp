@@ -1,5 +1,6 @@
 // T2.2 PTS 索引单测与真实文件集成测试。
 
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
@@ -127,12 +128,27 @@ void TestFile(const std::string& path, std::int64_t expected_size) {
   Check(index.KeyframeAtOrBefore(index.PtsOfFrame(0)) == 0, path + " 首帧是关键帧");
 }
 
+void TestCancel() {
+  const std::string path = "media/V9.mp4";
+  if (!FileExists(path)) {
+    Skip(path + " 不存在（可选取消测试素材）");
+    return;
+  }
+  std::atomic<bool> cancel{true};
+  lapian::media::FrameIndex index;
+  std::string error;
+  Check(!index.BuildFromFile(path, -1, &error, &cancel), "取消时 BuildFromFile 返回 false");
+  Check(!index.IsReady() && index.empty(), "取消后不留下半成品索引");
+  Check(error == "索引已取消", "取消错误信息");
+}
+
 }  // namespace
 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("T2.2 PTS 索引测试\n");
   TestEntries();
+  TestCancel();
   TestFile("media/V9.mp4", 120);
   TestFile("media/proxy/proxy-V1.mp4", 720);
   TestVfrFile();

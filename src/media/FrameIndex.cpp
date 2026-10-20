@@ -109,7 +109,7 @@ bool FrameIndex::BuildFromEntries(std::vector<FrameIndexEntry> entries, std::str
 }
 
 bool FrameIndex::BuildFromFile(const std::string& utf8_path, int video_stream_index,
-                               std::string* error) {
+                               std::string* error, const std::atomic<bool>* cancel) {
   Reset();
   const auto started = std::chrono::steady_clock::now();
 
@@ -182,6 +182,21 @@ bool FrameIndex::BuildFromFile(const std::string& utf8_path, int video_stream_in
   int packet_count = 0;
   int parsed_frames = 0;
   while (av_read_frame(format, packet) >= 0) {
+    // T7.1：切换文件/关窗时取消后台索引，避免长时间占着文件。
+    if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
+      av_packet_unref(packet);
+      if (error != nullptr) {
+        *error = "索引已取消";
+      }
+      av_packet_free(&packet);
+      if (parser != nullptr) {
+        av_parser_close(parser);
+      }
+      if (parser_context != nullptr) {
+        avcodec_free_context(&parser_context);
+      }
+      return false;
+    }
     if (packet->stream_index != selected) {
       av_packet_unref(packet);
       continue;

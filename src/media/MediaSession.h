@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -12,6 +13,17 @@ struct ID3D11Device;
 
 namespace lapian::media {
 
+// T7.1：一次打开的分段耗时（毫秒），只用于冷启动测量，不参与逻辑。
+struct MediaOpenTimings {
+  double probe_ms = 0.0;
+  double decoder_open_ms = 0.0;
+  double first_frame_ms = 0.0;
+  double index_ms = 0.0;
+  double total_ms = 0.0;
+  std::size_t index_frames = 0;
+  bool index_ok = false;
+};
+
 // 一条已打开视频的媒体会话：探测结果 + 解码器 + 首帧。
 // T1.4 用它切换文件；T1.5 在后面继续用同一个解码器做播放。
 class MediaSession {
@@ -23,10 +35,18 @@ class MediaSession {
   MediaSession& operator=(const MediaSession&) = delete;
 
   // 成功后才替换当前会话；失败时保持旧会话不变。
-  bool Open(const std::string& utf8_path, ID3D11Device* device, std::string* error);
+  // T7.1：build_index=false 时只做探测/解码首帧，索引由调用方在后台建好后
+  // 通过 InstallIndex 安装；默认 true 保持既有同步语义（回归测试用）。
+  bool Open(const std::string& utf8_path, ID3D11Device* device, std::string* error,
+            bool build_index = true);
   void Close();
 
-  // T2.4：用同一个解码器 seek 到目标帧；成功后解码器停在目标帧之后，可继续播放。
+  // 用当前会话的文件/流建索引；失败不影响已打开的会话（索引保持为空）。
+  bool BuildIndexNow(std::string* error, const std::atomic<bool>* cancel = nullptr);
+  // 安装后台建好的索引（调用方保证在 GUI 线程、且会话仍是同一个）。
+  void InstallIndex(FrameIndex index, double build_ms);
+  bool HasIndex() const { return index_.IsReady() && !index_.empty(); }
+  int video_stream_index() const { return probe_.info.video.stream_index; }
   bool SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::string* error);
 
   bool IsOpen() const { return open_; }
@@ -36,6 +56,8 @@ class MediaSession {
   const MediaProbeResult& last_attempt() const { return last_attempt_; }
   const DecodedFrameInfo& first_frame() const { return first_frame_; }
   const FrameIndex& index() const { return index_; }
+  // 最近一次 Open 的分段耗时（T7.1 冷启动报告）。
+  const MediaOpenTimings& last_open_timings() const { return last_open_timings_; }
   VideoDecoder& decoder() { return *decoder_; }
   const std::string& path_utf8() const { return probe_.info.path_utf8; }
   bool IsVfrSuspect() const { return probe_.info.vfr.suspect; }
@@ -46,6 +68,7 @@ class MediaSession {
   FrameIndex index_;
   std::unique_ptr<VideoDecoder> decoder_;
   DecodedFrameInfo first_frame_;
+  MediaOpenTimings last_open_timings_;
   bool open_ = false;
 };
 

@@ -192,6 +192,7 @@ void InfoBar::Clear() {
   synthetic_ = false;
   error_text_.clear();
   info_ = lapian::media::MediaInfo{};
+  total_ = lapian::core::TotalFrameCount{};
   file_name_.clear();
   file_label_->setText(QStringLiteral("未打开文件"));
   format_label_->clear();
@@ -237,6 +238,7 @@ void InfoBar::SetFrame(int frame_index) {
 }
 
 void InfoBar::SetTotal(const lapian::core::TotalFrameCount& total) {
+  total_ = total;
   total_label_->setText(QStringLiteral("总帧数 %1")
                             .arg(QString::fromStdString(total.Display())));
   scanning_ = total.state() == lapian::core::TotalFramesState::kScanning;

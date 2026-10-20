@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -38,7 +39,10 @@
 #include "app/MainWindow.h"
 
 int main(int argc, char* argv[]) {
+  // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。
+  const auto startup_process_start = std::chrono::steady_clock::now();
   QApplication app(argc, argv);
+  const auto app_created_at = std::chrono::steady_clock::now();
 
   // T6.3 的设置会用到组织名/应用名，这里先固定下来
   QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
@@ -63,6 +67,10 @@ int main(int argc, char* argv[]) {
   bool settings_expect = false;
   bool dpi_test = false;
   bool banner_test = false;
+  // T7.1：冷启动测量模式；有 --file 时等首帧真正 Present 后退出，否则等事件循环可交互。
+  bool startup_test = false;
+  // T7.1：后台索引路径回归（扫描中状态 → 就绪 → 导航/标记可用）。
+  bool index_test = false;
   QString settings_path_arg;
   QString dpi_tag;
   QString banner_tag;
@@ -118,6 +126,10 @@ int main(int argc, char* argv[]) {
       dpi_test = true;
     } else if (arguments[i] == QStringLiteral("--banner-test")) {
       banner_test = true;
+    } else if (arguments[i] == QStringLiteral("--startup-test")) {
+      startup_test = true;
+    } else if (arguments[i] == QStringLiteral("--index-test")) {
+      index_test = true;
     } else if (arguments[i] == QStringLiteral("--banner-tag") &&
                i + 1 < arguments.size()) {
       banner_tag = arguments[++i];
@@ -209,13 +221,84 @@ int main(int argc, char* argv[]) {
     QDir().mkpath(snapshot_pictures_root);
   }
 
+  // T7.1：冷启动埋点。--startup-test 自动开日志；单独设置 LAPIAN_STARTUP_LOG=1
+  // 也能在不退出程序的情况下观察分段耗时。
+  if (startup_test) {
+    qputenv("LAPIAN_STARTUP_LOG", "1");
+  }
+  const bool startup_log = startup_test || qEnvironmentVariableIsSet("LAPIAN_STARTUP_LOG");
+  auto startup_ms = [startup_process_start](std::chrono::steady_clock::time_point at) {
+    return std::chrono::duration<double, std::milli>(at - startup_process_start).count();
+  };
+  auto log_startup_at = [startup_log, startup_ms](
+                            const char* stage,
+                            std::chrono::steady_clock::time_point at) {
+    if (!startup_log) {
+      return;
+    }
+    std::fprintf(stderr, "T7.1 startup stage=%s t_ms=%.2f\n", stage, startup_ms(at));
+    std::fflush(stderr);
+  };
+  auto log_startup = [log_startup_at](const char* stage) {
+    log_startup_at(stage, std::chrono::steady_clock::now());
+  };
+  log_startup_at("app_created", app_created_at);
+
   const auto process_start = std::chrono::steady_clock::now();
   MainWindow window(nullptr, settings_root);
+  log_startup("window_created");
+  // T7.1：旧 GUI 回归在 OpenFile 后立即导航；保持同步索引语义。
+  // 产品路径与 --startup-test 走异步索引（首帧先出，后台扫描）。
+  const bool legacy_gui_test =
+      step_test || ab_test || loop_test || mark_test || note_test || snapshot_test ||
+      fullscreen_test || key_test || settings_test || settings_expect || dpi_test ||
+      banner_test;
+  if (legacy_gui_test) {
+    window.SetIndexSynchronousForTest(true);
+  }
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
     window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
   }
+
+  // T7.1：首帧 Present 后写一条 first_present 并退出；80ms 留给 DWM/绘制收尾。
+  auto first_present_seen = std::make_shared<bool>(false);
+  if (startup_test) {
+    QObject::connect(
+        &window, &MainWindow::framePresented, &window,
+        [&app, log_startup_at, first_present_seen]() {
+          if (*first_present_seen) {
+            return;
+          }
+          *first_present_seen = true;
+          log_startup_at("first_present", std::chrono::steady_clock::now());
+          QTimer::singleShot(80, &app, &QCoreApplication::quit);
+        });
+    // 防止设备/解码异常时挂死自动测量。
+    QTimer::singleShot(10000, &app, []() {
+      std::fprintf(stderr, "T7.1 startup stage=timeout\n");
+      std::fflush(stderr);
+      QCoreApplication::exit(3);
+    });
+  }
+
   window.show();
+  log_startup("window_shown");
+
+  // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
+  QTimer::singleShot(0, &window, [&app, &window, startup_test, startup_log, startup_ms,
+                                  file_path]() {
+    if (startup_log) {
+      std::fprintf(stderr, "T7.1 startup stage=ui_ready t_ms=%.2f\n",
+                   startup_ms(std::chrono::steady_clock::now()));
+      std::fflush(stderr);
+    }
+    if (startup_test && file_path.isEmpty()) {
+      // P1 无文件：可交互后再留 120ms 让空态首帧绘制，然后正常退出。
+      QTimer::singleShot(120, &app, &QCoreApplication::quit);
+    }
+  });
+
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
@@ -225,8 +308,100 @@ int main(int argc, char* argv[]) {
                                     dpi_expect_scale, dpi_tag, banner_test, banner_tag,
                                     banner_vfr, banner_tenbit, banner_noaudio,
                                     snapshot_pictures_root, playback_rate,
-                                    has_playback_rate, process_start]() {
+                                    has_playback_rate, process_start, startup_test,
+                                    index_test, startup_log, startup_ms, log_startup,
+                                    log_startup_at]() {
+      if (startup_log) {
+        std::fprintf(stderr, "T7.1 startup stage=open_begin t_ms=%.2f\n",
+                     startup_ms(std::chrono::steady_clock::now()));
+        std::fflush(stderr);
+      }
       window.OpenFile(file_path);
+      log_startup("open_returned");
+      if (startup_test && !window.HasMediaForTest()) {
+        std::fprintf(stderr, "T7.1 startup stage=open_failed\n");
+        std::fflush(stderr);
+        QCoreApplication::exit(2);
+        return;
+      }
+      if (index_test) {
+        // T7.1 异步索引：扫描中 → 就绪；随后再开一个带 sidecar 的文件验证标记
+        // 在索引完成后加载。
+        auto index_failures = std::make_shared<int>(0);
+        auto index_checks = std::make_shared<int>(0);
+        auto index_poll_count = std::make_shared<int>(0);
+        auto index_check = [index_failures, index_checks](const char* name, bool ok) {
+          ++(*index_checks);
+          if (!ok) {
+            ++(*index_failures);
+          }
+          std::fprintf(stderr, "T7.1 index_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        const QString index_video_b = file_b;
+
+        QTimer::singleShot(120, &window, [&window, index_check]() {
+          const QString state = window.IndexStateForTest();
+          if (!state.contains(QStringLiteral("scanning=1"))) {
+            std::fprintf(stderr, "T7.1 index_test scan_too_fast %s\n",
+                         state.toUtf8().constData());
+            std::fflush(stderr);
+            return;
+          }
+          std::fprintf(stderr, "T7.1 index_state scanning %s\n",
+                       state.toUtf8().constData());
+          std::fflush(stderr);
+          index_check("scanning-ready-off",
+                      state.contains(QStringLiteral("ready=0")));
+          index_check("scanning-total",
+                      state.contains(QStringLiteral("total=1")));
+          index_check("scanning-nav-disabled",
+                      state.contains(QStringLiteral("nav=0")));
+          index_check("scanning-timeline-disabled",
+                      state.contains(QStringLiteral("timeline=0")));
+          index_check("scanning-frame0", window.CurrentFrameForTest() == 0);
+        });
+
+        auto poll = std::make_shared<std::function<void()>>();
+        *poll = [&window, &app, index_check, index_failures, index_poll_count,
+                 index_video_b, poll]() {
+          if (++(*index_poll_count) > 200) {
+            index_check("index-ready-timeout", false);
+            QCoreApplication::exit(*index_failures == 0 ? 0 : 1);
+            return;
+          }
+          if (!window.IndexReadyForTest()) {
+            QTimer::singleShot(50, &window, [poll]() { (*poll)(); });
+            return;
+          }
+          const QString state = window.IndexStateForTest();
+          std::fprintf(stderr, "T7.1 index_state ready %s\n",
+                       state.toUtf8().constData());
+          std::fflush(stderr);
+          index_check("ready-state",
+                      state.contains(QStringLiteral("ready=1")) &&
+                          state.contains(QStringLiteral("scanning=0")));
+          index_check("ready-frames", window.IndexFrameCountForTest() > 0);
+          index_check("ready-nav-enabled",
+                      state.contains(QStringLiteral("nav=1")));
+          index_check("ready-timeline-enabled",
+                      state.contains(QStringLiteral("timeline=1")));
+          index_check("ready-total-exact",
+                      state.contains(QStringLiteral("total=3")));
+          if (index_video_b.isEmpty()) {
+            QCoreApplication::exit(*index_failures == 0 ? 0 : 1);
+            return;
+          }
+          // 带 sidecar 的文件：索引完成后才加载标记（异步路径）。
+          window.OpenFile(index_video_b);
+          QTimer::singleShot(500, &window, [&window, index_check, index_failures]() {
+            index_check("b-ready", window.IndexReadyForTest());
+            index_check("b-marks-loaded", window.MarkCountForTest() == 1);
+            QCoreApplication::exit(*index_failures == 0 ? 0 : 1);
+          });
+        };
+        QTimer::singleShot(60, &window, [poll]() { (*poll)(); });
+      }
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
       }

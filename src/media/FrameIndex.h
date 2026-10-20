@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,7 +19,9 @@ struct FrameIndexEntry {
 // 索引不可靠时 T2.3 必须降级为解码计数，不能拿近似帧冒充精确帧。
 class FrameIndex {
  public:
-  bool BuildFromFile(const std::string& utf8_path, int video_stream_index, std::string* error);
+  // T7.1：cancel 非空时每读一个包检查一次；取消返回 false（索引不安装）。
+  bool BuildFromFile(const std::string& utf8_path, int video_stream_index,
+                     std::string* error, const std::atomic<bool>* cancel = nullptr);
   bool BuildFromEntries(std::vector<FrameIndexEntry> entries, std::string* error);
   void Reset();
 

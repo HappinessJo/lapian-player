@@ -45,6 +45,8 @@ class InfoBar : public QWidget {
   QString SecondarySummaryForTest() const;
   QString SecondaryTooltipForTest() const;
   QStringList ActiveNoticeKindsForTest() const;
+  // T7.1：后台索引完成前后的总帧数状态（扫描中/精确/估算）。
+  const lapian::core::TotalFrameCount& TotalForTest() const { return total_; }
   // 自动化专用：绕过真实媒体，直接验证六类提示的优先级/布局。
   void SetSyntheticNoticesForTest(const QStringList& kinds);
   void ClearSyntheticNoticesForTest();
@@ -81,6 +83,7 @@ class InfoBar : public QWidget {
   bool synthetic_ = false;
   QString error_text_;
   lapian::media::MediaInfo info_;
+  lapian::core::TotalFrameCount total_;
   std::vector<lapian::media::StatusNotice> notices_;
   std::size_t primary_index_ = lapian::media::kNoNotice;
 };

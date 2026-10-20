@@ -41,6 +41,8 @@ class GfxWidget : public QWidget {
   void gotoRequested();
   // T6.1：双击画面进入/退出全屏；单击仍走 QWidget 默认（不吞拖动/焦点）。
   void fullScreenToggleRequested();
+  // T7.1：一帧真正走到 Present 之后发一次；用于冷启动 P2 的“首帧呈现”埋点。
+  void framePresented();
 
  protected:
   void showEvent(QShowEvent* event) override;
@@ -59,4 +61,6 @@ class GfxWidget : public QWidget {
   std::unique_ptr<lapian::gfx::VideoRenderer> video_renderer_;
   bool init_failed_ = false;
   bool device_lost_reported_ = false;
+  // T7.1：SetVideoFrame 成功后置位，下一次 Present 成功时发 framePresented。
+  bool present_pending_ = false;
 };

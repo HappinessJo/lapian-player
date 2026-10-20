@@ -103,26 +103,37 @@ void GfxWidget::PresentFrame() {
     return;
   }
   // Render + Present 都使用立即上下文，整体与截图回读串行化。
-  const std::lock_guard<std::recursive_mutex> lock(lapian::gfx::D3D11ContextMutex());
-  HRESULT hr = E_FAIL;
-  if (video_renderer_ && video_renderer_->HasFrame()) {
-    video_renderer_->Render(swap_chain_->render_target_view(), swap_chain_->width(),
-                            swap_chain_->height());
-    hr = swap_chain_->Present();
-  } else {
-    hr = swap_chain_->Render();
-  }
-
-  if (D3D11Device::IsDeviceLost(hr)) {
-    if (!device_lost_reported_) {
-      device_lost_reported_ = true;
-      qWarning() << "D3D11 设备丢失，销毁后等待重建";
-      emit deviceError(QStringLiteral("显卡设备丢失（驱动重置或远程会话切换），已尝试重建。"));
+  bool presented = false;
+  {
+    const std::lock_guard<std::recursive_mutex> lock(lapian::gfx::D3D11ContextMutex());
+    HRESULT hr = E_FAIL;
+    if (video_renderer_ && video_renderer_->HasFrame()) {
+      video_renderer_->Render(swap_chain_->render_target_view(), swap_chain_->width(),
+                              swap_chain_->height());
+      hr = swap_chain_->Present();
+      presented = SUCCEEDED(hr);
+    } else {
+      hr = swap_chain_->Render();
     }
-    video_renderer_.reset();
-    swap_chain_.reset();
-    device_.reset();
-    update();
+
+    if (D3D11Device::IsDeviceLost(hr)) {
+      if (!device_lost_reported_) {
+        device_lost_reported_ = true;
+        qWarning() << "D3D11 设备丢失，销毁后等待重建";
+        emit deviceError(
+            QStringLiteral("显卡设备丢失（驱动重置或远程会话切换），已尝试重建。"));
+      }
+      video_renderer_.reset();
+      swap_chain_.reset();
+      device_.reset();
+      update();
+      return;
+    }
+  }
+  // T7.1：一次成功 Present 后清 pending；信号在锁外发，监听者不会卡住 D3D11 上下文。
+  if (presented && present_pending_) {
+    present_pending_ = false;
+    emit framePresented();
   }
 }
 
@@ -143,6 +154,7 @@ void GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwis
     emit deviceError(QString::fromStdString(error));
     return;
   }
+  present_pending_ = true;
   update();
 }
 

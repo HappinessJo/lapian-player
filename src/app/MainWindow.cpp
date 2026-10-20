@@ -40,6 +40,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cmath>
@@ -120,6 +121,7 @@ QString EscapeForLog(QString text) {
 MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
     : QMainWindow(parent) {
   settings_log_ = qEnvironmentVariableIsSet("LAPIAN_SETTINGS_LOG");
+  startup_log_ = qEnvironmentVariableIsSet("LAPIAN_STARTUP_LOG");
   // T6.3：构造期间只建立 store；文件读取放在 UI 建好之后、首次打开文件之前，
   // 失败/损坏静默回退默认值。
   settings_store_ =
@@ -421,6 +423,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
 
   connect(gfx_, &GfxWidget::deviceReady, this, &MainWindow::OnDeviceReady);
   connect(gfx_, &GfxWidget::deviceError, this, &MainWindow::OnDeviceError, Qt::QueuedConnection);
+  // T7.1：把首帧真正 Present 的时刻转给 main 的冷启动埋点。
+  connect(gfx_, &GfxWidget::framePresented, this, &MainWindow::framePresented);
   connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
   connect(gfx_, &GfxWidget::fullScreenToggleRequested, this, &MainWindow::ToggleFullScreen);
@@ -472,6 +476,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
 }
 
 MainWindow::~MainWindow() {
+  // T7.1：先取消并 join 索引线程（每包检查取消，通常毫秒级返回），再释放会话。
+  CancelIndexBuild();
   // 先落盘设置（不等待截图/标记），再停掉可能还在跑的步进连发并摘掉应用级过滤器。
   FlushSettings();
   StopStepRepeat();
@@ -917,6 +923,8 @@ QStringList MainWindow::LayoutProblemsForTest() const {
 }
 
 void MainWindow::ShowEmptyState() {
+  // T7.1：空态/切文件前停止后台索引，避免旧结果装到空会话上。
+  CancelIndexBuild();
   CancelPendingMarkJump();
   if (displayed_frame_ != nullptr) {
     av_frame_unref(displayed_frame_);
@@ -1055,6 +1063,12 @@ void MainWindow::OpenFile(const QString& path) {
   if (path.isEmpty()) {
     return;
   }
+  // T7.1：打开路径分段计时；只在冷启动日志开启时输出。
+  QElapsedTimer open_timer;
+  open_timer.start();
+  double audio_open_ms = 0.0;
+  double waveform_start_ms = 0.0;
+  double first_upload_ms = 0.0;
   CancelPendingMarkJump();
   if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
@@ -1074,7 +1088,9 @@ void MainWindow::OpenFile(const QString& path) {
 
   auto candidate = std::make_unique<lapian::media::MediaSession>();
   std::string error;
-  if (!candidate->Open(path_utf8, gfx_->d3d_device(), &error)) {
+  // T7.1：产品路径不在这里建索引（首帧优先）；旧 GUI 回归测试用同步模式保持
+  // 打开后即可导航的既有语义。
+  if (!candidate->Open(path_utf8, gfx_->d3d_device(), &error, sync_index_for_test_)) {
     QString message = DescribeProbeError(candidate->last_attempt().error);
     if (!error.empty()) {
       message += QStringLiteral("\n\n") + QString::fromStdString(error);
@@ -1092,38 +1108,15 @@ void MainWindow::OpenFile(const QString& path) {
     timeline_->ClearWaveform();
   }
 
-  // T5.2：用候选会话的 FrameIndex 构造 FrameLookup，让 MarkStore 做 frame+pts
-  // 校正；回调只在 Open 调用期间使用，不持有索引指针。
-  lapian::core::FrameLookup mark_lookup;
-  const lapian::media::FrameIndex& candidate_index = candidate->index();
-  if (candidate_index.IsReady() && !candidate_index.empty()) {
-    mark_lookup.frame_count = static_cast<std::int64_t>(candidate_index.size());
-    mark_lookup.pts_of_frame = [&candidate_index](std::int64_t frame,
-                                                  std::int64_t* pts_us) {
-      const lapian::media::FrameIndexEntry* entry = candidate_index.Entry(frame);
-      if (entry == nullptr) {
-        return false;
-      }
-      *pts_us = entry->pts_us;
-      return true;
-    };
-    mark_lookup.frame_of_pts = [&candidate_index](std::int64_t pts_us,
-                                                  std::int64_t* frame) {
-      return candidate_index.FindExactPts(pts_us, frame);
-    };
-  }
-  lapian::core::MarkStore opened_marks = lapian::core::MarkStore::Open(
-      path_utf8, candidate->info().duration_us, {}, mark_lookup);
-
   // 旧预览器持有旧索引指针，必须在替换 session 之前停掉。
   StopPreview();
   preview_.reset();
   if (audio_) {
     audio_.reset();
   }
+  // T7.1：旧索引线程先取消并 join，避免它把结果装到新会话上。
+  CancelIndexBuild();
   session_ = std::move(candidate);
-  marks_ = std::make_unique<lapian::core::MarkStore>(std::move(opened_marks));
-  marks_dirty_ = false;
   playback_->SetSession(session_.get());
   current_frame_ = 0;
   snapshot_saved_paths_.clear();
@@ -1135,36 +1128,18 @@ void MainWindow::OpenFile(const QString& path) {
   snapshot_capture_samples_.clear();
   snapshot_save_samples_.clear();
   play_action_->setEnabled(true);
-  const bool can_seek = session_->index().IsReady() && !session_->index().empty();
-  prev_action_->setEnabled(can_seek);
-  next_action_->setEnabled(can_seek);
-  goto_action_->setEnabled(can_seek);
-  if (mark_action_ != nullptr) {
-    mark_action_->setEnabled(can_seek);
-  }
   if (snapshot_action_ != nullptr) {
     snapshot_action_->setEnabled(true);
   }
 
-  // T2.7：时间轴先用当前索引的帧数；索引为空时不画假刻度。
-  const std::int64_t timeline_frames =
-      static_cast<std::int64_t>(session_->index().size());
-  timeline_->SetFrameCount(timeline_frames);
-  loop_.Clear();
-  SyncLoopUi();
-  zoom_in_action_->setEnabled(timeline_frames > 0);
-  zoom_out_action_->setEnabled(timeline_frames > 0);
-  if (waveform_action_ != nullptr) {
-    waveform_action_->setEnabled(timeline_frames > 0);
-    waveform_action_->setChecked(waveform_visible_);
-  }
-  slower_action_->setEnabled(true);
-  faster_action_->setEnabled(true);
-  speed_label_->setText(FormatSpeed(rate_));
-
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
-  gfx_->SetVideoFrame(frame.av_frame, info.rotation.counterclockwise_degrees);
+  {
+    QElapsedTimer upload_timer;
+    upload_timer.start();
+    gfx_->SetVideoFrame(frame.av_frame, info.rotation.counterclockwise_degrees);
+    first_upload_ms = static_cast<double>(upload_timer.nsecsElapsed()) / 1.0e6;
+  }
   RememberDisplayedFrame(frame.av_frame, info.rotation.counterclockwise_degrees, 0);
 
   const QFileInfo file_info(path);
@@ -1179,6 +1154,21 @@ void MainWindow::OpenFile(const QString& path) {
         QStringLiteral("可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"), 8000);
   } else {
     statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
+  }
+
+  // 新文件从“循环：关”开始；A/B 需要索引，扫描中由 SyncLoopUi 禁用。
+  loop_.Clear();
+  SyncLoopUi();
+
+  // T7.1：索引已就绪（同步模式）→ 直接启用导航/标记/预览；
+  // 同步模式下索引失败也不再重试，直接进入“无索引”状态；异步模式才扫描。
+  if (session_->HasIndex()) {
+    ApplyIndexState();
+  } else if (sync_index_for_test_) {
+    ApplyIndexState();
+  } else {
+    BeginIndexScan();
+    StartIndexBuild();
   }
 
   // T3.1：音频异步打开；首帧已经呈现，不等音频设备初始化。
@@ -1199,8 +1189,13 @@ void MainWindow::OpenFile(const QString& path) {
     audio->SetVolume(volume_);
     audio->SetMute(muted_);
     audio->SetRate(rate_);
-    if (!audio->Open(path_utf8, info.audio.stream_index,
-                     static_cast<double>(info.av_offset_us) / 1.0e6)) {
+    QElapsedTimer audio_timer;
+    audio_timer.start();
+    const bool audio_opened =
+        audio->Open(path_utf8, info.audio.stream_index,
+                    static_cast<double>(info.av_offset_us) / 1.0e6);
+    audio_open_ms = static_cast<double>(audio_timer.nsecsElapsed()) / 1.0e6;
+    if (!audio_opened) {
       audio_label_->setText(QStringLiteral("音频不可用"));
       statusBar()->showMessage(QStringLiteral("音频线程启动失败，视频继续静音播放"), 5000);
     } else {
@@ -1225,8 +1220,13 @@ void MainWindow::OpenFile(const QString& path) {
   }
   if (info.has_audio) {
     waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
-    if (!waveform_->Start(path_utf8, info.audio.stream_index,
-                          static_cast<double>(info.av_offset_us) / 1.0e6)) {
+    QElapsedTimer waveform_timer;
+    waveform_timer.start();
+    const bool waveform_started =
+        waveform_->Start(path_utf8, info.audio.stream_index,
+                         static_cast<double>(info.av_offset_us) / 1.0e6);
+    waveform_start_ms = static_cast<double>(waveform_timer.nsecsElapsed()) / 1.0e6;
+    if (!waveform_started) {
       waveform_label_->setText(QStringLiteral("波形：失败"));
       timeline_->SetWaveformMessage(QStringLiteral("波形生成失败"));
     } else if (const auto waveform_data = waveform_->data()) {
@@ -1253,16 +1253,278 @@ void MainWindow::OpenFile(const QString& path) {
     timeline_->SetWaveformVisible(waveform_visible_);
   }
 
-  // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
-  if (can_seek) {
-    preview_ = std::make_unique<lapian::media::PreviewDecoder>();
-    preview_->Configure(session_->path_utf8(), info.video.stream_index,
-                        &session_->index());
+  // T2.9：预览解码器在索引就绪后预热（见 ApplyIndexState）；扫描中拖动禁用。
+
+  if (startup_log_) {
+    const lapian::media::MediaOpenTimings& timings = session_->last_open_timings();
+    std::fprintf(stderr,
+                 "T7.1 open_timing probe_ms=%.2f decoder_ms=%.2f first_frame_ms=%.2f "
+                 "index_ms=%.2f index_frames=%zu index_ok=%d index_mode=%s "
+                 "audio_open_ms=%.2f waveform_start_ms=%.2f first_upload_ms=%.2f "
+                 "ui_total_ms=%.2f\n",
+                 timings.probe_ms, timings.decoder_open_ms, timings.first_frame_ms,
+                 timings.index_ms, timings.index_frames, timings.index_ok ? 1 : 0,
+                 sync_index_for_test_ ? "sync" : "async", audio_open_ms,
+                 waveform_start_ms, first_upload_ms,
+                 static_cast<double>(open_timer.nsecsElapsed()) / 1.0e6);
+    std::fflush(stderr);
+  }
+}
+
+lapian::core::TotalFrameCount MainWindow::ContainerTotal() const {
+  if (session_ == nullptr) {
+    return lapian::core::TotalFrameCount::Unknown();
+  }
+  const lapian::media::MediaInfo& info = session_->info();
+  const lapian::core::FrameRate rate(info.video.frame_rate.num, info.video.frame_rate.den);
+  const std::int64_t known_frames =
+      info.video.nb_frames_known ? info.video.nb_frames : 0;
+  return lapian::core::TotalFrameCount::FromContainer(known_frames, info.duration_us, rate);
+}
+
+void MainWindow::BeginIndexScan() {
+  index_scanning_ = true;
+  index_scan_timer_.start();
+  // 扫描中是过渡态：VFR 的扫描态已在 SetMedia 里给出，这里覆盖为同一状态。
+  info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+  const lapian::core::TotalFrameCount estimate = ContainerTotal();
+  const std::int64_t estimate_frames = estimate.has_value() ? estimate.value() : 0;
+  if (timeline_ != nullptr) {
+    timeline_->SetFrameCount(estimate_frames);
+    // 索引未就绪时拖动/点击无法精确落帧，先禁用，索引完成后再启用。
+    timeline_->setEnabled(false);
+  }
+  prev_action_->setEnabled(false);
+  next_action_->setEnabled(false);
+  goto_action_->setEnabled(false);
+  zoom_in_action_->setEnabled(false);
+  zoom_out_action_->setEnabled(false);
+  if (mark_action_ != nullptr) {
+    mark_action_->setEnabled(false);
+  }
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setEnabled(false);
+  }
+  slower_action_->setEnabled(true);
+  faster_action_->setEnabled(true);
+  speed_label_->setText(FormatSpeed(rate_));
+  SyncLoopUi();
+  // 索引就绪后再加载标记：MarkStore 需要索引做 frame+pts 校正。
+  marks_.reset();
+  marks_dirty_ = false;
+  if (mark_panel_ != nullptr) {
+    mark_panel_->Clear();
+  }
+  if (timeline_ != nullptr) {
+    timeline_->SetMarks({});
+  }
+  preview_.reset();
+  if (startup_log_) {
+    std::fprintf(stderr, "T7.1 index_scan estimate_frames=%lld\n",
+                 static_cast<long long>(estimate_frames));
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::StartIndexBuild() {
+  if (session_ == nullptr) {
+    return;
+  }
+  CancelIndexBuild();
+  const std::uint64_t generation = index_generation_;
+  index_scanning_ = true;
+  if (sync_index_for_test_) {
+    std::string error;
+    if (session_->BuildIndexNow(&error)) {
+      ApplyIndexReady(generation);
+    } else {
+      ApplyIndexFailed(generation);
+    }
+    return;
   }
 
-  // T5.2：列表、时间轴标记、实际存储位置与加载警告都在这里一次刷新。
+  auto cancel = std::make_shared<std::atomic<bool>>(false);
+  index_cancel_ = cancel;
+  const std::string path = session_->path_utf8();
+  const int stream = session_->video_stream_index();
+  try {
+    index_thread_ = std::thread([this, generation, path, stream, cancel]() {
+      auto built = std::make_shared<lapian::media::FrameIndex>();
+      std::string error;
+      const auto started = std::chrono::steady_clock::now();
+      const bool ok = built->BuildFromFile(path, stream, &error, cancel.get());
+      const double build_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - started)
+              .count();
+      if (cancel->load(std::memory_order_relaxed)) {
+        return;
+      }
+      QMetaObject::invokeMethod(
+          this,
+          [this, generation, ok, built, build_ms]() {
+            if (generation != index_generation_ || session_ == nullptr) {
+              return;
+            }
+            if (ok) {
+              session_->InstallIndex(std::move(*built), build_ms);
+              ApplyIndexReady(generation);
+            } else {
+              ApplyIndexFailed(generation);
+            }
+          },
+          Qt::QueuedConnection);
+    });
+  } catch (const std::exception& exception) {
+    qWarning() << "索引线程启动失败:" << exception.what();
+    ApplyIndexFailed(generation);
+  }
+}
+
+void MainWindow::CancelIndexBuild() {
+  // 先让 generation 失效，再通知 worker 停止；join 保证不会再有回调在析构后到达。
+  ++index_generation_;
+  index_scanning_ = false;
+  if (index_cancel_) {
+    index_cancel_->store(true, std::memory_order_relaxed);
+  }
+  if (index_thread_.joinable()) {
+    index_thread_.join();
+  }
+  index_cancel_.reset();
+}
+
+void MainWindow::ApplyIndexReady(std::uint64_t generation) {
+  if (generation != index_generation_ || session_ == nullptr) {
+    return;
+  }
+  index_scanning_ = false;
+  ApplyIndexState();
+  if (startup_log_) {
+    const lapian::media::MediaOpenTimings& timings = session_->last_open_timings();
+    std::fprintf(stderr,
+                 "T7.1 index_ready frames=%zu index_ms=%.2f wait_ms=%lld total_ms=%.2f\n",
+                 session_->index().size(), timings.index_ms,
+                 static_cast<long long>(index_scan_timer_.elapsed()),
+                 timings.total_ms);
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::ApplyIndexFailed(std::uint64_t generation) {
+  if (generation != index_generation_ || session_ == nullptr) {
+    return;
+  }
+  index_scanning_ = false;
+  ApplyIndexState();
+  statusBar()->showMessage(QStringLiteral("帧索引建立失败，逐帧/跳转不可用"), 8000);
+  if (startup_log_) {
+    std::fprintf(stderr, "T7.1 index_failed wait_ms=%lld\n",
+                 static_cast<long long>(index_scan_timer_.elapsed()));
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::ApplyIndexState() {
+  if (session_ == nullptr) {
+    return;
+  }
+  const bool ready = session_->HasIndex();
+  const std::int64_t frames =
+      ready ? static_cast<std::int64_t>(session_->index().size()) : 0;
+  if (timeline_ != nullptr) {
+    timeline_->SetFrameCount(frames);
+    timeline_->setEnabled(true);
+  }
+  const bool can_seek = ready;
+  prev_action_->setEnabled(can_seek);
+  next_action_->setEnabled(can_seek);
+  goto_action_->setEnabled(can_seek);
+  if (mark_action_ != nullptr) {
+    mark_action_->setEnabled(can_seek);
+  }
+  zoom_in_action_->setEnabled(frames > 0);
+  zoom_out_action_->setEnabled(frames > 0);
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setEnabled(frames > 0);
+    waveform_action_->setChecked(waveform_visible_);
+  }
+  slower_action_->setEnabled(true);
+  faster_action_->setEnabled(true);
+  speed_label_->setText(FormatSpeed(rate_));
+  // 扫描完成：总帧数从“扫描中”变为索引的精确/估算值；失败则回到容器值。
+  // VFR 的总帧数按 T6.5 口径保持“扫描中”（帧号按显示帧计数，不承诺精确总数），
+  // 不因为后台索引完成而改写这一提示语义。
+  if (session_->IsVfrSuspect()) {
+    info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+  } else {
+    info_bar_->SetTotal(ready ? session_->index().Total() : ContainerTotal());
+  }
+  SyncLoopUi();
+  LoadMarksForCurrentSession();
+  if (ready) {
+    // T2.9：索引就绪后再预热预览器；扫描中不创建（没有可用索引）。
+    preview_ = std::make_unique<lapian::media::PreviewDecoder>();
+    preview_->Configure(session_->path_utf8(), session_->video_stream_index(),
+                        &session_->index());
+  }
   RefreshMarksUi();
   ShowMarkWarnings();
+}
+
+void MainWindow::LoadMarksForCurrentSession() {
+  if (session_ == nullptr) {
+    return;
+  }
+  // T5.2：用当前索引构造 FrameLookup，让 MarkStore 做 frame+pts 校正；
+  // 回调只在 Open 调用期间使用，不持有索引指针。
+  lapian::core::FrameLookup mark_lookup;
+  const lapian::media::FrameIndex& index = session_->index();
+  if (index.IsReady() && !index.empty()) {
+    mark_lookup.frame_count = static_cast<std::int64_t>(index.size());
+    mark_lookup.pts_of_frame = [&index](std::int64_t frame, std::int64_t* pts_us) {
+      const lapian::media::FrameIndexEntry* entry = index.Entry(frame);
+      if (entry == nullptr) {
+        return false;
+      }
+      *pts_us = entry->pts_us;
+      return true;
+    };
+    mark_lookup.frame_of_pts = [&index](std::int64_t pts_us, std::int64_t* frame) {
+      return index.FindExactPts(pts_us, frame);
+    };
+  }
+  lapian::core::MarkStore opened_marks = lapian::core::MarkStore::Open(
+      session_->path_utf8(), session_->info().duration_us, {}, mark_lookup);
+  marks_ = std::make_unique<lapian::core::MarkStore>(std::move(opened_marks));
+  marks_dirty_ = false;
+}
+
+bool MainWindow::IndexReadyForTest() const {
+  return session_ != nullptr && session_->HasIndex();
+}
+
+qint64 MainWindow::IndexFrameCountForTest() const {
+  return session_ == nullptr ? 0
+                             : static_cast<qint64>(session_->index().size());
+}
+
+QString MainWindow::IndexStateForTest() const {
+  const bool has_session = session_ != nullptr;
+  const bool ready = IndexReadyForTest();
+  int total_state = -1;
+  if (info_bar_ != nullptr) {
+    total_state = static_cast<int>(info_bar_->TotalForTest().state());
+  }
+  return QStringLiteral(
+             "session=%1 ready=%2 scanning=%3 frames=%4 nav=%5 timeline=%6 total=%7")
+      .arg(has_session ? 1 : 0)
+      .arg(ready ? 1 : 0)
+      .arg(index_scanning_ ? 1 : 0)
+      .arg(IndexFrameCountForTest())
+      .arg(prev_action_ != nullptr && prev_action_->isEnabled() ? 1 : 0)
+      .arg(timeline_ != nullptr && timeline_->isEnabled() ? 1 : 0)
+      .arg(total_state);
 }
 
 void MainWindow::ShowGotoDialog() {

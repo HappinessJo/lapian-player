@@ -1,16 +1,20 @@
 #pragma once
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QPointer>
 #include <QSize>
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <thread>
 #include <vector>
 
+#include "core/FrameMath.h"
 #include "core/LoopRange.h"
 #include "core/MarkStore.h"
 
@@ -190,6 +194,17 @@ class MainWindow : public QMainWindow {
   QString BannerUiStateForTest() const;
   QString SecondaryStatusTextForTest() const;
   int InfoBarHeightForTest() const;
+  // T7.1 冷启动：打开成功（会话已替换）与首帧呈现信号，供 --startup-test 计时。
+  bool HasMediaForTest() const { return session_ != nullptr; }
+  // T7.1 后台索引：产品路径异步；旧 GUI 回归测试在打开后立即导航，需同步建索引。
+  void SetIndexSynchronousForTest(bool sync) { sync_index_for_test_ = sync; }
+  bool IndexReadyForTest() const;
+  qint64 IndexFrameCountForTest() const;
+  QString IndexStateForTest() const;
+
+ signals:
+  // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
+  void framePresented();
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -287,6 +302,15 @@ class MainWindow : public QMainWindow {
   void UpdateResponsiveLayout();
   // T6.5：InfoBar 只显示一条横幅，其余提示汇总到状态栏常驻标签。
   void UpdateStatusNotices();
+  // T7.1：索引后置。首帧先出，索引在后台线程建；扫描中禁用依赖索引的导航。
+  void BeginIndexScan();
+  void StartIndexBuild();
+  void CancelIndexBuild();
+  void ApplyIndexReady(std::uint64_t generation);
+  void ApplyIndexFailed(std::uint64_t generation);
+  void ApplyIndexState();
+  void LoadMarksForCurrentSession();
+  lapian::core::TotalFrameCount ContainerTotal() const;
 
   GfxWidget* gfx_ = nullptr;
   QWidget* stage_ = nullptr;
@@ -370,6 +394,15 @@ class MainWindow : public QMainWindow {
   bool settings_dirty_ = false;
   bool applying_settings_ = false;
   bool settings_log_ = false;
+  // T7.1：冷启动分段计时日志（LAPIAN_STARTUP_LOG 或 --startup-test）。
+  bool startup_log_ = false;
+  // T7.1：索引线程与取消。CancelIndexBuild 会 join，索引循环每包检查取消标志。
+  bool sync_index_for_test_ = false;
+  std::uint64_t index_generation_ = 0;
+  bool index_scanning_ = false;
+  std::thread index_thread_;
+  std::shared_ptr<std::atomic<bool>> index_cancel_;
+  QElapsedTimer index_scan_timer_;
   QString settings_load_status_;
   double settings_last_save_ms_ = 0.0;
   double settings_last_load_ms_ = 0.0;
