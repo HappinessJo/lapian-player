@@ -1,16 +1,20 @@
+#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QPixmap>
+#include <QPushButton>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
 
 #include <cstdio>
 #include <chrono>
+#include <memory>
 #include <utility>
 
 #include "app/MainWindow.h"
@@ -33,6 +37,7 @@ int main(int argc, char* argv[]) {
   bool ab_test = false;
   bool loop_test = false;
   bool mark_test = false;
+  bool note_test = false;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
@@ -56,6 +61,8 @@ int main(int argc, char* argv[]) {
       loop_test = true;
     } else if (arguments[i] == QStringLiteral("--mark-test")) {
       mark_test = true;
+    } else if (arguments[i] == QStringLiteral("--note-test")) {
+      note_test = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -67,14 +74,17 @@ int main(int argc, char* argv[]) {
   if (mark_test) {
     qputenv("LAPIAN_MARK_LOG", "1");
   }
+  if (note_test) {
+    qputenv("LAPIAN_MARK_LOG", "1");
+  }
 
   const auto process_start = std::chrono::steady_clock::now();
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
-                                    step_test, ab_test, loop_test, mark_test, playback_rate,
-                                    has_playback_rate, process_start]() {
+                                    step_test, ab_test, loop_test, mark_test, note_test,
+                                    playback_rate, has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -350,6 +360,195 @@ int main(int argc, char* argv[]) {
           log_state("b-final-empty");
         });
         QTimer::singleShot(11500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
+      }
+      if (note_test) {
+        // T5.3：编辑 → 直接关窗 → 重开（F8-A2）、空备注、覆盖保存、焦点隔离、
+        // 文件隔离；每次提交都走 MarkStore::SetMarkText + Save。
+        const QString note_a = file_path;
+        const QString note_b = file_b;
+        const QString sidecar_a = note_a + QStringLiteral(".lapian.json");
+        const QString sidecar_b = note_b + QStringLiteral(".lapian.json");
+        auto failures = std::make_shared<int>(0);
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T5.3 note_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_text = [&window](const char* step) {
+          const QByteArray text = window.MarkTextForTest(0).toUtf8();
+          std::fprintf(stderr, "T5.3 note_test %s count=%d %s\n", step,
+                       window.MarkCountForTest(), text.constData());
+          std::fflush(stderr);
+        };
+        // 在 QMessageBox::question 的嵌套事件循环里点按钮；默认按钮必须是 No。
+        auto answer_delete_dialog =
+            [check](QMessageBox::StandardButton answer) {
+              auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+              if (box == nullptr) {
+                check("confirm-dialog-found", false);
+                return;
+              }
+              const QAbstractButton* default_button = box->defaultButton();
+              const QAbstractButton* no_button = box->button(QMessageBox::No);
+              const bool default_no =
+                  default_button != nullptr && default_button == no_button;
+              std::fprintf(stderr,
+                           "T5.3 note_confirm dialog=%d default_no=%d answer=%d\n",
+                           box->windowTitle().contains(QStringLiteral("删除")) ? 1 : 0,
+                           default_no ? 1 : 0, static_cast<int>(answer));
+              std::fflush(stderr);
+              check("confirm-default-no", default_no);
+              QAbstractButton* target = box->button(answer);
+              if (target == nullptr) {
+                check("confirm-button-found", false);
+                box->done(answer);
+                return;
+              }
+              target->click();
+            };
+
+        schedule(500, [&window, sidecar_a, log_text]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.AddMarkForTest();
+          log_text("added");
+          std::fprintf(stderr, "T5.3 note_sidecar exists=%d\n",
+                       QFileInfo::exists(sidecar_a) ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(800, [&window, log_text, check]() {
+          window.SetMarkNoteForTest(0, QStringLiteral("转场A"),
+                                    QStringLiteral("第一行\n第二行"));
+          log_text("pending-before-close");
+          check("not-committed-before-close",
+                window.MarkTextForTest(0) == QStringLiteral("frame=100 label=帧 100 note="));
+          const bool focused = window.FocusNoteEditorForTest();
+          const bool playing_before =
+              window.MarkStateForTest().contains(QStringLiteral("playing=0"));
+          window.TogglePlaybackForTest();  // spec §3.7：文本框聚焦时 Space 不播放
+          const bool playing_after =
+              window.MarkStateForTest().contains(QStringLiteral("playing=0"));
+          std::fprintf(stderr,
+                       "T5.3 note_focus focused=%d playing_before=%d playing_after=%d\n",
+                       focused ? 1 : 0, playing_before ? 1 : 0, playing_after ? 1 : 0);
+          std::fflush(stderr);
+          check("focus-blocks-space", focused && playing_after);
+          const QString shot_dir = QDir::currentPath() + QStringLiteral("/build");
+          QDir().mkpath(shot_dir);
+          const bool shot =
+              window.grab().save(shot_dir + QStringLiteral("/t5.3-note-ui.png"));
+          std::fprintf(stderr, "T5.3 note_shot ui ok=%d\n", shot ? 1 : 0);
+          std::fflush(stderr);
+          const bool closed = window.CloseForTest();
+          std::fprintf(stderr, "T5.3 note_close accepted=%d\n", closed ? 1 : 0);
+          std::fflush(stderr);
+          check("close-accepted", closed);
+          log_text("after-close");
+        });
+        schedule(1100, [&window, note_a, log_text, check]() {
+          window.OpenFile(note_a);
+          log_text("reopened-after-close");
+          check("f8a2-note-persisted",
+                window.MarkTextForTest(0) ==
+                    QStringLiteral("frame=100 label=转场A note=第一行\\n第二行"));
+        });
+        schedule(1200, [&window]() { window.ActivateMarkForTest(0); });
+        schedule(1350, [&window, check]() {
+          const QString state = window.MarkStateForTest();
+          std::fprintf(stderr, "T5.3 note_click %s\n", state.toUtf8().constData());
+          std::fflush(stderr);
+          check("f6a1-click-jump-pause",
+                state.contains(QStringLiteral("frame=100")) &&
+                    state.contains(QStringLiteral("playing=0")));
+        });
+        schedule(1500, [&window, log_text, check]() {
+          window.SetMarkNoteForTest(0, QString(), QString());
+          window.CommitNoteForTest();
+          log_text("empty-saved");
+          check("empty-note-stored",
+                window.MarkTextForTest(0) == QStringLiteral("frame=100 label= note="));
+        });
+        schedule(1800, [&window, note_a, log_text, check]() {
+          window.OpenFile(note_a);
+          log_text("reopened-empty");
+          check("empty-note-persisted",
+                window.MarkTextForTest(0) == QStringLiteral("frame=100 label= note="));
+        });
+        schedule(2200, [&window, log_text]() {
+          window.SetMarkNoteForTest(0, QStringLiteral("转场B"),
+                                    QStringLiteral("第二版\n覆盖保存"));
+          const bool closed = window.CloseForTest();
+          std::fprintf(stderr, "T5.3 note_close overwrite accepted=%d\n",
+                       closed ? 1 : 0);
+          std::fflush(stderr);
+          log_text("overwrite-after-close");
+        });
+        schedule(2500, [&window, note_a, log_text, check]() {
+          window.OpenFile(note_a);
+          log_text("reopened-overwrite");
+          check("overwrite-persisted",
+                window.MarkTextForTest(0) ==
+                    QStringLiteral("frame=100 label=转场B note=第二版\\n覆盖保存"));
+        });
+        schedule(2800, [&window, log_text, check]() {
+          window.ResetNotePerfSamplesForTest();
+          for (int i = 0; i < 20; ++i) {
+            window.SetMarkNoteForTest(0, QStringLiteral("标签%1").arg(i),
+                                      QStringLiteral("备注%1").arg(i));
+            window.CommitNoteForTest();
+          }
+          const QByteArray perf = window.NotePerfSummaryForTest().toUtf8();
+          std::fprintf(stderr, "T5.3 note_perf %s\n", perf.constData());
+          std::fflush(stderr);
+          check("perf-samples",
+                window.NotePerfSummaryForTest().contains(QStringLiteral("n=20")));
+          log_text("after-20-commits");
+          check("last-commit-stored",
+                window.MarkTextForTest(0) ==
+                    QStringLiteral("frame=100 label=标签19 note=备注19"));
+        });
+        schedule(3100, [&window, note_a, log_text, check]() {
+          window.OpenFile(note_a);
+          log_text("reopened-after-20");
+          check("last-commit-persisted",
+                window.MarkTextForTest(0) ==
+                    QStringLiteral("frame=100 label=标签19 note=备注19"));
+        });
+        // F6-A2：真实删除确认对话框路径：取消不删，确认才删。
+        schedule(3150, [&window]() { window.DeleteMarkWithConfirmForTest(0); });
+        schedule(3200, [answer_delete_dialog]() {
+          answer_delete_dialog(QMessageBox::No);
+        });
+        schedule(3300, [&window, log_text, check]() {
+          log_text("after-confirm-no");
+          check("confirm-no-keeps-mark", window.MarkCountForTest() == 1);
+        });
+        schedule(3350, [&window]() { window.DeleteMarkWithConfirmForTest(0); });
+        schedule(3400, [answer_delete_dialog]() {
+          answer_delete_dialog(QMessageBox::Yes);
+        });
+        schedule(3500, [&window, sidecar_a, log_text, check]() {
+          log_text("after-confirm-yes");
+          check("confirm-yes-removes-mark", window.MarkCountForTest() == 0);
+          check("confirm-yes-removes-sidecar", !QFileInfo::exists(sidecar_a));
+        });
+        schedule(3800, [&window, note_b, sidecar_b, log_text, check]() {
+          if (note_b.isEmpty()) {
+            check("file-b-skipped", true);
+            return;
+          }
+          window.OpenFile(note_b);
+          log_text("b-opened");
+          check("f8a3-b-empty", window.MarkCountForTest() == 0);
+          check("f8a3-b-no-file", !QFileInfo::exists(sidecar_b));
+        });
+        QTimer::singleShot(4100, Qt::PreciseTimer, &app, [failures]() {
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
       }
     });
   }

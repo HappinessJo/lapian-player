@@ -77,6 +77,18 @@ class MainWindow : public QMainWindow {
   bool MarkUsingFallbackForTest() const;
   int MarkWarningCountForTest() const;
   QString MarkPerfSummaryForTest() const;
+  // T5.3 自动化验证入口：选中第 index 条标记并在编辑框写入（不提交），
+  // 与用户在侧栏点击行、键入文本走同一组控件；提交由 CommitNoteForTest 或关窗触发。
+  void SetMarkNoteForTest(int index, const QString& label, const QString& note);
+  void CommitNoteForTest();
+  QString MarkTextForTest(int index) const;
+  // T5.3：走真实删除确认对话框（自动化用 QTimer 点击 No/Yes）。
+  void DeleteMarkWithConfirmForTest(int index);
+  bool FocusNoteEditorForTest();
+  // 发送与窗口关闭相同的 QCloseEvent（不隐藏窗口），用于验证关窗前的备注 flush。
+  bool CloseForTest();
+  void ResetNotePerfSamplesForTest();
+  QString NotePerfSummaryForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -129,6 +141,8 @@ class MainWindow : public QMainWindow {
   void ApplySpeed(double rate);
   void AddMarkAtCurrentFrame();
   void ApplyAddMark();
+  void ApplyMarkTextEdited(const QString& id, const QString& label, const QString& note);
+  void FlushMarkEditor();
   void ActivateMark(const QString& id, std::int64_t frame);
   void ApplyDeleteMark(const QString& id, bool confirm);
   bool SaveMarks(bool show_errors);
@@ -183,6 +197,7 @@ class MainWindow : public QMainWindow {
   std::uint64_t navigation_generation_ = 0;
   std::vector<double> mark_ui_samples_;
   std::vector<double> mark_exact_samples_;
+  std::vector<double> note_save_samples_;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;

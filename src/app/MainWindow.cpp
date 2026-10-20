@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -93,6 +94,14 @@ QString DescribeProbeError(lapian::media::MediaProbeError error) {
     default:
       return QStringLiteral("无法打开文件");
   }
+}
+
+// 把备注中的换行/反斜杠转义成日志里的一行（T5.3 自动化证据）。
+QString EscapeForLog(QString text) {
+  text.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+  text.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+  text.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
+  return text;
 }
 
 }  // namespace
@@ -235,6 +244,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
           });
   connect(mark_panel_, &MarkPanel::deleteRequested, this,
           [this](const QString& id) { ApplyDeleteMark(id, true); });
+  connect(mark_panel_, &MarkPanel::markTextEdited, this,
+          &MainWindow::ApplyMarkTextEdited);
 
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
@@ -427,6 +438,10 @@ void MainWindow::ShowEmptyState() {
 }
 
 void MainWindow::OpenDialog() {
+  // spec §3.7：文本框聚焦时除 Esc/Enter 外不触发全局快捷键。
+  if (IsTextInputFocused()) {
+    return;
+  }
   QString start_dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
   if (start_dir.isEmpty()) {
     start_dir = QDir::homePath();
@@ -638,6 +653,9 @@ void MainWindow::OpenFile(const QString& path) {
 }
 
 void MainWindow::ShowGotoDialog() {
+  if (IsTextInputFocused()) {
+    return;
+  }
   if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
     return;
   }
@@ -714,6 +732,10 @@ void MainWindow::GoToInputForTest(const QString& text) {
 }
 
 void MainWindow::TogglePlayback() {
+  // 备注/帧号输入时 Space 属于文本输入，不开始播放（spec §3.7）。
+  if (IsTextInputFocused()) {
+    return;
+  }
   if (playback_ == nullptr || !session_ || !session_->IsOpen()) {
     return;
   }
@@ -762,6 +784,14 @@ void MainWindow::ZoomTimelineOut() {
 }
 
 void MainWindow::ToggleWaveform(bool visible) {
+  if (IsTextInputFocused()) {
+    // W 是文本输入的一部分；静默恢复勾选状态，避免 toggled 递归。
+    if (waveform_action_ != nullptr) {
+      const QSignalBlocker blocker(waveform_action_);
+      waveform_action_->setChecked(!visible);
+    }
+    return;
+  }
   waveform_visible_ = visible;
   if (timeline_ != nullptr) {
     timeline_->SetWaveformVisible(visible);
@@ -1243,6 +1273,8 @@ void MainWindow::ApplyAddMark() {
   if (session_ == nullptr || !session_->IsOpen() || marks_ == nullptr) {
     return;
   }
+  // 先提交侧栏里未保存的标签/备注，避免增删标记时被列表刷新覆盖。
+  FlushMarkEditor();
   const lapian::media::FrameIndex& index = session_->index();
   if (!index.IsReady() || index.empty()) {
     statusBar()->showMessage(QStringLiteral("帧索引未就绪，暂时不能添加标记"), 3000);
@@ -1272,6 +1304,58 @@ void MainWindow::ApplyAddMark() {
     std::fprintf(stderr, "T5.2 mark_add frame=%lld count=%d\n",
                  static_cast<long long>(current_frame_), MarkCountForTest());
     std::fflush(stderr);
+  }
+}
+
+void MainWindow::ApplyMarkTextEdited(const QString& id, const QString& label,
+                                     const QString& note) {
+  if (marks_ == nullptr || mark_panel_ == nullptr) {
+    return;
+  }
+  const std::string id_utf8 = id.toStdString();
+  const lapian::core::Mark* mark = marks_->FindMark(id_utf8);
+  if (mark == nullptr) {
+    return;
+  }
+  const std::string label_utf8 = label.toStdString();
+  const std::string note_utf8 = note.toStdString();
+  if (mark->label == label_utf8 && mark->note == note_utf8) {
+    return;  // 失焦/切换选中时内容没变，不产生一次多余写盘。
+  }
+  const std::int64_t frame = mark->frame;
+  if (!marks_->SetMarkText(id_utf8, label_utf8, note_utf8)) {
+    return;
+  }
+  marks_dirty_ = true;
+  // 只更新这一行的标签/备注摘要，不重建列表，选中与滚动位置保持不变。
+  mark_panel_->UpdateMarkText(id, label, note);
+
+  const bool timing = qEnvironmentVariableIsSet("LAPIAN_MARK_LOG");
+  QElapsedTimer timer;
+  if (timing) {
+    timer.start();
+  }
+  const bool saved = SaveMarks(true);
+  if (timing) {
+    const double ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+    if (note_save_samples_.size() < 1000) {
+      note_save_samples_.push_back(ms);
+    }
+    std::fprintf(stderr,
+                 "T5.3 note_commit frame=%lld label=%s note=%s saved=%d save_ms=%.2f\n",
+                 static_cast<long long>(frame), EscapeForLog(label).toUtf8().constData(),
+                 EscapeForLog(note).toUtf8().constData(), saved ? 1 : 0, ms);
+    std::fflush(stderr);
+  }
+  statusBar()->showMessage(
+      saved ? QStringLiteral("标记 %1 已保存").arg(static_cast<qlonglong>(frame))
+            : QStringLiteral("标记 %1 未保存").arg(static_cast<qlonglong>(frame)),
+      1500);
+}
+
+void MainWindow::FlushMarkEditor() {
+  if (mark_panel_ != nullptr) {
+    mark_panel_->FlushEditor();
   }
 }
 
@@ -1343,6 +1427,8 @@ void MainWindow::ApplyDeleteMark(const QString& id, bool confirm) {
   if (marks_ == nullptr) {
     return;
   }
+  // 删除前先落盘编辑框内容；若删的就是正在编辑的标记，也不会丢别的修改。
+  FlushMarkEditor();
   const std::string id_utf8 = id.toStdString();
   const lapian::core::Mark* mark = marks_->FindMark(id_utf8);
   if (mark == nullptr) {
@@ -1442,6 +1528,8 @@ void MainWindow::UpdateMarkStorageUi() {
 }
 
 bool MainWindow::FlushMarksBeforeSwitch() {
+  // 编辑框里的修改可能还没进入 marks_dirty_；必须先提交再判断。
+  FlushMarkEditor();
   if (marks_ == nullptr || !marks_dirty_) {
     return true;
   }
@@ -1464,6 +1552,8 @@ bool MainWindow::FlushMarksBeforeSwitch() {
 }
 
 bool MainWindow::FlushMarksOnClose() {
+  // F8-A2：编辑备注后直接关窗也必须落盘；commit 走与失焦/回车相同的信号路径。
+  FlushMarkEditor();
   if (marks_ == nullptr || !marks_dirty_) {
     return true;
   }
@@ -1603,6 +1693,70 @@ QString MainWindow::MarkPerfSummaryForTest() const {
   };
   return summarize(mark_ui_samples_, QStringLiteral("ui")) + QStringLiteral(" ") +
          summarize(mark_exact_samples_, QStringLiteral("exact"));
+}
+
+void MainWindow::SetMarkNoteForTest(int index, const QString& label,
+                                    const QString& note) {
+  if (marks_ == nullptr || mark_panel_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return;
+  }
+  const lapian::core::Mark& mark = marks_->marks()[index];
+  // 与用户点击行 → 在编辑框键入等价；这里刻意不提交，留给关窗/Commit 触发。
+  mark_panel_->SelectMark(mark.id);
+  mark_panel_->SetEditorTextForTest(label, note);
+}
+
+void MainWindow::CommitNoteForTest() { FlushMarkEditor(); }
+
+QString MainWindow::MarkTextForTest(int index) const {
+  if (marks_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return QStringLiteral("-");
+  }
+  const lapian::core::Mark& mark = marks_->marks()[index];
+  return QStringLiteral("frame=%1 label=%2 note=%3")
+      .arg(static_cast<qlonglong>(mark.frame))
+      .arg(EscapeForLog(QString::fromStdString(mark.label)),
+           EscapeForLog(QString::fromStdString(mark.note)));
+}
+
+void MainWindow::DeleteMarkWithConfirmForTest(int index) {
+  if (marks_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return;
+  }
+  ApplyDeleteMark(QString::fromStdString(marks_->marks()[index].id), true);
+}
+
+bool MainWindow::FocusNoteEditorForTest() {
+  return mark_panel_ != nullptr && mark_panel_->FocusNoteEditorForTest();
+}
+
+bool MainWindow::CloseForTest() {
+  // 走真实的 closeEvent（flush 备注 + 保存），但不隐藏/销毁窗口，便于随后重开验证。
+  QCloseEvent event;
+  QApplication::sendEvent(this, &event);
+  return event.isAccepted();
+}
+
+void MainWindow::ResetNotePerfSamplesForTest() { note_save_samples_.clear(); }
+
+QString MainWindow::NotePerfSummaryForTest() const {
+  if (note_save_samples_.empty()) {
+    return QStringLiteral("note_save_n=0");
+  }
+  std::vector<double> samples = note_save_samples_;
+  std::sort(samples.begin(), samples.end());
+  const double p50 = samples[samples.size() / 2];
+  const std::size_t p95_index =
+      std::min(samples.size() - 1,
+               static_cast<std::size_t>(static_cast<double>(samples.size()) * 0.95));
+  return QStringLiteral("note_save_n=%1 p50=%2ms p95=%3ms max=%4ms")
+      .arg(samples.size())
+      .arg(p50, 0, 'f', 2)
+      .arg(samples[p95_index], 0, 'f', 2)
+      .arg(samples.back(), 0, 'f', 2);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {

@@ -4,8 +4,11 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 #include <QPointF>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -197,7 +200,114 @@ int main(int argc, char** argv) {
               rebuild_ms[rebuild_ms.size() / 2], rebuild_p95);
   Check(rebuild_p95 < 20.0, "100 标记列表重建 p95 < 20ms");
 
+  // ---- T5.3 标签/备注编辑 ----
+  QLineEdit* label_edit =
+      panel.findChild<QLineEdit*>(QStringLiteral("markLabelEdit"));
+  QPlainTextEdit* note_edit =
+      panel.findChild<QPlainTextEdit*>(QStringLiteral("markNoteEdit"));
+  QWidget* editor_box = panel.findChild<QWidget*>(QStringLiteral("markEditor"));
+  Check(label_edit != nullptr && note_edit != nullptr && editor_box != nullptr,
+        "侧栏包含标签/备注编辑框");
+
   panel.Clear();
+  panel.SetMarks(marks);
+  QApplication::processEvents();
+  Check(editor_box->isHidden(), "没有选中标记时编辑区隐藏");
+
+  QString edited_id;
+  QString edited_label;
+  QString edited_note;
+  int edit_count = 0;
+  QObject::connect(&panel, &MarkPanel::markTextEdited,
+                   [&](const QString& id, const QString& label, const QString& note) {
+                     edited_id = id;
+                     edited_label = label;
+                     edited_note = note;
+                     ++edit_count;
+                   });
+
+  panel.SelectMark("id-5");
+  QApplication::processEvents();
+  Check(editor_box->isVisible(), "选中标记后编辑区可见");
+  Check(label_edit->text() == QStringLiteral("帧 5"), "选中后载入标签");
+  Check(note_edit->toPlainText().isEmpty(), "选中后载入空备注");
+
+  edit_count = 0;
+  label_edit->setText(QStringLiteral("转场"));
+  QKeyEvent label_enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier,
+                        QStringLiteral("\r"));
+  QApplication::sendEvent(label_edit, &label_enter);
+  Check(edit_count == 1 && edited_id == QStringLiteral("id-5") &&
+            edited_label == QStringLiteral("转场") && edited_note.isEmpty(),
+        "标签 Enter 提交 markTextEdited");
+  Check(tree->topLevelItemCount() == 100 &&
+            tree->currentItem()->text(1) == QStringLiteral("转场"),
+        "提交只更新当前行标签且不重建列表");
+  Check(panel.SelectedMarkId() == QStringLiteral("id-5"), "提交后保持选中");
+
+  edit_count = 0;
+  note_edit->setPlainText(QStringLiteral("第一行"));
+  QKeyEvent plain_enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier,
+                        QStringLiteral("\r"));
+  QApplication::sendEvent(note_edit, &plain_enter);
+  Check(edit_count == 0, "备注普通 Enter 不提交");
+  Check(note_edit->toPlainText().contains(QLatin1Char('\n')),
+        "备注普通 Enter 换行");
+
+  note_edit->setPlainText(QStringLiteral("第一行\n第二行"));
+  QKeyEvent ctrl_enter(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier,
+                       QStringLiteral("\r"));
+  QApplication::sendEvent(note_edit, &ctrl_enter);
+  Check(edit_count == 1 && edited_id == QStringLiteral("id-5") &&
+            edited_note == QStringLiteral("第一行\n第二行"),
+        "备注 Ctrl+Enter 提交多行文本");
+  Check(tree->currentItem()->text(2) == QStringLiteral("第一行 第二行"),
+        "备注摘要即时更新且压成单行");
+
+  edit_count = 0;
+  note_edit->clear();
+  Check(panel.FlushEditor(), "清空备注可 flush");
+  Check(edit_count == 1 && edited_note.isEmpty(), "允许保存空备注");
+  Check(tree->currentItem()->text(2).isEmpty(), "空备注摘要为空");
+
+  edit_count = 0;
+  label_edit->setText(QStringLiteral("未提交标签"));
+  panel.SelectMark("id-6");
+  QApplication::processEvents();
+  Check(edit_count == 1 && edited_id == QStringLiteral("id-5") &&
+            edited_label == QStringLiteral("未提交标签"),
+        "切换选中前提交旧标记的编辑");
+  Check(panel.SelectedMarkId() == QStringLiteral("id-6"), "切换到新标记");
+  Check(label_edit->text() == QStringLiteral("帧 6") &&
+            note_edit->toPlainText().contains(QStringLiteral("第一处转场")),
+        "新标记载入自己的标签/备注");
+
+  QTreeWidgetItem* first_item = tree->topLevelItem(0);
+  panel.UpdateMarkText(QStringLiteral("id-0"), QStringLiteral("外部标签"),
+                       QStringLiteral("外部备注"));
+  Check(tree->topLevelItem(0) == first_item, "UpdateMarkText 不重建列表");
+  Check(first_item->text(1) == QStringLiteral("外部标签") &&
+            first_item->text(2) == QStringLiteral("外部备注"),
+        "UpdateMarkText 更新行文本");
+  Check(panel.SelectedMarkId() == QStringLiteral("id-6"),
+        "UpdateMarkText 不改变选中");
+
+  // spec §3.7：文本框聚焦时 Space/W 等不应落到全局 QAction。
+  const bool editor_focused = panel.FocusNoteEditorForTest();
+  Check(editor_focused, "备注框可获得焦点");
+  QKeyEvent space_override(QEvent::ShortcutOverride, Qt::Key_Space, Qt::NoModifier);
+  QApplication::sendEvent(note_edit, &space_override);
+  Check(space_override.isAccepted(), "备注框拦截 Space 的 ShortcutOverride");
+  QKeyEvent w_override(QEvent::ShortcutOverride, Qt::Key_W, Qt::NoModifier);
+  QApplication::sendEvent(note_edit, &w_override);
+  Check(w_override.isAccepted(), "备注框拦截 W 的 ShortcutOverride");
+  QKeyEvent ctrl_m_override(QEvent::ShortcutOverride, Qt::Key_M, Qt::ControlModifier);
+  QApplication::sendEvent(note_edit, &ctrl_m_override);
+  Check(ctrl_m_override.isAccepted(), "备注框拦截 Ctrl+M 的 ShortcutOverride");
+
+  panel.Clear();
+  QApplication::processEvents();
+  Check(editor_box->isHidden(), "清空标记后编辑区隐藏");
   Check(panel.MarkCount() == 0, "Clear 清空标记");
   Check(panel.WarningCount() == 0, "Clear 清空警告");
   Check(!empty->isHidden(), "清空后显示空态");

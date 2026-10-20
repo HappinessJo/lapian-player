@@ -1,14 +1,19 @@
 #include "app/MarkPanel.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDir>
+#include <QEvent>
 #include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
+#include <QPlainTextEdit>
 #include <QPoint>
 #include <QSignalBlocker>
 #include <QString>
@@ -43,6 +48,14 @@ QString NoteSummary(const std::string& note) {
   return text;
 }
 
+QString LabelText(const lapian::core::Mark& mark) {
+  const QString label = QString::fromStdString(mark.label);
+  if (!label.isEmpty()) {
+    return label;
+  }
+  return QStringLiteral("帧 %1").arg(static_cast<qlonglong>(mark.frame));
+}
+
 }  // namespace
 
 MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
@@ -66,7 +79,14 @@ MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
       "QTreeWidget::item { padding:3px 2px; }"
       "QTreeWidget::item:selected { background:#2d3242; color:#ffffff; }"
       "QHeaderView::section { background:#202024; color:#a8a8b2; border:0; "
-      "border-bottom:1px solid #3a3a40; padding:3px 4px; }"));
+      "border-bottom:1px solid #3a3a40; padding:3px 4px; }"
+      "#markEditor { background:#141416; border-top:1px solid #3a3a40; }"
+      "#markEditorTitle { color:#a8a8b2; }"
+      "#markEditorHint { color:#777781; }"
+      "#markLabelEdit, #markNoteEdit { background:#101012; color:#e8e8ec; "
+      "border:1px solid #3a3a40; border-radius:3px; padding:3px 4px; "
+      "selection-background-color:#3d4a6b; }"
+      "#markLabelEdit:focus, #markNoteEdit:focus { border:1px solid #5b7bd5; }"));
 
   auto* root = new QVBoxLayout(this);
   root->setContentsMargins(10, 8, 10, 8);
@@ -130,6 +150,42 @@ MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
   empty_label_->setWordWrap(true);
   root->addWidget(empty_label_, 1);
 
+  // T5.3：选中标记后在底部编辑标签/备注；默认隐藏，避免没有选中时占位。
+  editor_box_ = new QWidget(this);
+  editor_box_->setObjectName(QStringLiteral("markEditor"));
+  editor_box_->setAttribute(Qt::WA_StyledBackground, true);
+  auto* editor_layout = new QVBoxLayout(editor_box_);
+  editor_layout->setContentsMargins(0, 6, 0, 0);
+  editor_layout->setSpacing(4);
+  editor_title_ = new QLabel(QStringLiteral("编辑"), editor_box_);
+  editor_title_->setObjectName(QStringLiteral("markEditorTitle"));
+  editor_layout->addWidget(editor_title_);
+
+  label_edit_ = new QLineEdit(editor_box_);
+  label_edit_->setObjectName(QStringLiteral("markLabelEdit"));
+  label_edit_->setPlaceholderText(QStringLiteral("标签（Enter 保存）"));
+  label_edit_->setClearButtonEnabled(true);
+  editor_layout->addWidget(label_edit_);
+
+  note_edit_ = new QPlainTextEdit(editor_box_);
+  note_edit_->setObjectName(QStringLiteral("markNoteEdit"));
+  note_edit_->setPlaceholderText(QStringLiteral("备注（Ctrl+Enter 保存，Enter 换行）"));
+  note_edit_->setTabChangesFocus(true);
+  note_edit_->setFixedHeight(88);
+  editor_layout->addWidget(note_edit_);
+
+  auto* editor_hint =
+      new QLabel(QStringLiteral("Enter 保存标签 · Ctrl+Enter 保存备注"), editor_box_);
+  editor_hint->setObjectName(QStringLiteral("markEditorHint"));
+  editor_layout->addWidget(editor_hint);
+
+  editor_box_->hide();
+  root->addWidget(editor_box_);
+
+  label_edit_->installEventFilter(this);
+  note_edit_->installEventFilter(this);
+  connect(label_edit_, &QLineEdit::returnPressed, this, [this]() { CommitEditor(); });
+
   delete_action_ = new QAction(QStringLiteral("删除标记"), this);
   delete_action_->setObjectName(QStringLiteral("deleteMarkAction"));
   delete_action_->setShortcut(QKeySequence(Qt::Key_Delete));
@@ -141,6 +197,10 @@ MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
           [this](QTreeWidgetItem* item, int) { ActivateItem(item); });
   connect(tree_, &QTreeWidget::itemActivated, this,
           [this](QTreeWidgetItem* item, int) { ActivateItem(item); });
+  connect(tree_, &QTreeWidget::currentItemChanged, this,
+          [this](QTreeWidgetItem* current, QTreeWidgetItem*) {
+            HandleCurrentChanged(current);
+          });
   connect(tree_, &QWidget::customContextMenuRequested, this,
           &MarkPanel::ShowContextMenu);
 
@@ -154,12 +214,19 @@ void MarkPanel::Clear() {
 }
 
 void MarkPanel::SetMarks(const std::vector<lapian::core::Mark>& marks) {
+  // 先提交旧编辑，避免整表刷新把用户刚输入的文本丢掉。
+  FlushEditor();
   marks_ = marks;
   Rebuild();
   count_label_->setText(QStringLiteral("%1 个").arg(marks_.size()));
   const bool empty = marks_.empty();
   tree_->setVisible(!empty);
   empty_label_->setVisible(empty);
+  if (empty) {
+    ClearEditor();
+    return;
+  }
+  LoadEditorForCurrent();
 }
 
 void MarkPanel::SetStorage(const QString& path, bool using_fallback) {
@@ -216,7 +283,11 @@ void MarkPanel::SelectMark(const std::string& id) {
   if (item == nullptr) {
     return;
   }
-  tree_->setCurrentItem(item);
+  if (tree_->currentItem() != item) {
+    tree_->setCurrentItem(item);  // currentItemChanged -> flush + load
+  } else {
+    LoadEditorForCurrent();
+  }
   tree_->scrollToItem(item);
 }
 
@@ -240,7 +311,11 @@ void MarkPanel::SelectNearFrame(std::int64_t frame) {
   if (candidate == nullptr) {
     candidate = tree_->topLevelItem(tree_->topLevelItemCount() - 1);
   }
-  tree_->setCurrentItem(candidate);
+  if (tree_->currentItem() != candidate) {
+    tree_->setCurrentItem(candidate);  // currentItemChanged -> flush + load
+  } else {
+    LoadEditorForCurrent();
+  }
   tree_->scrollToItem(candidate);
 }
 
@@ -250,6 +325,42 @@ QString MarkPanel::SelectedMarkId() const {
     return QString();
   }
   return item->data(0, Qt::UserRole).toString();
+}
+
+bool MarkPanel::HasSelection() const { return tree_->currentItem() != nullptr; }
+
+bool MarkPanel::FlushEditor() { return CommitEditor(); }
+
+void MarkPanel::SetEditorTextForTest(const QString& label, const QString& note) {
+  if (editing_id_.isEmpty()) {
+    return;
+  }
+  label_edit_->setText(label);
+  note_edit_->setPlainText(note);
+}
+
+QString MarkPanel::EditorLabelForTest() const { return label_edit_->text(); }
+
+QString MarkPanel::EditorNoteForTest() const { return note_edit_->toPlainText(); }
+
+bool MarkPanel::FocusNoteEditorForTest() {
+  note_edit_->setFocus(Qt::OtherFocusReason);
+  QApplication::processEvents();
+  return QApplication::focusWidget() == note_edit_;
+}
+
+void MarkPanel::UpdateMarkText(const QString& id, const QString& label,
+                               const QString& note) {
+  lapian::core::Mark* mark = FindMarkMutable(id);
+  if (mark == nullptr) {
+    return;
+  }
+  mark->label = label.toStdString();
+  mark->note = note.toStdString();
+  QTreeWidgetItem* item = ItemForId(id);
+  if (item != nullptr) {
+    UpdateItemText(item, *mark);
+  }
 }
 
 int MarkPanel::WarningCount() const { return warning_count_; }
@@ -264,18 +375,9 @@ void MarkPanel::Rebuild() {
     auto* item = new QTreeWidgetItem(tree_);
     item->setText(0, QString::number(static_cast<qlonglong>(mark.frame)));
     item->setTextAlignment(0, Qt::AlignRight | Qt::AlignVCenter);
-    const QString label = QString::fromStdString(mark.label);
-    item->setText(1, label.isEmpty()
-                         ? QStringLiteral("帧 %1").arg(static_cast<qlonglong>(mark.frame))
-                         : label);
-    const QString note = NoteSummary(mark.note);
-    item->setText(2, note);
+    UpdateItemText(item, mark);
     const QString id = QString::fromStdString(mark.id);
     item->setData(0, Qt::UserRole, id);
-    const QString full_note = QString::fromStdString(mark.note);
-    if (!full_note.isEmpty()) {
-      item->setToolTip(2, full_note);
-    }
     item->setToolTip(0, QStringLiteral("标记 %1\n双击/回车跳到该帧").arg(id));
   }
   if (!selected.isEmpty()) {
@@ -286,10 +388,22 @@ void MarkPanel::Rebuild() {
   }
 }
 
+void MarkPanel::UpdateItemText(QTreeWidgetItem* item,
+                               const lapian::core::Mark& mark) {
+  if (item == nullptr) {
+    return;
+  }
+  item->setText(1, LabelText(mark));
+  item->setText(2, NoteSummary(mark.note));
+  const QString full_note = QString::fromStdString(mark.note);
+  item->setToolTip(2, full_note.isEmpty() ? QString() : full_note);
+}
+
 void MarkPanel::ActivateItem(QTreeWidgetItem* item) {
   if (item == nullptr) {
     return;
   }
+  FlushEditor();
   const QString id = item->data(0, Qt::UserRole).toString();
   if (id.isEmpty()) {
     return;
@@ -302,7 +416,12 @@ void MarkPanel::ActivateItem(QTreeWidgetItem* item) {
   emit markActivated(id, frame);
 }
 
-void MarkPanel::DeleteCurrent() { 
+void MarkPanel::DeleteCurrent() {
+  // 文本框聚焦时 Delete 属于文本编辑，不删除标记（spec §3.7）。
+  if (IsEditorFocused()) {
+    return;
+  }
+  FlushEditor();
   QTreeWidgetItem* item = tree_->currentItem();
   if (item == nullptr) {
     return;
@@ -314,6 +433,7 @@ void MarkPanel::DeleteCurrent() {
 }
 
 void MarkPanel::ShowContextMenu(const QPoint& pos) {
+  FlushEditor();
   const QPoint viewport_pos = tree_->viewport()->mapFrom(tree_, pos);
   QTreeWidgetItem* item = tree_->itemAt(viewport_pos);
   if (item == nullptr) {
@@ -343,4 +463,150 @@ QTreeWidgetItem* MarkPanel::ItemForId(const QString& id) const {
     }
   }
   return nullptr;
+}
+
+void MarkPanel::HandleCurrentChanged(QTreeWidgetItem* current) {
+  if (current == nullptr) {
+    FlushEditor();
+    ClearEditor();
+    return;
+  }
+  LoadEditorForCurrent();
+}
+
+void MarkPanel::LoadEditorForCurrent() {
+  QTreeWidgetItem* item = tree_->currentItem();
+  const QString id = item == nullptr ? QString() : item->data(0, Qt::UserRole).toString();
+  if (id.isEmpty()) {
+    FlushEditor();
+    ClearEditor();
+    return;
+  }
+  if (editing_id_ == id) {
+    // 同一标记（例如 SetMarks 重建后恢复选中）不覆盖正在编辑的文本与光标。
+    const lapian::core::Mark* mark = FindMark(id);
+    if (mark != nullptr) {
+      editor_title_->setText(QStringLiteral("编辑 · 帧 %1")
+                                 .arg(static_cast<qlonglong>(mark->frame)));
+      editor_box_->show();
+    }
+    return;
+  }
+  FlushEditor();
+  const lapian::core::Mark* mark = FindMark(id);
+  if (mark == nullptr) {
+    ClearEditor();
+    return;
+  }
+  editing_id_ = id;
+  label_edit_->setText(QString::fromStdString(mark->label));
+  note_edit_->setPlainText(QString::fromStdString(mark->note));
+  editor_title_->setText(
+      QStringLiteral("编辑 · 帧 %1").arg(static_cast<qlonglong>(mark->frame)));
+  editor_box_->show();
+}
+
+void MarkPanel::ClearEditor() {
+  editing_id_.clear();
+  label_edit_->clear();
+  note_edit_->clear();
+  editor_title_->clear();
+  editor_box_->hide();
+}
+
+bool MarkPanel::CommitEditor() {
+  if (committing_ || editing_id_.isEmpty()) {
+    return false;
+  }
+  lapian::core::Mark* mark = FindMarkMutable(editing_id_);
+  if (mark == nullptr) {
+    ClearEditor();
+    return false;
+  }
+  committing_ = true;
+  const QString id = editing_id_;
+  const QString label = label_edit_->text().trimmed();
+  const QString note = note_edit_->toPlainText();
+  const std::string label_utf8 = label.toStdString();
+  const std::string note_utf8 = note.toStdString();
+  const bool changed = mark->label != label_utf8 || mark->note != note_utf8;
+  if (changed) {
+    mark->label = label_utf8;
+    mark->note = note_utf8;
+    QTreeWidgetItem* item = ItemForId(id);
+    if (item != nullptr) {
+      UpdateItemText(item, *mark);
+    }
+  }
+  committing_ = false;
+  if (changed) {
+    emit markTextEdited(id, label, note);
+  }
+  return changed;
+}
+
+const lapian::core::Mark* MarkPanel::FindMark(const QString& id) const {
+  for (const lapian::core::Mark& mark : marks_) {
+    if (QString::fromStdString(mark.id) == id) {
+      return &mark;
+    }
+  }
+  return nullptr;
+}
+
+lapian::core::Mark* MarkPanel::FindMarkMutable(const QString& id) {
+  for (lapian::core::Mark& mark : marks_) {
+    if (QString::fromStdString(mark.id) == id) {
+      return &mark;
+    }
+  }
+  return nullptr;
+}
+
+bool MarkPanel::IsEditorFocused() const {
+  QWidget* focus = QApplication::focusWidget();
+  if (focus == nullptr) {
+    return false;
+  }
+  return focus == label_edit_ || focus == note_edit_ ||
+         label_edit_->isAncestorOf(focus) || note_edit_->isAncestorOf(focus);
+}
+
+bool MarkPanel::eventFilter(QObject* watched, QEvent* event) {
+  if (watched != label_edit_ && watched != note_edit_) {
+    return QWidget::eventFilter(watched, event);
+  }
+  if (event->type() == QEvent::ShortcutOverride) {
+    auto* key = static_cast<QKeyEvent*>(event);
+    // spec §3.7：文本框聚焦时，除 Esc 外不触发全局快捷键。接受
+    // ShortcutOverride 即让 Qt 不把该键交给 QAction；Esc 留给全屏退出等全局语义。
+    if (key->key() != Qt::Key_Escape) {
+      event->accept();
+      return true;
+    }
+    return false;
+  }
+  if (event->type() == QEvent::KeyPress) {
+    auto* key = static_cast<QKeyEvent*>(event);
+    const bool is_enter =
+        key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
+    if (watched == label_edit_ && is_enter) {
+      CommitEditor();
+      event->accept();
+      return true;
+    }
+    if (watched == note_edit_ && is_enter &&
+        (key->modifiers() & Qt::ControlModifier) != 0) {
+      CommitEditor();
+      event->accept();
+      return true;
+    }
+    // 备注里的普通 Enter 交给 QPlainTextEdit 换行。
+    return false;
+  }
+  if (event->type() == QEvent::FocusOut) {
+    CommitEditor();
+    return false;
+  }
+  return QWidget::eventFilter(watched, event);
 }
