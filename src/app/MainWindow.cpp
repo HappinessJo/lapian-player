@@ -211,6 +211,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(playback_.get(), &PlaybackController::stateChanged, this,
           &MainWindow::OnPlaybackStateChanged);
   connect(playback_.get(), &PlaybackController::reachedEnd, this, &MainWindow::OnPlaybackEnded);
+  connect(playback_.get(), &PlaybackController::loopJumped, this, &MainWindow::OnLoopJumped);
 
   preview_timer_ = new QTimer(this);
   preview_timer_->setInterval(16);
@@ -744,6 +745,10 @@ void MainWindow::SyncLoopUi() {
   if (timeline_ != nullptr) {
     timeline_->SetLoopRange(loop_);
   }
+  if (playback_ != nullptr) {
+    playback_->SetLoopRange(loop_.enabled() && loop_.complete(), loop_.in(),
+                            loop_.out());
+  }
   if (loop_label_ == nullptr) {
     return;
   }
@@ -898,6 +903,36 @@ QString MainWindow::LoopStateForTest() const {
       .arg(static_cast<qlonglong>(loop_.out()));
 }
 
+void MainWindow::TogglePlaybackForTest() { TogglePlayback(); }
+
+QString MainWindow::LoopPlaybackStateForTest() const {
+  bool audio_clock = false;
+  double audio_clock_seconds = 0.0;
+  int audio_state = -1;
+  double audio_position = 0.0;
+  if (audio_) {
+    audio_clock = audio_->ClockSeconds(&audio_clock_seconds);
+    const lapian::audio::AudioStatus status = audio_->status();
+    audio_state = static_cast<int>(status.state);
+    audio_position = status.position_seconds;
+  }
+  const bool playing = playback_ != nullptr && playback_->IsPlaying();
+  const bool frozen = playback_ != nullptr && playback_->frozen();
+  return QStringLiteral(
+             "frame=%1 playing=%2 frozen=%3 loop=%4 a=%5 b=%6 "
+             "audio_clock=%7 audio_state=%8 audio_pos=%9 audio_clock_sec=%10")
+      .arg(static_cast<qlonglong>(current_frame_))
+      .arg(playing ? 1 : 0)
+      .arg(frozen ? 1 : 0)
+      .arg(loop_.enabled() ? 1 : 0)
+      .arg(static_cast<qlonglong>(loop_.in()))
+      .arg(static_cast<qlonglong>(loop_.out()))
+      .arg(audio_clock ? 1 : 0)
+      .arg(audio_state)
+      .arg(QString::number(audio_position, 'f', 3))
+      .arg(QString::number(audio_clock_seconds, 'f', 3));
+}
+
 void MainWindow::ShowScrubTarget(std::int64_t frame) {
   if (info_bar_ != nullptr) {
     info_bar_->SetFrame(static_cast<int>(frame));
@@ -993,6 +1028,14 @@ void MainWindow::OnPreviewTick() {
 }
 
 void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_index) {
+  if (playback_ != nullptr && playback_->IsPlaying() && loop_.enabled() &&
+      loop_.complete() && frame_index > loop_.out() &&
+      qEnvironmentVariableIsSet("LAPIAN_LOOP_LOG")) {
+    // 循环播放期间不应呈现 B+1；出现即为回归。
+    std::fprintf(stderr, "T4.2 ERROR presented_after_b frame=%d b=%lld\n",
+                 frame_index, static_cast<long long>(loop_.out()));
+    std::fflush(stderr);
+  }
   if (gfx_ != nullptr && frame != nullptr) {
     gfx_->SetVideoFrame(frame, rotation);
   }
@@ -1051,13 +1094,34 @@ void MainWindow::GoToFrame(std::int64_t frame) {
 
 void MainWindow::OnPlaybackStateChanged(bool playing) {
   play_action_->setText(playing ? QStringLiteral("暂停") : QStringLiteral("播放"));
-  statusBar()->showMessage(playing ? QStringLiteral("播放中") : QStringLiteral("已暂停"), 2000);
+  const bool frozen = playing && playback_ != nullptr && playback_->frozen();
+  if (frozen) {
+    statusBar()->showMessage(
+        QStringLiteral("定帧：A=B=%1（画面保持、音频静音）")
+            .arg(static_cast<qlonglong>(current_frame_)),
+        3000);
+  } else {
+    statusBar()->showMessage(playing ? QStringLiteral("播放中") : QStringLiteral("已暂停"),
+                             2000);
+  }
   if (audio_) {
-    if (playing) {
+    if (playing && !frozen) {
       audio_->PlayFrom(playback_->CurrentMediaSeconds());
     } else {
       audio_->Pause();
     }
+  }
+}
+
+void MainWindow::OnLoopJumped(qint64 frame, double media_seconds) {
+  if (audio_) {
+    audio_->PlayFrom(media_seconds);
+  }
+  statusBar()->showMessage(QStringLiteral("循环：回到第 %1 帧").arg(frame), 1200);
+  if (qEnvironmentVariableIsSet("LAPIAN_LOOP_LOG")) {
+    std::fprintf(stderr, "T4.2 loop_audio_restart frame=%lld target=%.4f\n",
+                 static_cast<long long>(frame), media_seconds);
+    std::fflush(stderr);
   }
 }
 

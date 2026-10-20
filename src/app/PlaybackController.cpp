@@ -26,6 +26,7 @@ PlaybackController::PlaybackController(QObject* parent) : QObject(parent) {
   timer_.setTimerType(Qt::PreciseTimer);
   connect(&timer_, &QTimer::timeout, this, &PlaybackController::Tick);
   timing_log_ = std::getenv("LAPIAN_TIMING_LOG") != nullptr;
+  loop_log_ = std::getenv("LAPIAN_LOOP_LOG") != nullptr;
 }
 
 PlaybackController::~PlaybackController() = default;
@@ -40,6 +41,10 @@ void PlaybackController::SetSession(lapian::media::MediaSession* session) {
   end_ = false;
   audio_clock_active_ = false;
   start_pending_ = false;
+  frozen_ = false;
+  loop_enabled_ = false;
+  loop_in_ = 0;
+  loop_out_ = 0;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
@@ -80,6 +85,7 @@ void PlaybackController::SetPosition(std::int64_t frame, std::int64_t pts_us) {
   audio_clock_active_ = false;
   start_pending_ = false;
   rate_pending_ = false;
+  frozen_ = false;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
@@ -94,16 +100,85 @@ void PlaybackController::SetRate(double rate) {
   rate_ = std::clamp(rate, 0.25, 2.0);
   clock_.SetRate(rate_);
   if (playing_) {
-    rate_pending_ = (audio_ != nullptr);
+    rate_pending_ = (audio_ != nullptr) && !frozen_;
     audio_clock_active_ = false;
   }
 }
 
+void PlaybackController::SetLoopRange(bool enabled, std::int64_t in,
+                                      std::int64_t out) {
+  const bool freeze_now = enabled && in >= 0 && out >= in && in == out;
+  loop_enabled_ = enabled;
+  loop_in_ = in;
+  loop_out_ = out;
+
+  if (!playing_) {
+    frozen_ = false;
+    return;
+  }
+  if (freeze_now && !frozen_) {
+    // 播放中把区间改成 A=B：先确认画面在 A，再进入定帧。
+    if (current_frame_ != loop_in_ && !SeekToFrameInternal(loop_in_)) {
+      return;
+    }
+    frozen_ = true;
+    timer_.stop();
+    clock_.Pause();
+    start_pending_ = false;
+    rate_pending_ = false;
+    audio_clock_active_ = false;
+    emit stateChanged(true);
+    return;
+  }
+  if (!freeze_now && frozen_) {
+    // 关闭循环/清除 A/B/改成非单帧区间：从当前帧继续正常播放（F4-A10）。
+    frozen_ = false;
+    start_media_seconds_ = current_pts_seconds_;
+    clock_.Start(current_pts_seconds_, rate_);
+    audio_clock_active_ = false;
+    start_pending_ = (audio_ != nullptr);
+    rate_pending_ = false;
+    start_pending_since_ = std::chrono::steady_clock::now();
+    end_ = false;
+    timer_.start();
+    emit stateChanged(true);
+  }
+}
+
 void PlaybackController::Play() {
-  if (session_ == nullptr || !session_->IsOpen() || playing_ || end_) {
+  if (session_ == nullptr || !session_->IsOpen() || playing_) {
+    return;
+  }
+
+  if (LoopFreezeActive()) {
+    // A=B：Space 只切换状态，不推进帧；当前不在 A 时先精确回到 A。
+    if (current_frame_ != loop_in_ && !SeekToFrameInternal(loop_in_)) {
+      return;
+    }
+    playing_ = true;
+    frozen_ = true;
+    end_ = false;
+    start_media_seconds_ = current_pts_seconds_;
+    clock_.Seek(current_pts_seconds_);
+    audio_clock_active_ = false;
+    start_pending_ = false;
+    rate_pending_ = false;
+    timer_.stop();
+    emit stateChanged(true);
+    return;
+  }
+
+  if (LoopActive() && current_frame_ > loop_out_) {
+    // 从区间外起播：直接回到 A，避免播放到文件尾也不循环。
+    if (!SeekToFrameInternal(loop_in_)) {
+      return;
+    }
+  }
+  if (end_ && !LoopActive()) {
     return;
   }
   playing_ = true;
+  frozen_ = false;
   start_media_seconds_ = current_pts_seconds_;
   clock_.Start(start_media_seconds_, rate_);
   audio_clock_active_ = false;
@@ -120,6 +195,7 @@ void PlaybackController::Pause() {
     return;
   }
   playing_ = false;
+  frozen_ = false;
   timer_.stop();
   clock_.Pause();
   start_pending_ = false;
@@ -134,6 +210,76 @@ void PlaybackController::Toggle() {
   } else {
     Play();
   }
+}
+
+bool PlaybackController::LoopActive() const {
+  return loop_enabled_ && loop_in_ >= 0 && loop_out_ >= loop_in_;
+}
+
+bool PlaybackController::LoopFreezeActive() const {
+  return LoopActive() && loop_in_ == loop_out_;
+}
+
+bool PlaybackController::SeekToFrameInternal(std::int64_t frame) {
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return false;
+  }
+  lapian::media::DecodedFrameInfo info;
+  std::string error;
+  if (!session_->SeekToFrame(frame, &info, &error)) {
+    std::fprintf(stderr, "T4.2 seek_to_frame failed frame=%lld error=%s\n",
+                 static_cast<long long>(frame), error.c_str());
+    std::fflush(stderr);
+    return false;
+  }
+  current_frame_ = static_cast<int>(frame);
+  last_decoded_frame_ = static_cast<int>(frame);
+  current_pts_seconds_ = PtsToSeconds(info.pts);
+  start_media_seconds_ = current_pts_seconds_;
+  has_pending_ = false;
+  pending_frame_ = 0;
+  pending_pts_seconds_ = 0.0;
+  pending_info_ = lapian::media::DecodedFrameInfo{};
+  end_ = false;
+
+  const int rotation = session_->info().rotation.counterclockwise_degrees;
+  AVFrame* clone = av_frame_clone(info.av_frame);
+  if (clone != nullptr) {
+    // 先呈现 A，再让调用方重置时钟/音频，避免黑屏或停在 B 的旧画面。
+    emit frameReady(clone, rotation, current_frame_);
+    av_frame_free(&clone);
+  }
+  return true;
+}
+
+bool PlaybackController::JumpToLoopStart(std::int64_t trigger_frame) {
+  const auto jump_start = std::chrono::steady_clock::now();
+  const int pending_before = pending_frame_;
+  if (!SeekToFrameInternal(loop_in_)) {
+    return false;
+  }
+  const double seek_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - jump_start)
+          .count();
+  start_media_seconds_ = current_pts_seconds_;
+  clock_.Start(current_pts_seconds_, rate_);
+  audio_clock_active_ = false;
+  start_pending_ = (audio_ != nullptr);
+  rate_pending_ = false;
+  start_pending_since_ = std::chrono::steady_clock::now();
+  end_ = false;
+
+  if (loop_log_) {
+    std::fprintf(stderr,
+                 "T4.2 loop_jump from=%lld pending=%lld to=%lld seek_ms=%.2f\n",
+                 static_cast<long long>(trigger_frame),
+                 static_cast<long long>(pending_before),
+                 static_cast<long long>(loop_in_), seek_ms);
+    std::fflush(stderr);
+  }
+  emit loopJumped(static_cast<qint64>(current_frame_), current_pts_seconds_);
+  return true;
 }
 
 double PlaybackController::TargetSeconds() {
@@ -165,7 +311,7 @@ double PlaybackController::TargetSeconds() {
 }
 
 void PlaybackController::Tick() {
-  if (!playing_ || session_ == nullptr) {
+  if (!playing_ || session_ == nullptr || frozen_) {
     return;
   }
 
@@ -221,6 +367,13 @@ void PlaybackController::Tick() {
       lapian::media::DecodedFrameInfo info;
       std::string error;
       if (!session_->decoder().DecodeNextFrame(&info, &error)) {
+        // 到文件尾：如果已经播到 B，先回 A 继续循环，而不是结束播放。
+        if (LoopActive() && current_frame_ >= loop_out_) {
+          emit_best();
+          if (JumpToLoopStart(current_frame_)) {
+            return;
+          }
+        }
         emit_best();
         end_ = true;
         Finish();
@@ -236,6 +389,14 @@ void PlaybackController::Tick() {
     if (pending_pts_seconds_ > target + 0.0005) {
       emit_best();
       return;
+    }
+
+    // B+1 已到呈现时间：丢弃它并回 A。B 已在上一 tick 呈现，B+1 不会被 emit。
+    if (LoopActive() && pending_frame_ > loop_out_) {
+      emit_best();
+      if (JumpToLoopStart(current_frame_)) {
+        return;
+      }
     }
 
     const double late = target - pending_pts_seconds_;
@@ -261,6 +422,7 @@ void PlaybackController::Tick() {
 
 void PlaybackController::Finish() {
   playing_ = false;
+  frozen_ = false;
   timer_.stop();
   clock_.Pause();
   start_pending_ = false;

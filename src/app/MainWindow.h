@@ -57,6 +57,9 @@ class MainWindow : public QMainWindow {
   void ToggleLoopForTest();
   void ClearLoopForTest();
   QString LoopStateForTest() const;
+  // T4.2 自动化验证入口：Space 语义与定帧/循环状态。
+  void TogglePlaybackForTest();
+  QString LoopPlaybackStateForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -77,6 +80,7 @@ class MainWindow : public QMainWindow {
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
   void OnPlaybackEnded();
+  void OnLoopJumped(qint64 frame, double media_seconds);
   void OnDeviceReady(const QString& summary);
   void OnDeviceError(const QString& message);
   void OnVolumeChanged(int value);

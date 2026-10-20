@@ -34,6 +34,8 @@ class PlaybackController : public QObject {
   void SetPosition(std::int64_t frame, std::int64_t pts_us);
   // T3.3：0.25–2x；不改变当前帧/时间码，只改变媒体时间推进速度。
   void SetRate(double rate);
+  // T4.2 A/B：enabled 只在 A/B 完整时为 true；A=B 时进入定帧语义。
+  void SetLoopRange(bool enabled, std::int64_t in, std::int64_t out);
   void Play();
   void Pause();
   void Toggle();
@@ -41,6 +43,8 @@ class PlaybackController : public QObject {
   bool IsPlaying() const { return playing_; }
   int CurrentFrame() const { return current_frame_; }
   double rate() const { return rate_; }
+  // A=B 且循环开启时为 true：时间不推进、音频不输出。
+  bool frozen() const { return frozen_; }
   // 当前帧的媒体时间（秒）；T3.1 音频起播用它作为 seek 目标。
   double CurrentMediaSeconds() const { return current_pts_seconds_; }
 
@@ -48,6 +52,8 @@ class PlaybackController : public QObject {
   void frameReady(const AVFrame* frame, int rotation, int frame_index);
   void stateChanged(bool playing);
   void reachedEnd();
+  // B→A 跳转完成；MainWindow 用它把音频重新 seek 到 A。
+  void loopJumped(qint64 frame, double media_seconds);
 
  private slots:
   void Tick();
@@ -56,6 +62,11 @@ class PlaybackController : public QObject {
   double PtsToSeconds(std::int64_t pts) const;
   double TargetSeconds();
   void Finish();
+  bool LoopActive() const;
+  bool LoopFreezeActive() const;
+  // seek 到指定帧并立即呈现；用于循环跳转/定帧回到 A，不改变 playing_。
+  bool SeekToFrameInternal(std::int64_t frame);
+  bool JumpToLoopStart(std::int64_t trigger_frame);
 
   lapian::media::MediaSession* session_ = nullptr;
   lapian::audio::AudioEngine* audio_ = nullptr;
@@ -71,8 +82,13 @@ class PlaybackController : public QObject {
   bool audio_clock_active_ = false;
   bool start_pending_ = false;
   bool rate_pending_ = false;
+  bool frozen_ = false;
+  bool loop_enabled_ = false;
+  std::int64_t loop_in_ = 0;
+  std::int64_t loop_out_ = 0;
   std::chrono::steady_clock::time_point start_pending_since_;
   bool timing_log_ = false;
+  bool loop_log_ = false;
   bool has_pending_ = false;
   int pending_frame_ = 0;
   double pending_pts_seconds_ = 0.0;

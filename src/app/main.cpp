@@ -8,6 +8,8 @@
 #include <QTimer>
 
 #include <cstdio>
+#include <chrono>
+#include <utility>
 
 #include "app/MainWindow.h"
 
@@ -26,6 +28,7 @@ int main(int argc, char* argv[]) {
   bool auto_play = false;
   bool step_test = false;
   bool ab_test = false;
+  bool loop_test = false;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
@@ -43,17 +46,24 @@ int main(int argc, char* argv[]) {
       step_test = true;
     } else if (arguments[i] == QStringLiteral("--ab-test")) {
       ab_test = true;
+    } else if (arguments[i] == QStringLiteral("--loop-test")) {
+      loop_test = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
   }
 
+  if (loop_test) {
+    qputenv("LAPIAN_LOOP_LOG", "1");
+  }
+
+  const auto process_start = std::chrono::steady_clock::now();
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, goto_text, auto_play,
-                                    step_test, ab_test, playback_rate,
-                                    has_playback_rate]() {
+                                    step_test, ab_test, loop_test, playback_rate,
+                                    has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -125,6 +135,94 @@ int main(int argc, char* argv[]) {
           save_shot("cleared");
         });
         QTimer::singleShot(1800, &app, &QCoreApplication::quit);
+      }
+      if (loop_test) {
+        // T4.2 F4-A1/A2/A3/A9/A10：循环跳转、定帧、Space 语义与解除条件。
+        // 使用 PreciseTimer，避免 CoarseTimer 的 5% 容差让后续回调乱序。
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto log_state = [&window, process_start](const char* step) {
+          const double elapsed_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - process_start)
+                  .count();
+          const QByteArray state = window.LoopPlaybackStateForTest().toUtf8();
+          std::fprintf(stderr, "T4.2 loop_test t=%.0fms %s %s\n", elapsed_ms,
+                       step, state.constData());
+          std::fflush(stderr);
+        };
+
+        schedule(400, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.SetLoopInForTest();
+          log_state("a100");
+        });
+        schedule(700, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("160"));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          window.GoToInputForTest(QStringLiteral("100"));
+          log_state("loop-ready");
+        });
+        schedule(1000, [&window, log_state]() {
+          window.StartPlaybackForTest();
+          log_state("play-start");
+        });
+        schedule(10000, [&window, log_state]() {
+          window.TogglePlaybackForTest();  // 暂停，检查 3 次循环后 A/B 不变
+          log_state("after-3-loops");
+        });
+        schedule(10200, [&window, log_state]() {
+          window.ToggleLoopForTest();  // F4-A3：关闭循环
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.StartPlaybackForTest();
+          log_state("loop-off-play");
+        });
+        schedule(13000, [&window, log_state]() {
+          log_state("after-161");  // 应已越过 160/161，且不回到 A
+          window.TogglePlaybackForTest();
+        });
+        schedule(13200, [&window, log_state]() {
+          log_state("paused-before-freeze");
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.SetLoopOutForTest();  // A=B=100
+          log_state("freeze-ready");
+        });
+        schedule(13400, [&window, log_state]() {
+          window.ToggleLoopForTest();
+          log_state("freeze-armed");
+        });
+        schedule(13600, [&window, log_state]() {
+          window.StartPlaybackForTest();  // A=B：进入定帧
+          log_state("freeze-start");
+        });
+        schedule(18600, [&window, log_state]() {
+          log_state("freeze-5s");  // 5s 后仍应 frame=100、音频时钟无效
+        });
+        schedule(18900, [&window, log_state]() {
+          window.StepForwardForTest();  // F4-A10：定帧中 PgDn 到 101
+          log_state("after-step");
+        });
+        schedule(19200, [&window, log_state]() {
+          window.StartPlaybackForTest();  // Space：回到 100 重新定住
+          log_state("refreeze");
+        });
+        schedule(19500, [&window, log_state]() {
+          log_state("refreeze-hold");
+        });
+        schedule(19700, [&window, log_state]() {
+          window.ToggleLoopForTest();  // F4-A10：关闭循环，从 100 恢复播放
+          log_state("loop-off-resume");
+        });
+        schedule(20000, [&window, log_state]() {
+          log_state("resume-after-loop-off");
+          window.TogglePlaybackForTest();  // Space 暂停
+        });
+        schedule(20200, [&window, log_state]() {
+          log_state("paused");
+        });
+        QTimer::singleShot(20500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
       }
     });
   }
