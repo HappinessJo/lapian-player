@@ -12,6 +12,7 @@ class QAction;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
+class QSlider;
 class QTimer;
 class GfxWidget;
 class InfoBar;
@@ -21,6 +22,10 @@ class TimelineWidget;
 namespace lapian::media {
 class MediaSession;
 class PreviewDecoder;
+}
+
+namespace lapian::audio {
+class AudioEngine;
 }
 
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
@@ -62,6 +67,9 @@ class MainWindow : public QMainWindow {
   void OnPlaybackEnded();
   void OnDeviceReady(const QString& summary);
   void OnDeviceError(const QString& message);
+  void OnVolumeChanged(int value);
+  void ToggleMute(bool muted);
+  void PollAudioStatus();
 
  private:
   void ShowEmptyState();
@@ -76,6 +84,10 @@ class MainWindow : public QMainWindow {
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   QLabel* status_label_ = nullptr;
+  QLabel* audio_label_ = nullptr;
+  QSlider* volume_slider_ = nullptr;
+  QAction* mute_action_ = nullptr;
+  QTimer* audio_status_timer_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* play_action_ = nullptr;
   QAction* prev_action_ = nullptr;
@@ -84,10 +96,16 @@ class MainWindow : public QMainWindow {
   QAction* zoom_in_action_ = nullptr;
   QAction* zoom_out_action_ = nullptr;
   QString base_info_;
+  QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<PlaybackController> playback_;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
+  std::unique_ptr<lapian::audio::AudioEngine> audio_;
   QTimer* preview_timer_ = nullptr;
   std::int64_t current_frame_ = 0;
+  std::uint64_t audio_status_revision_ = 0;
+  int volume_ = 100;
+  bool muted_ = false;
+  bool audio_error_shown_ = false;
   bool error_shown_ = false;
 };

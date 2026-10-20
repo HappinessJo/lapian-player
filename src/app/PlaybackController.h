@@ -31,6 +31,8 @@ class PlaybackController : public QObject {
 
   bool IsPlaying() const { return playing_; }
   int CurrentFrame() const { return current_frame_; }
+  // 当前帧的媒体时间（秒）；T3.1 音频起播用它作为 seek 目标。
+  double CurrentMediaSeconds() const { return current_pts_seconds_; }
 
  signals:
   void frameReady(const AVFrame* frame, int rotation, int frame_index);

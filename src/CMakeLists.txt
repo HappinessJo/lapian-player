@@ -70,6 +70,20 @@ lapian_apply_common_options(lapian_media)
 target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath)
 
+# T3.1 音频：FFmpeg 解码 + WASAPI shared mode，不依赖 Qt，便于单测。
+add_library(lapian_audio STATIC
+  audio/AudioDecoder.cpp
+  audio/AudioDecoder.h
+  audio/AudioEngine.cpp
+  audio/AudioEngine.h
+  audio/AudioFormat.cpp
+  audio/AudioFormat.h
+  audio/WasapiRenderer.cpp
+  audio/WasapiRenderer.h)
+lapian_apply_common_options(lapian_audio)
+target_include_directories(lapian_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg ole32 uuid avrt)
+
 # 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
 qt_add_executable(lapian WIN32
   app/main.cpp
@@ -85,7 +99,7 @@ lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
-                                     lapian_timeline lapian::ffmpeg Qt6::Widgets)
+                                     lapian_timeline lapian_audio lapian::ffmpeg Qt6::Widgets)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 
@@ -122,3 +136,11 @@ lapian_apply_common_options(lapian_seek_probe)
 target_link_libraries(lapian_seek_probe PRIVATE lapian::ffmpeg)
 lapian_copy_ffmpeg_dlls(lapian_seek_probe)
 lapian_set_output_dir(lapian_seek_probe)
+
+# T3.1 音频链路探针（控制台；打印设备格式/播放位置/underrun，不入分发）
+add_executable(lapian_audio_probe
+  tools/audio_probe/main.cpp)
+lapian_apply_common_options(lapian_audio_probe)
+target_link_libraries(lapian_audio_probe PRIVATE lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_audio_probe)
+lapian_set_output_dir(lapian_audio_probe)

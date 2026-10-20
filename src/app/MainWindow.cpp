@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QSlider>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QString>
@@ -40,12 +41,23 @@ extern "C" {
 #include "app/InfoBar.h"
 #include "app/PlaybackController.h"
 #include "app/TimelineWidget.h"
+#include "audio/AudioEngine.h"
 #include "core/FrameMath.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
 #include "media/PreviewDecoder.h"
 
 namespace {
+
+QString DescribeAudioChannels(int channels) {
+  if (channels == 1) {
+    return QStringLiteral("单声道");
+  }
+  if (channels == 2) {
+    return QStringLiteral("立体声");
+  }
+  return QStringLiteral("%1 声道").arg(channels);
+}
 
 QString DescribeProbeError(lapian::media::MediaProbeError error) {
   using lapian::media::MediaProbeError;
@@ -145,10 +157,37 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   preview_timer_->setTimerType(Qt::PreciseTimer);
   connect(preview_timer_, &QTimer::timeout, this, &MainWindow::OnPreviewTick);
 
+  audio_label_ = new QLabel(QStringLiteral("无音频"), this);
+  audio_label_->setObjectName(QStringLiteral("audioInfo"));
+  audio_label_->setToolTip(QStringLiteral("音频轨道与输出状态"));
+  statusBar()->addPermanentWidget(audio_label_);
+
+  volume_slider_ = new QSlider(Qt::Horizontal, this);
+  volume_slider_->setRange(0, 100);
+  volume_slider_->setValue(volume_);
+  volume_slider_->setFixedWidth(110);
+  volume_slider_->setEnabled(false);
+  volume_slider_->setToolTip(QStringLiteral("音量 %1%").arg(volume_));
+  connect(volume_slider_, &QSlider::valueChanged, this, &MainWindow::OnVolumeChanged);
+  statusBar()->addPermanentWidget(volume_slider_);
+
+  mute_action_ = new QAction(QStringLiteral("静音"), this);
+  mute_action_->setShortcut(Qt::Key_M);
+  mute_action_->setShortcutContext(Qt::WindowShortcut);
+  mute_action_->setCheckable(true);
+  mute_action_->setEnabled(false);
+  connect(mute_action_, &QAction::triggered, this, &MainWindow::ToggleMute);
+  addAction(mute_action_);
+
   status_label_ = new QLabel(this);
   status_label_->setObjectName(QStringLiteral("statusInfo"));
   status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
   statusBar()->addPermanentWidget(status_label_);
+
+  audio_status_timer_ = new QTimer(this);
+  audio_status_timer_->setInterval(200);
+  connect(audio_status_timer_, &QTimer::timeout, this, &MainWindow::PollAudioStatus);
+  audio_status_timer_->start();
 
   base_info_ = QStringLiteral("Qt %1 · FFmpeg %2").arg(QString::fromLatin1(qVersion()),
                                                        QString::fromLatin1(av_version_info()));
@@ -172,6 +211,9 @@ MainWindow::~MainWindow() = default;
 void MainWindow::ShowEmptyState() {
   StopPreview();
   preview_.reset();
+  if (audio_) {
+    audio_.reset();
+  }
   if (playback_ != nullptr) {
     playback_->Pause();
     playback_->SetSession(nullptr);
@@ -185,6 +227,20 @@ void MainWindow::ShowEmptyState() {
   if (info_bar_ != nullptr) {
     info_bar_->Clear();
   }
+  if (audio_label_ != nullptr) {
+    audio_label_->setText(QStringLiteral("无音频"));
+  }
+  if (volume_slider_ != nullptr) {
+    volume_slider_->setEnabled(false);
+  }
+  if (mute_action_ != nullptr) {
+    mute_action_->setEnabled(false);
+    mute_action_->setChecked(muted_);
+    mute_action_->setText(muted_ ? QStringLiteral("取消静音") : QStringLiteral("静音"));
+  }
+  audio_base_label_.clear();
+  audio_status_revision_ = 0;
+  audio_error_shown_ = false;
   if (play_action_ != nullptr) {
     play_action_->setEnabled(false);
     play_action_->setText(QStringLiteral("播放"));
@@ -255,6 +311,9 @@ void MainWindow::OpenFile(const QString& path) {
   // 旧预览器持有旧索引指针，必须在替换 session 之前停掉。
   StopPreview();
   preview_.reset();
+  if (audio_) {
+    audio_.reset();
+  }
   session_ = std::move(candidate);
   playback_->SetSession(session_.get());
   current_frame_ = 0;
@@ -287,6 +346,33 @@ void MainWindow::OpenFile(const QString& path) {
         QStringLiteral("可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"), 8000);
   } else {
     statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
+  }
+
+  // T3.1：音频异步打开；首帧已经呈现，不等音频设备初始化。
+  audio_status_revision_ = 0;
+  audio_error_shown_ = false;
+  audio_base_label_.clear();
+  audio_label_->setText(QStringLiteral("无音频"));
+  volume_slider_->setEnabled(false);
+  mute_action_->setEnabled(false);
+  if (info.has_audio) {
+    auto audio = std::make_unique<lapian::audio::AudioEngine>();
+    audio->SetVolume(volume_);
+    audio->SetMute(muted_);
+    if (!audio->Open(path_utf8, info.audio.stream_index)) {
+      audio_label_->setText(QStringLiteral("音频不可用"));
+      statusBar()->showMessage(QStringLiteral("音频线程启动失败，视频继续静音播放"), 5000);
+    } else {
+      audio_base_label_ =
+          QStringLiteral("音频：%1 %2 kHz %3")
+              .arg(QString::fromStdString(info.audio.codec).toUpper())
+              .arg(QString::number(static_cast<double>(info.audio.sample_rate) / 1000.0, 'g', 3))
+              .arg(DescribeAudioChannels(info.audio.channels));
+      audio_label_->setText(audio_base_label_);
+      volume_slider_->setEnabled(true);
+      mute_action_->setEnabled(true);
+      audio_ = std::move(audio);
+    }
   }
 
   // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
@@ -571,11 +657,21 @@ void MainWindow::GoToFrame(std::int64_t frame) {
 void MainWindow::OnPlaybackStateChanged(bool playing) {
   play_action_->setText(playing ? QStringLiteral("暂停") : QStringLiteral("播放"));
   statusBar()->showMessage(playing ? QStringLiteral("播放中") : QStringLiteral("已暂停"), 2000);
+  if (audio_) {
+    if (playing) {
+      audio_->PlayFrom(playback_->CurrentMediaSeconds());
+    } else {
+      audio_->Pause();
+    }
+  }
 }
 
 void MainWindow::OnPlaybackEnded() {
   play_action_->setText(QStringLiteral("播放"));
   play_action_->setEnabled(false);
+  if (audio_) {
+    audio_->Pause();
+  }
   statusBar()->showMessage(QStringLiteral("播放结束"), 5000);
 }
 
@@ -628,4 +724,83 @@ void MainWindow::OnDeviceError(const QString& message) {
   error_shown_ = true;
   QMessageBox::critical(this, QStringLiteral("图形初始化失败"),
                         message + QStringLiteral("\n\n窗口仍可操作，但画面区域不可用。"));
+}
+
+void MainWindow::OnVolumeChanged(int value) {
+  volume_ = value;
+  if (volume_slider_ != nullptr) {
+    volume_slider_->setToolTip(QStringLiteral("音量 %1%").arg(value));
+  }
+  if (audio_) {
+    audio_->SetVolume(value);
+  }
+}
+
+void MainWindow::ToggleMute(bool muted) {
+  if (IsTextInputFocused()) {
+    if (mute_action_ != nullptr) {
+      mute_action_->setChecked(!muted);
+    }
+    return;
+  }
+  muted_ = muted;
+  if (mute_action_ != nullptr) {
+    mute_action_->setText(muted ? QStringLiteral("取消静音") : QStringLiteral("静音"));
+  }
+  if (audio_) {
+    audio_->SetMute(muted);
+  }
+  statusBar()->showMessage(muted ? QStringLiteral("已静音") : QStringLiteral("已取消静音"), 1500);
+}
+
+void MainWindow::PollAudioStatus() {
+  if (!audio_) {
+    return;
+  }
+  const lapian::audio::AudioStatus status = audio_->status();
+  if (status.revision == audio_status_revision_) {
+    return;
+  }
+  audio_status_revision_ = status.revision;
+
+  using lapian::audio::AudioState;
+  const QString mute_suffix = status.muted ? QStringLiteral("（静音）") : QString();
+  switch (status.state) {
+    case AudioState::kOpening:
+      audio_label_->setText(QStringLiteral("音频：准备中…"));
+      break;
+    case AudioState::kPlaying:
+    case AudioState::kPaused:
+      audio_label_->setText(audio_base_label_ + mute_suffix);
+      break;
+    case AudioState::kSilent:
+      audio_label_->setText(QStringLiteral("音频：设备不可用"));
+      break;
+    case AudioState::kError:
+      audio_label_->setText(QStringLiteral("音频不可用"));
+      if (volume_slider_ != nullptr) {
+        volume_slider_->setEnabled(false);
+      }
+      if (mute_action_ != nullptr) {
+        mute_action_->setEnabled(false);
+      }
+      break;
+    case AudioState::kClosed:
+      audio_label_->setText(QStringLiteral("无音频"));
+      break;
+  }
+
+  if (!status.message.empty()) {
+    const QString message = QString::fromStdString(status.message);
+    if (status.state == AudioState::kSilent || status.state == AudioState::kError) {
+      statusBar()->showMessage(message, 5000);
+    } else if (message == QStringLiteral("音频设备已恢复")) {
+      statusBar()->showMessage(message, 3000);
+    }
+  }
+
+  if (status.state == AudioState::kError && !audio_error_shown_) {
+    audio_error_shown_ = true;
+    qWarning() << "音频错误:" << QString::fromStdString(status.message);
+  }
 }

@@ -90,6 +90,17 @@ set_tests_properties(lapian_timeline_test PROPERTIES
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
   SKIP_RETURN_CODE 77)
 
+# T3.1 音频：音量映射/环形缓冲/格式转换 + V9 AAC 解码与 seek。
+add_executable(lapian_audio_test audio_test.cpp)
+lapian_apply_common_options(lapian_audio_test)
+target_link_libraries(lapian_audio_test PRIVATE lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_audio_test)
+
+add_test(NAME lapian_audio_test COMMAND lapian_audio_test)
+set_tests_properties(lapian_audio_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
+
 # T2.9 拖动预览解码器：后台打开、首帧延迟、2s 目标更新下的发布帧率（开发机探针）。
 add_executable(lapian_preview_decoder_test preview_decoder_test.cpp)
 lapian_apply_common_options(lapian_preview_decoder_test)
