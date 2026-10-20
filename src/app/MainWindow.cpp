@@ -44,6 +44,7 @@ extern "C" {
 #include "app/PlaybackController.h"
 #include "app/TimelineWidget.h"
 #include "audio/AudioEngine.h"
+#include "audio/WaveformGenerator.h"
 #include "core/FrameMath.h"
 #include "core/MediaClock.h"
 #include "media/MediaProbe.h"
@@ -188,6 +189,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   speed_label_->setToolTip(QStringLiteral("播放速度（[ / ] 调整）"));
   statusBar()->addPermanentWidget(speed_label_);
 
+  waveform_label_ = new QLabel(QStringLiteral("波形：—"), this);
+  waveform_label_->setObjectName(QStringLiteral("waveformInfo"));
+  waveform_label_->setToolTip(QStringLiteral("音频波形生成状态"));
+  statusBar()->addPermanentWidget(waveform_label_);
+
   volume_slider_ = new QSlider(Qt::Horizontal, this);
   volume_slider_->setRange(0, 100);
   volume_slider_->setValue(volume_);
@@ -213,6 +219,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   audio_status_timer_ = new QTimer(this);
   audio_status_timer_->setInterval(200);
   connect(audio_status_timer_, &QTimer::timeout, this, &MainWindow::PollAudioStatus);
+  connect(audio_status_timer_, &QTimer::timeout, this, &MainWindow::PollWaveformStatus);
   audio_status_timer_->start();
 
   base_info_ = QStringLiteral("Qt %1 · FFmpeg %2").arg(QString::fromLatin1(qVersion()),
@@ -239,6 +246,14 @@ void MainWindow::ShowEmptyState() {
   preview_.reset();
   if (audio_) {
     audio_.reset();
+  }
+  if (waveform_) {
+    waveform_->Cancel();
+    waveform_.reset();
+  }
+  waveform_status_revision_ = 0;
+  if (waveform_label_ != nullptr) {
+    waveform_label_->setText(QStringLiteral("波形：—"));
   }
   if (playback_ != nullptr) {
     playback_->Pause();
@@ -396,6 +411,12 @@ void MainWindow::OpenFile(const QString& path) {
   audio_label_->setText(QStringLiteral("无音频"));
   volume_slider_->setEnabled(false);
   mute_action_->setEnabled(false);
+  if (waveform_) {
+    waveform_->Cancel();
+    waveform_.reset();
+  }
+  waveform_status_revision_ = 0;
+  waveform_label_->setText(QStringLiteral("波形：—"));
   if (info.has_audio) {
     auto audio = std::make_unique<lapian::audio::AudioEngine>();
     audio->SetVolume(volume_);
@@ -419,6 +440,17 @@ void MainWindow::OpenFile(const QString& path) {
   }
   playback_->SetAudioEngine(audio_.get());
   playback_->SetRate(rate_);
+
+  // T3.5：波形在独立线程里生成，不占 UI/WASAPI；先显示进度，T3.6 再绘制。
+  if (info.has_audio) {
+    waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
+    if (!waveform_->Start(path_utf8, info.audio.stream_index,
+                          static_cast<double>(info.av_offset_us) / 1.0e6)) {
+      waveform_label_->setText(QStringLiteral("波形：失败"));
+    }
+  } else {
+    waveform_label_->setText(QStringLiteral("波形：无音频"));
+  }
 
   // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
   if (can_seek) {
@@ -785,6 +817,39 @@ void MainWindow::dropEvent(QDropEvent* event) {
       OpenFile(url.toLocalFile());
       return;
     }
+  }
+}
+
+void MainWindow::PollWaveformStatus() {
+  if (!waveform_) {
+    return;
+  }
+  const lapian::audio::WaveformStatus status = waveform_->status();
+  if (status.revision == waveform_status_revision_) {
+    return;
+  }
+  waveform_status_revision_ = status.revision;
+
+  using lapian::audio::WaveformState;
+  switch (status.state) {
+    case WaveformState::kRunning:
+      waveform_label_->setText(
+          QStringLiteral("波形：%1%").arg(QString::number(status.progress * 100.0, 'f', 0)));
+      break;
+    case WaveformState::kReady:
+      waveform_label_->setText(QStringLiteral("波形：就绪"));
+      break;
+    case WaveformState::kNoAudio:
+      waveform_label_->setText(QStringLiteral("波形：无音频"));
+      break;
+    case WaveformState::kFailed:
+      waveform_label_->setText(QStringLiteral("波形：失败"));
+      statusBar()->showMessage(QString::fromStdString(status.message), 5000);
+      break;
+    case WaveformState::kCancelled:
+    case WaveformState::kIdle:
+      waveform_label_->setText(QStringLiteral("波形：—"));
+      break;
   }
 }
 

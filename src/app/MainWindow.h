@@ -26,6 +26,7 @@ class PreviewDecoder;
 
 namespace lapian::audio {
 class AudioEngine;
+class WaveformGenerator;
 }
 
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
@@ -72,6 +73,7 @@ class MainWindow : public QMainWindow {
   void OnVolumeChanged(int value);
   void ToggleMute(bool muted);
   void PollAudioStatus();
+  void PollWaveformStatus();
   void SpeedDown();
   void SpeedUp();
 
@@ -91,6 +93,7 @@ class MainWindow : public QMainWindow {
   QLabel* status_label_ = nullptr;
   QLabel* audio_label_ = nullptr;
   QLabel* speed_label_ = nullptr;
+  QLabel* waveform_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
   QAction* mute_action_ = nullptr;
   QAction* slower_action_ = nullptr;
@@ -109,9 +112,11 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<PlaybackController> playback_;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
+  std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
   QTimer* preview_timer_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::uint64_t audio_status_revision_ = 0;
+  std::uint64_t waveform_status_revision_ = 0;
   int volume_ = 100;
   double rate_ = 1.0;
   bool muted_ = false;

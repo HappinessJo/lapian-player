@@ -80,6 +80,10 @@ add_library(lapian_audio STATIC
   audio/AudioEngine.h
   audio/AudioFormat.cpp
   audio/AudioFormat.h
+  audio/WaveformData.cpp
+  audio/WaveformData.h
+  audio/WaveformGenerator.cpp
+  audio/WaveformGenerator.h
   audio/WasapiRenderer.cpp
   audio/WasapiRenderer.h)
 lapian_apply_common_options(lapian_audio)
@@ -146,3 +150,11 @@ lapian_apply_common_options(lapian_audio_probe)
 target_link_libraries(lapian_audio_probe PRIVATE lapian_audio)
 lapian_copy_ffmpeg_dlls(lapian_audio_probe)
 lapian_set_output_dir(lapian_audio_probe)
+
+# T3.5 波形生成探针（控制台；打印生成耗时/bucket 数，不入分发）
+add_executable(lapian_waveform_probe
+  tools/waveform_probe/main.cpp)
+lapian_apply_common_options(lapian_waveform_probe)
+target_link_libraries(lapian_waveform_probe PRIVATE lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_waveform_probe)
+lapian_set_output_dir(lapian_waveform_probe)

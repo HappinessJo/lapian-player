@@ -107,6 +107,17 @@ set_tests_properties(lapian_audio_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# T3.5 波形生成：WaveformData 边界 + V9 后台生成/峰值 bucket。
+add_executable(lapian_waveform_test waveform_test.cpp)
+lapian_apply_common_options(lapian_waveform_test)
+target_link_libraries(lapian_waveform_test PRIVATE lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_waveform_test)
+
+add_test(NAME lapian_waveform_test COMMAND lapian_waveform_test)
+set_tests_properties(lapian_waveform_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
+
 # T2.9 拖动预览解码器：后台打开、首帧延迟、2s 目标更新下的发布帧率（开发机探针）。
 add_executable(lapian_preview_decoder_test preview_decoder_test.cpp)
 lapian_apply_common_options(lapian_preview_decoder_test)
