@@ -2,17 +2,17 @@
 
 > 给后续新开对话的 agent：先读本文件，再读 [spec.md](spec.md)、[plan.md](plan.md)、[tasks.md](tasks.md)。
 > 产品决策以 `spec.md` v0.3 为准；技术方案以 `plan.md` + ADR 为准；任务以 `tasks.md` 为准。
-> 最后更新：2026-10-20（v5.3：T7.2.1 B=末帧循环/PgUp 画幅热修完成；M0–M4、T5.1–T6.5、T7.1–T7.2.1 代码完成；下一步 T7.3 2h 稳定性）
+> 最后更新：2026-10-20（v5.4：T7.3 长时浸泡监测代码完成；30 分钟/2h soak 因用户断网中断，明天继续；下一步 T7.4 前先收口 T7.3）
 
 ---
 
 ## 1. 当前状态
 
 - **项目**：拉片软件，Windows 桌面端的帧级参考片审阅器。
-- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；V1–V8 真素材手测待补；下一步 T7.3（2h 稳定性）。**新对话先读 [docs/handoff-2026-10-20-t7.2.1.md](docs/handoff-2026-10-20-t7.2.1.md) 与 [docs/next-session-prompt.md](docs/next-session-prompt.md)**。
+- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；**T7.3 soak 监测代码完成（`188c63e`），但 30 分钟/2h 浸泡未完成**；V1–V8 真素材手测待补。**新对话先读 [docs/handoff-2026-10-20-t7.3-wip.md](docs/handoff-2026-10-20-t7.3-wip.md)**。
 - **规格**：[spec.md](spec.md) **v0.3**，首期唯一验收来源。
 - **规划**：[plan.md](plan.md) v0.2（技术方案）、[tasks.md](tasks.md) v0.15（已审核任务）、[docs/adr/](docs/adr/)（架构决策）、[docs/spec-v0.3-delta.md](docs/spec-v0.3-delta.md)（已并入 v0.3）、[spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)（方案 A）。
-- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.49MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/96MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）已接；`ctest` **20/20**。
+- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.51MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/96MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）与 T7.3 长时浸泡监测（`--memory-mode soak`、`SoakStats`、线程数/UI 心跳/看门狗、`scripts\soak-bench.ps1`；30min/2h 浸泡未完成）已接；`ctest` **21/21**。
 - **本文件**：给新对话 agent 的项目上下文，不替代 spec 的验收条款。
 
 **规格与规划的差异**：`spec.md` v0.3 已应用；plan/tasks 已按 v0.3 同步。实现以 tasks.md 为准；后续只允许通过 spec 版本记录修正验收口径，不静默改。
@@ -272,7 +272,7 @@
 | 文档 | 版本 | 日期 | 状态 |
 |---|---|---|---|
 | `spec.md` | v0.3 | 2026-10-19 | 首期范围冻结；已应用回补 + P6/P7 方案 A |
-| `AGENTS.md` | v5.3 | 2026-10-20 | 项目上下文；M0 完成、M1–M4（含 T2.9.1）、T5.1–T6.5、T7.1–T7.2.1 代码完成；下一步 T7.3 |
+| `AGENTS.md` | v5.4 | 2026-10-20 | 项目上下文；T7.3 soak 监测代码完成，30min/2h 浸泡未完成（WIP 交接） |
 | `plan.md` | v0.2 | 2026-10-19 | 技术规划；已同步 v0.3 |
 | `tasks.md` | v0.15 | 2026-10-20 | 任务清单；T1.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T2.9.1、T6.2.1、T7.1–T7.2.1 已标代码完成 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
@@ -303,7 +303,8 @@
 | `docs/handoff-2026-10-20-t6.5.md` | v1 | 2026-10-20 | 历史交接：T6.5 状态横幅（六类提示优先级、唯一横幅、其余进状态栏、74 项 `--banner-test`）、下一步 T7.1 |
 | `docs/handoff-2026-10-20-t7.1.md` | v1 | 2026-10-20 | 历史交接：T7.1 冷启动埋点与索引后置（P1/P2、`--startup-test`/`--index-test`、扫描中→就绪、标记延后加载） |
 | `docs/handoff-2026-10-20-t7.2.md` | v1 | 2026-10-20 | 历史交接：T7.2 内存预算与有界缓存（P10/P11、`FrameCache`、`--memory-test`、切文件释放） |
-| `docs/handoff-2026-10-20-t7.2.1.md` | v1 | 2026-10-20 | **当前交接**：T7.2.1 B=末帧循环/PgUp 画幅热修（`--loop-end-test`、显示尺寸、下一步 T7.3） |
+| `docs/handoff-2026-10-20-t7.2.1.md` | v1 | 2026-10-20 | 历史交接：T7.2.1 B=末帧循环/PgUp 画幅热修（`--loop-end-test`、显示尺寸、下一步 T7.3） |
+| `docs/handoff-2026-10-20-t7.3-wip.md` | v1 | 2026-10-20 | **当前交接（WIP）**：T7.3 soak 监测代码完成 `188c63e`；30min/2h 浸泡因断网中断，明天继续 |
 | `docs/next-session-prompt.md` | v16 | 2026-10-20 | 给下个 agent 的新会话提示词（T7.3 下一步 + T7.2.1 回归，可直接复制） |
 | `docs/perf/T3.1-audio.md` | v1 | 2026-10-20 | T3.1 音频设备/播放/seek/无音轨测量记录 |
 | `docs/perf/T3.2-sync.md` | v1 | 2026-10-20 | T3.2 音频主时钟/QPC 回退/24–60fps 同步测量记录 |
@@ -384,6 +385,7 @@
 - 2026-10-20：完成 T7.1 冷启动埋点与索引后置（`--startup-test` 阶段日志、`GfxWidget::framePresented`、`MediaSession` 分段计时；产品路径首帧后后台建索引，`SetTotal(Scanning)`→Exact/Estimated，扫描中禁用依赖索引的导航，标记/预览器延后到索引就绪；`FrameIndex` 可取消；旧 GUI 回归用同步开关；`--index-test` 12 项；`scripts/startup-bench.ps1`）；开发机 20/20：proxy-V1 P1 p50 255.78ms/P2 308.26ms、1080p 152s P1 255.54ms/P2 319.39ms、4K proxy P1 257.05ms/P2 330.39ms；1080p 索引 374.3ms 移出 P2；`ctest` 19/19（13.89s）；`dist` 32.45MB/25 文件；未做冷缓存/基线机/正式 V1；本文件升至 v5.1。
 - 2026-10-20：完成 T7.2 内存预算与有界缓存（`FrameCache` 软件帧 LRU：1080p 64MiB/24 帧、4K 96MiB/8 帧；D3D11VA 硬件帧回拷 NV12/P010，避免占用解码表面；只在后退步进 `kBackwardWindow` 预热，普通跳转/前进/播放 `kNone`；`EnsureSequentialPosition` 修缓存命中后起播位置；`Open`/`Close`/`InstallIndex` 清缓存；波形 4h 硬上限；新增 `--memory-test` empty/pause/play/step/switch 与 `GetProcessMemoryInfo` 采样）。开发机：空态 63.8MB、1080p 暂停 60s 89.3MB、1080p 播放 106.0MB、4K 播放 128.7MB；1080p 200 后退 p95 32.72ms、4K 40 后退 p95 228.09ms（4K P7 未达）；切文件 cache=0、10 循环 WS ~153MB；新增 `lapian_frame_cache_test`，`ctest` 20/20（13.94s）；`dist` 32.48MB/25 文件；未做基线机/正式 V1/V4/V10/2h soak；本文件升至 v5.2。
 - 2026-10-20：完成 T7.2.1 热修（B 在文件末帧时循环停住；PgUp 画幅轻微跳变）。根因：末帧没有 B+1，EOF 分支依赖 `current_frame_`，音频时钟在 B 前停住时 `pending B` 永远等不到 target；1080p D3D11VA 纹理 1920×1088/显示 1920×1080，旧渲染器用纹理尺寸 fit，缓存软件帧用 1080，导致 PgUp 时比例变化。修复：`loop_out_reached_` + 一帧墙钟 hold + EOF/last_decoded 兜底 + 跳转失败重试；硬解帧按显示尺寸建纹理并只拷贝有效区域；新增 `--loop-end-test` 与 1080p 渲染/缓存回拷断言。开发机：V9/1080p/4K B=末帧 5s 内 5/6/6 次 B→A，`playing=1`；`ctest` 20/20（14.93s）；`dist` 32.49MB/25 文件；用户物理画幅复测/2h soak 未做；本文件升至 v5.3。
+- 2026-10-20：完成 T7.3 长时浸泡监测代码（`--memory-mode soak`、`--memory-interval`、`SoakStats` 稳态斜率/句柄/线程/卡顿判定、UI 心跳与 30s hard-stall 看门狗、`ProcessMemory` 线程数、`scripts/soak-bench.ps1`、`lapian_soak_test`；修正 soak 时长链式漂移与脚本 UTF-8 BOM）。开发机最终代码 60s 探针 pass=1；300s/900s 探针 pass=1（900s WS 105.6→114.0MB，+8.4MB 慢漂移未判失败）；30min soak 在 t=150s 因用户学校断网主动停止。`ctest` 21/21（14.61s）；`dist` 32.51MB/25 文件。**不是 P14/V10/基线机/2h 通过**；当前交接 [T7.3 WIP](docs/handoff-2026-10-20-t7.3-wip.md)。
 
 **下一步**：T7.3 2 小时稳定性（P14 ≤1.2GB、无持续增长；V10 素材/长时 soak），之后 T7.4–T7.8。不要提前宣称 P10/P11 正式通过、基线机、正式 V1/V4/V10、2h soak、4K P7、真实显示缩放/多显示器、真实 VFR/手机 4K VFR、HDR/10-bit 颜色、正式 F2-A7/F1-A4、T6.2/T6.1 真人键盘/输入法/AltGr、F1-A6 真人/正式 V1/V4/V5/DPI、F6-A3/A4/A5/A7 真人/真实 V4/V5/ACL、F6-A8 正式 P9、F8-A2 真人输入法、F8-A1 真实 %APPDATA% 写入/真实重启、T2.9.1 的 4K/VFR/正式 P3/P4、T6.2.1 硬件级自动化/IME/AltGr、T7.2.1 用户物理画幅验收、F4-A1/A2 正式验收、F4-A2 长 GOP、P1/P2 冷缓存/基线机或正式 V1 通过。
 
