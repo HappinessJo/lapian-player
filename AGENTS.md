@@ -300,7 +300,7 @@
 | `docs/handoff-2026-10-20-t6.4.md` | v1 | 2026-10-20 | 历史交接：T6.4 DPI/布局（100–200%、响应式 InfoBar/侧栏、`--dpi-test` 9×4 检查）、下一步 T6.5 |
 | `docs/handoff-2026-10-20-t2.9.1.md` | v1 | 2026-10-20 | 历史交接：T2.9.1 反向拖动预览（目标帧发布、过期帧丢弃、32 帧缓存）、下一步 T6.5 |
 | `docs/handoff-2026-10-20-t6.2.1.md` | v1 | 2026-10-20 | **当前交接**：T6.2.1 长按连发（自动重复 KeyRelease、77 项 key-test）、下一步 T6.5 |
-| `docs/next-session-prompt.md` | v11 | 2026-10-20 | 给下个 agent 的新会话提示词（T6.5 下一步 + T2.9.1/T6.2.1 回归，可直接复制） |
+| `docs/next-session-prompt.md` | v12 | 2026-10-20 | 给下个 agent 的新会话提示词（T6.5 下一步 + T2.9.1/T6.2.1 回归，可直接复制） |
 | `docs/perf/T3.1-audio.md` | v1 | 2026-10-20 | T3.1 音频设备/播放/seek/无音轨测量记录 |
 | `docs/perf/T3.2-sync.md` | v1 | 2026-10-20 | T3.2 音频主时钟/QPC 回退/24–60fps 同步测量记录 |
 | `docs/perf/T3.3-speed.md` | v1 | 2026-10-20 | T3.3 0.25–2x 重采样/音频推进/2x 同步测量记录 |
@@ -367,10 +367,10 @@
 - 2026-10-20：完成 T6.2 键位/焦点矩阵（步进/Home/End 提升为窗口级事件过滤器，300ms→70ms 单连发源，忽略 OS 重复，焦点丢失/窗口失活停止；删除 GfxWidget 内部步进定时器；`+`/`-` 过滤器单源，兼容 `Key_Plus`/`Key_Equal+Shift`/numpad；文本与模态让位）；新增 `--key-test`，75 项检查连续 2 次 exit 0，覆盖 §3.7 全表、焦点矩阵、长按 450ms/2s 27 帧、文本/模态隔离；全屏/截图/note/mark/ab/loop 回归 exit 0；真人键盘/IME/AltGr 与 Ctrl+O 原生对话框仍待；`dist` 32.28MB/25 文件；本文件升至 v4.5。
 - 2026-10-20：完成 T6.3 设置持久化（`core/AppSettings` 纯解析 + `SettingsStore`；`%APPDATA%\拉片软件\settings.json`、schema 1、QSaveFile 原子写、64 KiB 上限；音量/波形跨会话，循环/速度/静音不落盘；250ms 去抖 + 关窗/析构 flush，读取失败静默回退）；新增 `lapian_app_settings_test`，`ctest` 18/18；`--settings-test` + `--settings-expect` 两进程（重定向 APPDATA）47+5 项检查全过；默认根 `C:\Users\...\AppData\Roaming\拉片软件`，保存 p95 1.04ms；真实 `%APPDATA%` 写入受本会话执行环境（非系统进程写 AppData 被拒）限制未验证；`dist` 32.31MB/25 文件；本文件升至 v4.6。
 - 2026-10-20：完成 T6.4 DPI/布局（初始窗口按屏幕可用区收缩、侧栏 240–300 响应式、InfoBar <760 两行 + 文件名省略、GfxWidget 最小 320×180、窄宽度隐藏状态栏版本标签）；新增 `--dpi-test`，`QT_SCALE_FACTOR` 100/125/150/200% 各 9 项检查、0 失败，正常/全屏/820 宽窄窗口无裁切/重叠；200% 窗口 928×452、InfoBar 687×53 两行、侧栏 241；150%/200% `--fullscreen-test` 各 38 项恢复通过；键位/设置/截图/note/mark/ab/loop 回归 exit 0；`dist` 32.34MB/25 文件；真实 Windows 显示缩放/4K/多显示器/真人字体与 IME 仍待；本文件升至 v4.7。
-- 2026-10-20：完成 T2.9.1 反向拖动预览补丁（根因：反向目标每个鼠标事件都从关键帧重解并逐帧发布，表现为画面向前冲；UpdateTarget 不清理旧目标帧）。修复：PreviewFrame 带 frame_index/pts，反向只发布目标帧、丢弃过期帧，32 帧降采样缓存（约 44MB，End/Close 释放），Begin 起点目标模式；前向 58–64fps 保持。新增反向 600→560 每步目标帧/单调不增、快速反向 900ms 不前跳、反向后前向恢复测试；60s 反向 17.7–18.2ms/步、测试.mp4 25.4–25.6ms/步、proxy 长 GOP 39–41ms/步；ctest 18/18（14.16s）；dist 32.34MB/25 文件；未做真人鼠标/4K/VFR/正式 P3/P4；本文件升至 v4.8。
-- 2026-10-20：完成 T6.2.1 长按 PgUp/PgDn 连发补丁（现象：物理长按最多 3 帧；根因：Qt 物理长按会额外发 KeyRelease，旧代码只要 step_direction_ != 0 就 StopStepRepeat()，约 500ms 第一次 OS 自动重复的 release 把连发停掉；300ms+70ms+70ms 正好 3 帧）。修复：KeyRelease 仅在 !isAutoRepeat() 时停止；自动重复 release 吞掉、自动重复 KeyPress 继续忽略；新增 PressAutoRepeatReleaseForTest 与 autorepeat-release-active/ignored 检查；--key-test 77 项连续 2 次 exit 0、2s 长按 27 帧；ctest 18/18（13.90s）；dist 32.34MB/25 文件；未做真实键盘硬件长按/IME/AltGr；本文件升至 v4.9。
+- 2026-10-20：完成 T2.9.1 反向拖动预览补丁（根因：反向目标每个鼠标事件都从关键帧重解并逐帧发布，表现为画面向前冲；UpdateTarget 不清理旧目标帧）。修复：PreviewFrame 带 frame_index/pts，反向只发布目标帧、丢弃过期帧，32 帧降采样缓存（约 44MB，End/Close 释放），Begin 起点目标模式；前向 58–64fps 保持。新增反向 600→560 每步目标帧/单调不增、快速反向 900ms 不前跳、反向后前向恢复测试；60s 反向 17.7–18.2ms/步、测试.mp4 25.4–25.6ms/步、proxy 长 GOP 39–41ms/步；ctest 18/18（14.16s）；dist 32.34MB/25 文件；用户已物理鼠标复测倒拖正常，未做 4K/VFR/正式 P3/P4；本文件升至 v4.8。
+- 2026-10-20：完成 T6.2.1 长按 PgUp/PgDn 连发补丁（现象：物理长按最多 3 帧；根因：Qt 物理长按会额外发 KeyRelease，旧代码只要 step_direction_ != 0 就 StopStepRepeat()，约 500ms 第一次 OS 自动重复的 release 把连发停掉；300ms+70ms+70ms 正好 3 帧）。修复：KeyRelease 仅在 !isAutoRepeat() 时停止；自动重复 release 吞掉、自动重复 KeyPress 继续忽略；新增 PressAutoRepeatReleaseForTest 与 autorepeat-release-active/ignored 检查；--key-test 77 项连续 2 次 exit 0、2s 长按 27 帧；ctest 18/18（13.90s）；dist 32.34MB/25 文件；用户已物理键盘复测长按正常，未做硬件级自动化/IME/AltGr；本文件升至 v4.9。
 
-**下一步**：T6.5 状态横幅（VFR、超出保证范围、无音频、扫描中、10-bit、错误；不遮挡关键控件），之后 T7 性能/稳定/交付。不要提前宣称 T6.2/T6.1 真人键盘、输入法/AltGr、F1-A6 真人/正式 V1/V4/V5/DPI、F6-A3/A4/A5/A7 真人/真实 V4/V5/ACL、F6-A8 正式 P9、F8-A2 真人输入法、F8-A1 真实 %APPDATA% 写入/真实重启、T6.4 真实显示缩放/多显示器/真人字体、T2.9.1 真人鼠标拖动/4K/VFR/正式 P3/P4、T6.2.1 真实键盘硬件长按、F4-A2 长 GOP 或正式 V1/基线机通过。
+**下一步**：T6.5 状态横幅（VFR、超出保证范围、无音频、扫描中、10-bit、错误；不遮挡关键控件），之后 T7 性能/稳定/交付。不要提前宣称 T6.2/T6.1 真人键盘、输入法/AltGr、F1-A6 真人/正式 V1/V4/V5/DPI、F6-A3/A4/A5/A7 真人/真实 V4/V5/ACL、F6-A8 正式 P9、F8-A2 真人输入法、F8-A1 真实 %APPDATA% 写入/真实重启、T6.4 真实显示缩放/多显示器/真人字体、T2.9.1 的 4K/VFR/正式 P3/P4、T6.2.1 硬件级自动化/IME/AltGr、F4-A2 长 GOP 或正式 V1/基线机通过。
 
 ---
 
