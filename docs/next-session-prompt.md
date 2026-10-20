@@ -23,9 +23,9 @@
 3. 跑一次 ctest（命令见下），确认 17/17
 
 当前基线（以 git log 为准）：
-- 参考基线：T5.4 代码提交 `01ad8dc`（文档提交紧随其后；以 git log 为准）；工作区应 clean。
+- 当前 HEAD `bf90eb3`（T5.4 交接/perf 文档）；T5.4 代码提交 `01ad8dc`；工作区应 clean。
 - M0–M4、T5.1 存储、T5.2 标记 UI、T5.3 备注、T5.4 截图代码完成；
-  ctest 17/17；dist 32.21MB / 25 文件。
+  ctest 17/17（约 10.2s）；dist 32.21MB / 25 文件。
 - 已有：打开/播放/逐帧/seek/长按/帧号/时间码、时间轴缩放滚动/点击拖动/拖动预览、
   WASAPI、IAudioClock+QPC、0.25–2x 变速/变调、A/V offset、200/s 波形生成与绘制、
   步进/拖动静音、A/B 色条/循环播放/A=B 定帧；T5.1 sidecar；T5.2 Ctrl+M/侧栏/时间轴
@@ -116,7 +116,8 @@ $p = Start-Process -FilePath (Join-Path $PWD 'dist\lapian.exe') `
   -Wait -PassThru -RedirectStandardError (Join-Path $PWD 'build\t5.4-snapshot.log')
 Write-Host "exit=$($p.ExitCode)"
 
-# 4K 截图回归（合成样本，不是 V4）
+# 4K 截图回归（合成样本，不是 V4；若 build\t5.4-4k\K.mp4 不存在，
+# 先按 T5.4 交接生成，或跳过并在报告中注明，不要伪造结果）
 $p = Start-Process -FilePath (Join-Path $PWD 'dist\lapian.exe') `
   -ArgumentList @('--file',(Join-Path $PWD 'build\t5.4-4k\K.mp4'),'--snapshot-test') `
   -Wait -PassThru -RedirectStandardError (Join-Path $PWD 'build\t5.4-snapshot-4k.log')
