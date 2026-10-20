@@ -2,6 +2,8 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QPixmap>
 #include <QString>
 #include <QStringList>
@@ -24,17 +26,21 @@ int main(int argc, char* argv[]) {
 
   // T1.4：支持 --file <path> 与系统文件关联传入的第一个本地路径。
   QString file_path;
+  QString file_b;
   QString goto_text;
   bool auto_play = false;
   bool step_test = false;
   bool ab_test = false;
   bool loop_test = false;
+  bool mark_test = false;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--file-b") && i + 1 < arguments.size()) {
+      file_b = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--goto") && i + 1 < arguments.size()) {
       goto_text = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--rate") && i + 1 < arguments.size()) {
@@ -48,6 +54,8 @@ int main(int argc, char* argv[]) {
       ab_test = true;
     } else if (arguments[i] == QStringLiteral("--loop-test")) {
       loop_test = true;
+    } else if (arguments[i] == QStringLiteral("--mark-test")) {
+      mark_test = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -56,13 +64,16 @@ int main(int argc, char* argv[]) {
   if (loop_test) {
     qputenv("LAPIAN_LOOP_LOG", "1");
   }
+  if (mark_test) {
+    qputenv("LAPIAN_MARK_LOG", "1");
+  }
 
   const auto process_start = std::chrono::steady_clock::now();
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
-    QTimer::singleShot(0, &window, [&window, &app, file_path, goto_text, auto_play,
-                                    step_test, ab_test, loop_test, playback_rate,
+    QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
+                                    step_test, ab_test, loop_test, mark_test, playback_rate,
                                     has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
@@ -223,6 +234,122 @@ int main(int argc, char* argv[]) {
           log_state("paused");
         });
         QTimer::singleShot(20500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
+      }
+      if (mark_test) {
+        // T5.2：101 个标记（0–100）、重开、点击跳转、100 标记操作与性能、
+        // 删除持久化、空文件删除、损坏 sidecar 警告、F8-A3 文件隔离。
+        const QString mark_a = file_path;
+        const QString mark_b = file_b;
+        const QString sidecar_a = mark_a + QStringLiteral(".lapian.json");
+        const QString sidecar_b = mark_b + QStringLiteral(".lapian.json");
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray state = window.MarkStateForTest().toUtf8();
+          std::fprintf(stderr, "T5.2 mark_test %s %s\n", step, state.constData());
+          std::fflush(stderr);
+        };
+        auto log_storage = [&window]() {
+          std::fprintf(stderr, "T5.2 mark_storage path=%s fallback=%d\n",
+                       window.MarkStoragePathForTest().toUtf8().constData(),
+                       window.MarkUsingFallbackForTest() ? 1 : 0);
+          std::fflush(stderr);
+        };
+
+        schedule(400, [&window, sidecar_a, log_state, log_storage]() {
+          log_state("a-opened");
+          log_storage();
+          std::fprintf(stderr, "T5.2 mark_sidecar_a exists_before=%d\n",
+                       QFileInfo::exists(sidecar_a) ? 1 : 0);
+          std::fflush(stderr);
+          for (int frame = 0; frame <= 100; ++frame) {
+            window.GoToInputForTest(QString::number(frame));
+            window.AddMarkForTest();
+          }
+          log_state("a-added-101");
+          std::fprintf(stderr, "T5.2 mark_sidecar_a exists_after=%d\n",
+                       QFileInfo::exists(sidecar_a) ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(4000, [&window, mark_a, log_state]() {
+          window.OpenFile(mark_a);
+          log_state("a-reopened");
+          std::fprintf(stderr, "T5.2 mark_reopen count=%d first=%lld last=%lld\n",
+                       window.MarkCountForTest(),
+                       static_cast<long long>(window.MarkFrameAtForTest(0)),
+                       static_cast<long long>(
+                           window.MarkFrameAtForTest(window.MarkCountForTest() - 1)));
+          std::fflush(stderr);
+        });
+        schedule(4400, [&window]() { window.ActivateMarkForTest(100); });
+        schedule(4700, [&window, log_state]() { log_state("click-frame100"); });
+        schedule(4900, [&window]() { window.ResetMarkPerfSamplesForTest(); });
+        for (int i = 0; i < 20; ++i) {
+          schedule(5000 + i * 150, [&window, i]() { window.ActivateMarkForTest(i * 5); });
+        }
+        schedule(8200, [&window, log_state]() {
+          log_state("after-20-clicks");
+          std::fprintf(stderr, "T5.2 mark_perf %s\n",
+                       window.MarkPerfSummaryForTest().toUtf8().constData());
+          std::fflush(stderr);
+          const QString dir = QDir::currentPath() + QStringLiteral("/build");
+          QDir().mkpath(dir);
+          const bool ok =
+              window.grab().save(dir + QStringLiteral("/t5.2-marks-ui.png"));
+          std::fprintf(stderr, "T5.2 mark_shot ui ok=%d\n", ok ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(8500, [&window, log_state]() {
+          window.DeleteMarkForTest(42);
+          log_state("deleted-42");
+        });
+        schedule(8900, [&window, mark_a, log_state]() {
+          window.OpenFile(mark_a);
+          log_state("a-reopened-after-delete");
+        });
+        schedule(9400, [&window, mark_b, sidecar_b, log_state]() {
+          QFile corrupt(sidecar_b);
+          if (corrupt.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            corrupt.write("{ broken sidecar");
+            corrupt.close();
+          }
+          window.OpenFile(mark_b);
+          log_state("b-opened-corrupt-with-a-100");
+          std::fprintf(stderr, "T5.2 mark_b sidecar_bak=%d\n",
+                       QFileInfo::exists(sidecar_b + QStringLiteral(".bak")) ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(9900, [&window, log_state]() {
+          log_state("b-after-corrupt");
+          const QString dir = QDir::currentPath() + QStringLiteral("/build");
+          QDir().mkpath(dir);
+          const bool ok =
+              window.grab().save(dir + QStringLiteral("/t5.2-marks-warning.png"));
+          std::fprintf(stderr, "T5.2 mark_shot warning ok=%d\n", ok ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(10000, [&window, mark_a, log_state]() {
+          window.OpenFile(mark_a);
+          log_state("a-after-switching-to-b");
+          std::fprintf(stderr, "T5.2 mark_f8a3 a_count_after_switch=%d\n",
+                       window.MarkCountForTest());
+          std::fflush(stderr);
+        });
+        schedule(10500, [&window, sidecar_a, log_state]() {
+          while (window.MarkCountForTest() > 0) {
+            window.DeleteMarkForTest(0);
+          }
+          log_state("deleted-all");
+          std::fprintf(stderr, "T5.2 mark_sidecar_a exists_after_delete_all=%d\n",
+                       QFileInfo::exists(sidecar_a) ? 1 : 0);
+          std::fflush(stderr);
+        });
+        schedule(11000, [&window, mark_b, log_state]() {
+          window.OpenFile(mark_b);
+          log_state("b-final-empty");
+        });
+        QTimer::singleShot(11500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
       }
     });
   }

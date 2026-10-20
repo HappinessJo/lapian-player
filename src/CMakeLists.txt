@@ -52,6 +52,14 @@ lapian_apply_common_options(lapian_marks)
 target_include_directories(lapian_marks PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_marks PUBLIC Qt6::Core)
 
+# T5.2 标记侧栏：列表/存储位置/警告；产品与离屏测试共用。
+add_library(lapian_mark_ui STATIC
+  app/MarkPanel.cpp
+  app/MarkPanel.h)
+lapian_apply_common_options(lapian_mark_ui)
+target_include_directories(lapian_mark_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_mark_ui PUBLIC Qt6::Widgets lapian_marks)
+
 # T2.7 时间轴：纯 C++ 几何模型 + Qt Widgets 控件，产品与测试共用。
 add_library(lapian_timeline STATIC
   core/TimelineModel.cpp
@@ -114,7 +122,8 @@ lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
-                                     lapian_timeline lapian_audio lapian::ffmpeg Qt6::Widgets)
+                                     lapian_timeline lapian_audio lapian_marks
+                                     lapian_mark_ui lapian::ffmpeg Qt6::Widgets)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 

@@ -5,6 +5,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPen>
 #include <QPointF>
 #include <QPolygonF>
 #include <QRectF>
@@ -58,6 +59,7 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
 void TimelineWidget::Clear() {
   ClearWaveform();
   loop_range_.Clear();
+  marks_.clear();
   SetFrameCount(0);
 }
 
@@ -152,7 +154,11 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     follow_playhead_ = false;
   }
   scrubbing_ = true;
-  drag_target_frame_ = FrameAtPosition(event->position());
+  // T5.2：点在标记线附近时吸附到标记帧，和普通拖动/播放头点击共用同一条
+  // scrub 路径；A/B 标签不参与命中，避免与循环边界抢点击。
+  const std::int64_t mark_frame = MarkFrameAtX(event->position().x());
+  drag_target_frame_ =
+      mark_frame >= 0 ? mark_frame : FrameAtPosition(event->position());
   SetCurrentFrame(drag_target_frame_);
   emit scrubStarted(static_cast<qint64>(drag_target_frame_));
   event->accept();
@@ -248,6 +254,41 @@ void TimelineWidget::SetWaveformVisible(bool visible) {
 void TimelineWidget::SetLoopRange(const lapian::core::LoopRange& range) {
   loop_range_ = range;
   update();
+}
+
+void TimelineWidget::SetMarks(std::vector<std::int64_t> frames) {
+  std::sort(frames.begin(), frames.end());
+  frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
+  marks_ = std::move(frames);
+  update();
+}
+
+void TimelineWidget::ClearMarks() {
+  if (marks_.empty()) {
+    return;
+  }
+  marks_.clear();
+  update();
+}
+
+std::int64_t TimelineWidget::MarkFrameAtX(double x, double tolerance_px) const {
+  if (marks_.empty() || model_.frame_count() <= 0) {
+    return -1;
+  }
+  const double tolerance = std::max(1.0, tolerance_px);
+  std::int64_t best_frame = -1;
+  double best_distance = tolerance + 1.0;
+  for (const std::int64_t frame : marks_) {
+    if (frame < 0 || frame >= model_.frame_count()) {
+      continue;
+    }
+    const double distance = std::abs(model_.FrameToX(frame) - x);
+    if (distance <= tolerance && distance < best_distance) {
+      best_distance = distance;
+      best_frame = frame;
+    }
+  }
+  return best_frame;
 }
 
 double TimelineWidget::FramePtsSeconds(std::int64_t frame) const {
@@ -418,6 +459,37 @@ void TimelineWidget::DrawLoopRange(QPainter& painter, const QRectF& rect) {
   }
 }
 
+void TimelineWidget::DrawMarks(QPainter& painter, const QRectF& rect) {
+  if (marks_.empty() || model_.frame_count() <= 0) {
+    return;
+  }
+  const double bottom = rect.bottom();
+  const QColor line_color(247, 118, 142, 70);
+  const QColor flag_color(QStringLiteral("#f7768e"));
+  painter.save();
+  int last_x = std::numeric_limits<int>::min();
+  for (const std::int64_t frame : marks_) {
+    if (frame < 0 || frame >= model_.frame_count()) {
+      continue;
+    }
+    const double x = model_.FrameToX(frame);
+    if (x < -1.0 || x > static_cast<double>(width()) + 1.0) {
+      continue;
+    }
+    const int rounded_x = static_cast<int>(std::lround(x));
+    // 全片适配时 100 个标记可能落在同一像素列；只画一次，避免无意义重绘。
+    if (rounded_x == last_x) {
+      continue;
+    }
+    last_x = rounded_x;
+    const double line_x = std::floor(x) + 0.5;
+    painter.setPen(QPen(line_color, 1.0));
+    painter.drawLine(QPointF(line_x, 8.0), QPointF(line_x, bottom));
+    painter.fillRect(QRectF(line_x - 1.0, 0.0, 3.0, 8.0), flag_color);
+  }
+  painter.restore();
+}
+
 void TimelineWidget::ApplyZoom(double factor, double anchor_x) {
   if (model_.frame_count() <= 0) {
     return;
@@ -511,6 +583,10 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
   DrawLoopRange(painter,
                 QRectF(0.0, 0.0, static_cast<double>(width()),
                        static_cast<double>(height() - kScrollBarHeight)));
+  // 标记在色条之上、播放头之下：粉色竖线 + 顶部小旗。
+  DrawMarks(painter,
+            QRectF(0.0, 0.0, static_cast<double>(width()),
+                   static_cast<double>(height() - kScrollBarHeight)));
 
   const double playhead_x = model_.FrameToX(current_frame_);
   const double playhead_bottom =

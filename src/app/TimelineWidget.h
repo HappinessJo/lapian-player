@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "core/LoopRange.h"
 #include "core/TimelineModel.h"
@@ -68,6 +69,14 @@ class TimelineWidget : public QWidget {
   void SetLoopRange(const lapian::core::LoopRange& range);
   const lapian::core::LoopRange& loop_range() const { return loop_range_; }
 
+  // T5.2 标记：只保存帧号（同一帧多个标记只画一个），排序去重。
+  // 绘制只遍历标记并跳过不可见项；命中测试按像素距离取最近标记。
+  void SetMarks(std::vector<std::int64_t> frames);
+  void ClearMarks();
+  const std::vector<std::int64_t>& marks() const { return marks_; }
+  // 返回距离 x（逻辑像素）不超过 tolerance_px 的最近标记帧；没有返回 -1。
+  std::int64_t MarkFrameAtX(double x, double tolerance_px = 5.0) const;
+
  signals:
   // 按下时发一次；拖动中目标帧变化时发；松开时发最终目标帧。
   void scrubStarted(qint64 frame);
@@ -90,6 +99,7 @@ class TimelineWidget : public QWidget {
   void UpdateHeight();
   void DrawWaveform(QPainter& painter, const QRectF& rect);
   void DrawLoopRange(QPainter& painter, const QRectF& rect);
+  void DrawMarks(QPainter& painter, const QRectF& rect);
   double FramePtsSeconds(std::int64_t frame) const;
   void SyncScrollBar();
   void ApplyZoom(double factor, double anchor_x);
@@ -111,4 +121,5 @@ class TimelineWidget : public QWidget {
   bool waveform_active_ = false;
   bool waveform_visible_ = true;
   lapian::core::LoopRange loop_range_;
+  std::vector<std::int64_t> marks_;
 };

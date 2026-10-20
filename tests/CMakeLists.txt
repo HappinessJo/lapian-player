@@ -34,6 +34,15 @@ add_test(NAME lapian_mark_store_test COMMAND lapian_mark_store_test)
 set_tests_properties(lapian_mark_store_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
+add_executable(lapian_mark_panel_test mark_panel_test.cpp)
+lapian_apply_common_options(lapian_mark_panel_test)
+target_link_libraries(lapian_mark_panel_test PRIVATE lapian_mark_ui)
+add_test(NAME lapian_mark_panel_test COMMAND lapian_mark_panel_test)
+set_tests_properties(lapian_mark_panel_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen" SKIP_RETURN_CODE 77)
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)

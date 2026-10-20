@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QByteArray>
+#include <QCloseEvent>
 #include <QDebug>
 #include <QDir>
 #include <QDragEnterEvent>
@@ -10,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
@@ -21,18 +23,20 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QString>
+#include <QStringList>
 #include <QTextEdit>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
-#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <libavutil/avutil.h>
@@ -41,6 +45,7 @@ extern "C" {
 
 #include "app/GfxWidget.h"
 #include "app/InfoBar.h"
+#include "app/MarkPanel.h"
 #include "app/PlaybackController.h"
 #include "app/TimelineWidget.h"
 #include "audio/AudioEngine.h"
@@ -98,15 +103,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   setAcceptDrops(true);
 
   auto* central = new QWidget(this);
-  auto* central_layout = new QVBoxLayout(central);
+  auto* central_layout = new QHBoxLayout(central);
   central_layout->setContentsMargins(0, 0, 0, 0);
   central_layout->setSpacing(0);
-  gfx_ = new GfxWidget(central);
-  timeline_ = new TimelineWidget(central);
-  info_bar_ = new InfoBar(central);
-  central_layout->addWidget(gfx_, 1);
-  central_layout->addWidget(timeline_);
-  central_layout->addWidget(info_bar_);
+
+  auto* stage = new QWidget(central);
+  auto* stage_layout = new QVBoxLayout(stage);
+  stage_layout->setContentsMargins(0, 0, 0, 0);
+  stage_layout->setSpacing(0);
+  gfx_ = new GfxWidget(stage);
+  timeline_ = new TimelineWidget(stage);
+  info_bar_ = new InfoBar(stage);
+  stage_layout->addWidget(gfx_, 1);
+  stage_layout->addWidget(timeline_);
+  stage_layout->addWidget(info_bar_);
+
+  mark_panel_ = new MarkPanel(central);
+  mark_panel_->setFixedWidth(300);
+  central_layout->addWidget(stage, 1);
+  central_layout->addWidget(mark_panel_);
   setCentralWidget(central);
 
   open_action_ = new QAction(QStringLiteral("打开视频..."), this);
@@ -206,6 +221,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(loop_clear_action_, &QAction::triggered, this, &MainWindow::ClearLoop);
   addAction(loop_clear_action_);
 
+  // T5.2 标记：Ctrl+M 在当前帧添加；列表点击/删除由 MarkPanel 发信号。
+  mark_action_ = new QAction(QStringLiteral("添加标记"), this);
+  mark_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+M")));
+  mark_action_->setShortcutContext(Qt::WindowShortcut);
+  mark_action_->setEnabled(false);
+  connect(mark_action_, &QAction::triggered, this, &MainWindow::AddMarkAtCurrentFrame);
+  addAction(mark_action_);
+
+  connect(mark_panel_, &MarkPanel::markActivated, this,
+          [this](const QString& id, qint64 frame) {
+            ActivateMark(id, static_cast<std::int64_t>(frame));
+          });
+  connect(mark_panel_, &MarkPanel::deleteRequested, this,
+          [this](const QString& id) { ApplyDeleteMark(id, true); });
+
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
   connect(playback_.get(), &PlaybackController::stateChanged, this,
@@ -287,10 +317,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() = default;
 
 void MainWindow::ShowEmptyState() {
+  CancelPendingMarkJump();
   StopPreview();
   preview_.reset();
+  marks_.reset();
+  marks_dirty_ = false;
+  if (mark_panel_ != nullptr) {
+    mark_panel_->Clear();
+  }
   if (timeline_ != nullptr) {
     timeline_->ClearWaveform();
+    timeline_->SetMarks({});
   }
   if (audio_) {
     audio_.reset();
@@ -380,6 +417,9 @@ void MainWindow::ShowEmptyState() {
   if (loop_clear_action_ != nullptr) {
     loop_clear_action_->setEnabled(false);
   }
+  if (mark_action_ != nullptr) {
+    mark_action_->setEnabled(false);
+  }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
@@ -403,10 +443,7 @@ void MainWindow::OpenFile(const QString& path) {
   if (path.isEmpty()) {
     return;
   }
-  if (timeline_ != nullptr) {
-    // 先把旧波形的回调摘掉，避免 session 替换后绘制到悬空的 FrameIndex。
-    timeline_->ClearWaveform();
-  }
+  CancelPendingMarkJump();
   if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
     return;
@@ -430,8 +467,38 @@ void MainWindow::OpenFile(const QString& path) {
     return;
   }
 
-  // T1.4 占位：当前还没有标记/备注可写；T6 在这里保存旧文件状态。
-  SaveCurrentStatePlaceholder();
+  // T5.2：旧文件的标记先落盘；失败时明确询问，不静默丢标记。
+  if (!FlushMarksBeforeSwitch()) {
+    return;
+  }
+  if (timeline_ != nullptr) {
+    // 先把旧波形的回调摘掉，避免 session 替换后绘制到悬空的 FrameIndex。
+    timeline_->ClearWaveform();
+  }
+
+  // T5.2：用候选会话的 FrameIndex 构造 FrameLookup，让 MarkStore 做 frame+pts
+  // 校正；回调只在 Open 调用期间使用，不持有索引指针。
+  lapian::core::FrameLookup mark_lookup;
+  const lapian::media::FrameIndex& candidate_index = candidate->index();
+  if (candidate_index.IsReady() && !candidate_index.empty()) {
+    mark_lookup.frame_count = static_cast<std::int64_t>(candidate_index.size());
+    mark_lookup.pts_of_frame = [&candidate_index](std::int64_t frame,
+                                                  std::int64_t* pts_us) {
+      const lapian::media::FrameIndexEntry* entry = candidate_index.Entry(frame);
+      if (entry == nullptr) {
+        return false;
+      }
+      *pts_us = entry->pts_us;
+      return true;
+    };
+    mark_lookup.frame_of_pts = [&candidate_index](std::int64_t pts_us,
+                                                  std::int64_t* frame) {
+      return candidate_index.FindExactPts(pts_us, frame);
+    };
+  }
+  lapian::core::MarkStore opened_marks = lapian::core::MarkStore::Open(
+      path_utf8, candidate->info().duration_us, {}, mark_lookup);
+
   // 旧预览器持有旧索引指针，必须在替换 session 之前停掉。
   StopPreview();
   preview_.reset();
@@ -439,6 +506,8 @@ void MainWindow::OpenFile(const QString& path) {
     audio_.reset();
   }
   session_ = std::move(candidate);
+  marks_ = std::make_unique<lapian::core::MarkStore>(std::move(opened_marks));
+  marks_dirty_ = false;
   playback_->SetSession(session_.get());
   current_frame_ = 0;
   play_action_->setEnabled(true);
@@ -446,6 +515,9 @@ void MainWindow::OpenFile(const QString& path) {
   prev_action_->setEnabled(can_seek);
   next_action_->setEnabled(can_seek);
   goto_action_->setEnabled(can_seek);
+  if (mark_action_ != nullptr) {
+    mark_action_->setEnabled(can_seek);
+  }
 
   // T2.7：时间轴先用当前索引的帧数；索引为空时不画假刻度。
   const std::int64_t timeline_frames =
@@ -559,6 +631,10 @@ void MainWindow::OpenFile(const QString& path) {
     preview_->Configure(session_->path_utf8(), info.video.stream_index,
                         &session_->index());
   }
+
+  // T5.2：列表、时间轴标记、实际存储位置与加载警告都在这里一次刷新。
+  RefreshMarksUi();
+  ShowMarkWarnings();
 }
 
 void MainWindow::ShowGotoDialog() {
@@ -625,6 +701,7 @@ bool MainWindow::ApplyGotoText(const QString& text) {
   const std::int64_t last_frame =
       static_cast<std::int64_t>(session_->index().size()) - 1;
   const std::int64_t clamped = lapian::core::ClampFrame(target, last_frame);
+  CancelPendingMarkJump();
   GoToFrame(clamped);
   if (clamped != target) {
     statusBar()->showMessage(QStringLiteral("帧号越界，已到边界 %1").arg(clamped), 4000);
@@ -640,6 +717,7 @@ void MainWindow::TogglePlayback() {
   if (playback_ == nullptr || !session_ || !session_->IsOpen()) {
     return;
   }
+  CancelPendingMarkJump();
   // 拖动中按 Space：先放弃预览，避免预览帧在播放开始后覆盖画面。
   if (preview_timer_ != nullptr && preview_timer_->isActive()) {
     preview_timer_->stop();
@@ -943,6 +1021,7 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
+  CancelPendingMarkJump();
   if (playback_ != nullptr) {
     playback_->Pause();
   }
@@ -1050,12 +1129,14 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
 
 void MainWindow::StepBackward() {
   if (session_ != nullptr && session_->IsOpen()) {
+    CancelPendingMarkJump();
     GoToFrame(current_frame_ - 1);
   }
 }
 
 void MainWindow::StepForward() {
   if (session_ != nullptr && session_->IsOpen()) {
+    CancelPendingMarkJump();
     GoToFrame(current_frame_ + 1);
   }
 }
@@ -1140,8 +1221,388 @@ void MainWindow::ShowOpenError(const QString& message) {
   QMessageBox::warning(this, QStringLiteral("打开失败"), message);
 }
 
-void MainWindow::SaveCurrentStatePlaceholder() {
-  // T6 的 sidecar 写入接进来之前，这里保持无操作。
+void MainWindow::closeEvent(QCloseEvent* event) {
+  CancelPendingMarkJump();
+  if (!FlushMarksOnClose()) {
+    event->ignore();
+    return;
+  }
+  QMainWindow::closeEvent(event);
+}
+
+void MainWindow::AddMarkAtCurrentFrame() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplyAddMark();
+}
+
+void MainWindow::AddMarkForTest() { ApplyAddMark(); }
+
+void MainWindow::ApplyAddMark() {
+  if (session_ == nullptr || !session_->IsOpen() || marks_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty()) {
+    statusBar()->showMessage(QStringLiteral("帧索引未就绪，暂时不能添加标记"), 3000);
+    return;
+  }
+  const lapian::media::FrameIndexEntry* entry = index.Entry(current_frame_);
+  if (entry == nullptr) {
+    statusBar()->showMessage(QStringLiteral("当前帧没有 PTS，暂时不能添加标记"), 3000);
+    return;
+  }
+  std::string id;
+  if (!marks_->AddMark(current_frame_, entry->pts_us, std::string(), std::string(), &id)) {
+    statusBar()->showMessage(QStringLiteral("添加标记失败"), 3000);
+    return;
+  }
+  marks_dirty_ = true;
+  const bool saved = SaveMarks(true);
+  RefreshMarksUi(QString::fromStdString(id));
+  statusBar()->showMessage(
+      QStringLiteral("已添加标记：帧 %1 · %2 · %3")
+          .arg(static_cast<qlonglong>(current_frame_))
+          .arg(saved ? QStringLiteral("已保存") : QStringLiteral("未保存"))
+          .arg(marks_->using_fallback() ? QStringLiteral("%APPDATA% 回退")
+                                        : QStringLiteral("sidecar")),
+      3000);
+  if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
+    std::fprintf(stderr, "T5.2 mark_add frame=%lld count=%d\n",
+                 static_cast<long long>(current_frame_), MarkCountForTest());
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::ActivateMark(const QString& id, std::int64_t frame) {
+  if (session_ == nullptr || !session_->IsOpen() || marks_ == nullptr ||
+      timeline_ == nullptr || info_bar_ == nullptr || mark_panel_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty()) {
+    return;
+  }
+  const std::int64_t last_frame = static_cast<std::int64_t>(index.size()) - 1;
+  const std::int64_t target = lapian::core::ClampFrame(frame, last_frame);
+
+  CancelPendingMarkJump();
+  const std::uint64_t generation = navigation_generation_;
+  QElapsedTimer timer;
+  timer.start();
+
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    preview_timer_->stop();
+    if (preview_ != nullptr) {
+      preview_->End();
+    }
+  }
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
+  mark_panel_->SelectMark(id.toStdString());
+  timeline_->SetCurrentFrame(target);
+  info_bar_->SetFrame(static_cast<int>(target));
+  // F6-A8：选中/播放头/帧号先可见，再让解码在下一个事件循环执行。
+  mark_panel_->repaint();
+  timeline_->repaint();
+  info_bar_->repaint();
+  const double ui_ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+  mark_ui_samples_.push_back(ui_ms);
+  if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
+    std::fprintf(stderr, "T5.2 mark_ui_ms=%.2f frame=%lld\n", ui_ms,
+                 static_cast<long long>(target));
+    std::fflush(stderr);
+  }
+  statusBar()->showMessage(
+      QStringLiteral("标记：第 %1 帧（跳转中）").arg(static_cast<qlonglong>(target)),
+      2000);
+
+  QTimer::singleShot(0, this, [this, target, generation, timer]() {
+    if (generation != navigation_generation_ || session_ == nullptr ||
+        !session_->IsOpen()) {
+      return;
+    }
+    GoToFrame(target);
+    const double exact_ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+    const bool ok = current_frame_ == target && timeline_ != nullptr &&
+                    timeline_->current_frame() == target;
+    if (ok) {
+      mark_exact_samples_.push_back(exact_ms);
+    }
+    if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
+      std::fprintf(stderr, "T5.2 mark_exact_ms=%.2f frame=%lld ok=%d\n", exact_ms,
+                   static_cast<long long>(target), ok ? 1 : 0);
+      std::fflush(stderr);
+    }
+  });
+}
+
+void MainWindow::ApplyDeleteMark(const QString& id, bool confirm) {
+  if (marks_ == nullptr) {
+    return;
+  }
+  const std::string id_utf8 = id.toStdString();
+  const lapian::core::Mark* mark = marks_->FindMark(id_utf8);
+  if (mark == nullptr) {
+    return;
+  }
+  const std::int64_t frame = mark->frame;
+  const QString label = QString::fromStdString(mark->label);
+  if (confirm) {
+    const QString text =
+        QStringLiteral("删除标记“%1”（帧 %2）？")
+            .arg(label.isEmpty() ? QStringLiteral("帧 %1").arg(
+                                       static_cast<qlonglong>(frame))
+                                 : label)
+            .arg(static_cast<qlonglong>(frame));
+    const QMessageBox::StandardButton answer =
+        QMessageBox::question(this, QStringLiteral("删除标记"), text,
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+      return;
+    }
+  }
+  if (!marks_->RemoveMark(id_utf8)) {
+    return;
+  }
+  marks_dirty_ = true;
+  const bool saved = SaveMarks(true);
+  RefreshMarksUi();
+  mark_panel_->SelectNearFrame(frame);
+  statusBar()->showMessage(
+      QStringLiteral("已删除标记（帧 %1）· %2")
+          .arg(static_cast<qlonglong>(frame))
+          .arg(saved ? QStringLiteral("已保存") : QStringLiteral("未保存")),
+      2500);
+}
+
+void MainWindow::DeleteMarkForTest(int index) {
+  if (marks_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return;
+  }
+  const QString id = QString::fromStdString(marks_->marks()[index].id);
+  ApplyDeleteMark(id, false);
+}
+
+void MainWindow::ActivateMarkForTest(int index) {
+  if (marks_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return;
+  }
+  const lapian::core::Mark& mark = marks_->marks()[index];
+  ActivateMark(QString::fromStdString(mark.id), mark.frame);
+}
+
+bool MainWindow::SaveMarks(bool show_errors) {
+  if (marks_ == nullptr || !marks_dirty_) {
+    return true;
+  }
+  const lapian::core::SaveResult result = marks_->Save();
+  if (result.ok) {
+    marks_dirty_ = false;
+    UpdateMarkStorageUi();
+    return true;
+  }
+  UpdateMarkStorageUi();
+  if (show_errors) {
+    ShowMarkSaveFailure(result);
+  }
+  return false;
+}
+
+void MainWindow::RefreshMarksUi(const QString& select_id) {
+  if (marks_ == nullptr || mark_panel_ == nullptr) {
+    return;
+  }
+  mark_panel_->SetMarks(marks_->marks());
+  UpdateMarkStorageUi();
+  std::vector<std::int64_t> frames;
+  frames.reserve(marks_->marks().size());
+  for (const lapian::core::Mark& mark : marks_->marks()) {
+    frames.push_back(mark.frame);
+  }
+  if (timeline_ != nullptr) {
+    timeline_->SetMarks(std::move(frames));
+  }
+  if (!select_id.isEmpty()) {
+    mark_panel_->SelectMark(select_id.toStdString());
+  }
+}
+
+void MainWindow::UpdateMarkStorageUi() {
+  if (marks_ == nullptr || mark_panel_ == nullptr) {
+    return;
+  }
+  mark_panel_->SetStorage(QString::fromStdString(marks_->storage_path()),
+                          marks_->using_fallback());
+  mark_panel_->SetWarnings(marks_->warnings());
+}
+
+bool MainWindow::FlushMarksBeforeSwitch() {
+  if (marks_ == nullptr || !marks_dirty_) {
+    return true;
+  }
+  const lapian::core::SaveResult result = marks_->Save();
+  UpdateMarkStorageUi();
+  if (result.ok) {
+    marks_dirty_ = false;
+    return true;
+  }
+  const QString detail = result.error.empty()
+                             ? QStringLiteral("未知错误")
+                             : QString::fromStdString(result.error);
+  statusBar()->showMessage(QStringLiteral("标记保存失败：") + detail, 8000);
+  const QMessageBox::StandardButton answer = QMessageBox::warning(
+      this, QStringLiteral("标记保存失败"),
+      QStringLiteral("旧文件的标记未能保存：\n%1\n\n仍要打开新文件吗？未保存的修改会丢失。")
+          .arg(detail),
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  return answer == QMessageBox::Yes;
+}
+
+bool MainWindow::FlushMarksOnClose() {
+  if (marks_ == nullptr || !marks_dirty_) {
+    return true;
+  }
+  const lapian::core::SaveResult result = marks_->Save();
+  UpdateMarkStorageUi();
+  if (result.ok) {
+    marks_dirty_ = false;
+    return true;
+  }
+  const QString detail = result.error.empty()
+                             ? QStringLiteral("未知错误")
+                             : QString::fromStdString(result.error);
+  statusBar()->showMessage(QStringLiteral("标记保存失败：") + detail, 8000);
+  const QMessageBox::StandardButton answer = QMessageBox::warning(
+      this, QStringLiteral("标记未保存"),
+      QStringLiteral("标记保存失败：\n%1\n\n仍要退出吗？未保存的修改会丢失。")
+          .arg(detail),
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  return answer == QMessageBox::Yes;
+}
+
+void MainWindow::ShowMarkSaveFailure(const lapian::core::SaveResult& result) {
+  const QString detail = result.error.empty()
+                             ? QStringLiteral("未知错误")
+                             : QString::fromStdString(result.error);
+  UpdateMarkStorageUi();
+  statusBar()->showMessage(QStringLiteral("标记保存失败：") + detail, 8000);
+  QMessageBox::warning(
+      this, QStringLiteral("标记保存失败"),
+      detail + QStringLiteral(
+                   "\n\n标记仍在本次会话中；请检查视频目录或 %APPDATA% 的写入权限。"));
+}
+
+void MainWindow::ShowMarkWarnings() {
+  if (marks_ == nullptr || mark_panel_ == nullptr || marks_->warnings().empty()) {
+    return;
+  }
+  const std::vector<lapian::core::MarkWarning>& warnings = marks_->warnings();
+  mark_panel_->SetWarnings(warnings);
+  const QString first = QString::fromStdString(warnings.front().message);
+  statusBar()->showMessage(
+      warnings.size() == 1
+          ? first
+          : QStringLiteral("%1（另有 %2 条，见右侧标记栏）")
+                .arg(first)
+                .arg(warnings.size() - 1),
+      9000);
+
+  bool blocking = false;
+  QStringList lines;
+  for (const lapian::core::MarkWarning& warning : warnings) {
+    QString line = QString::fromStdString(warning.message);
+    if (!warning.path.empty()) {
+      line += QStringLiteral("\n  ") +
+              QDir::toNativeSeparators(QString::fromStdString(warning.path));
+    }
+    lines.push_back(line);
+    if (warning.kind == lapian::core::MarkWarningKind::kUnsupportedSchema ||
+        warning.kind == lapian::core::MarkWarningKind::kReadFailed) {
+      blocking = true;
+    }
+  }
+  if (blocking) {
+    QMessageBox::warning(this, QStringLiteral("标记文件提示"),
+                         lines.join(QStringLiteral("\n\n")));
+  }
+}
+
+void MainWindow::CancelPendingMarkJump() { ++navigation_generation_; }
+
+QString MainWindow::MarkStateForTest() const {
+  const int count =
+      marks_ == nullptr ? 0 : static_cast<int>(marks_->marks().size());
+  const int warnings =
+      marks_ == nullptr ? 0 : static_cast<int>(marks_->warnings().size());
+  const QString selected =
+      mark_panel_ == nullptr ? QString() : mark_panel_->SelectedMarkId();
+  return QStringLiteral(
+             "frame=%1 count=%2 warnings=%3 fallback=%4 selected=%5 timeline=%6 "
+             "playing=%7")
+      .arg(static_cast<qlonglong>(current_frame_))
+      .arg(count)
+      .arg(warnings)
+      .arg(marks_ != nullptr && marks_->using_fallback() ? 1 : 0)
+      .arg(selected.isEmpty() ? QStringLiteral("-") : selected.left(8))
+      .arg(timeline_ == nullptr ? -1 : static_cast<qlonglong>(timeline_->current_frame()))
+      .arg(playback_ != nullptr && playback_->IsPlaying() ? 1 : 0);
+}
+
+int MainWindow::MarkCountForTest() const {
+  return marks_ == nullptr ? 0 : static_cast<int>(marks_->marks().size());
+}
+
+std::int64_t MainWindow::MarkFrameAtForTest(int index) const {
+  if (marks_ == nullptr || index < 0 ||
+      index >= static_cast<int>(marks_->marks().size())) {
+    return -1;
+  }
+  return marks_->marks()[index].frame;
+}
+
+void MainWindow::ResetMarkPerfSamplesForTest() {
+  mark_ui_samples_.clear();
+  mark_exact_samples_.clear();
+}
+
+QString MainWindow::MarkStoragePathForTest() const {
+  return marks_ == nullptr ? QString() : QString::fromStdString(marks_->storage_path());
+}
+
+bool MainWindow::MarkUsingFallbackForTest() const {
+  return marks_ != nullptr && marks_->using_fallback();
+}
+
+int MainWindow::MarkWarningCountForTest() const {
+  return marks_ == nullptr ? 0 : static_cast<int>(marks_->warnings().size());
+}
+
+QString MainWindow::MarkPerfSummaryForTest() const {
+  auto summarize = [](std::vector<double> samples, const QString& prefix) {
+    if (samples.empty()) {
+      return QStringLiteral("%1_n=0").arg(prefix);
+    }
+    std::sort(samples.begin(), samples.end());
+    const double p50 = samples[samples.size() / 2];
+    const std::size_t p95_index =
+        std::min(samples.size() - 1,
+                 static_cast<std::size_t>(static_cast<double>(samples.size()) * 0.95));
+    const double p95 = samples[p95_index];
+    const double max = samples.back();
+    return QStringLiteral("%1_n=%2 %1_p50=%3 %1_p95=%4 %1_max=%5")
+        .arg(prefix)
+        .arg(samples.size())
+        .arg(p50, 0, 'f', 2)
+        .arg(p95, 0, 'f', 2)
+        .arg(max, 0, 'f', 2);
+  };
+  return summarize(mark_ui_samples_, QStringLiteral("ui")) + QStringLiteral(" ") +
+         summarize(mark_exact_samples_, QStringLiteral("exact"));
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {

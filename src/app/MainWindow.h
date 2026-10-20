@@ -5,12 +5,15 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "core/LoopRange.h"
+#include "core/MarkStore.h"
 
 struct AVFrame;
 
 class QAction;
+class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
@@ -18,6 +21,7 @@ class QSlider;
 class QTimer;
 class GfxWidget;
 class InfoBar;
+class MarkPanel;
 class PlaybackController;
 class TimelineWidget;
 
@@ -60,10 +64,24 @@ class MainWindow : public QMainWindow {
   // T4.2 自动化验证入口：Space 语义与定帧/循环状态。
   void TogglePlaybackForTest();
   QString LoopPlaybackStateForTest() const;
+  // T5.2 自动化验证入口：与 Ctrl+M / 侧栏点击 / 删除确认后的路径一致；
+  // 删除入口跳过确认对话框，确认逻辑仍由 UI 路径覆盖。
+  void AddMarkForTest();
+  void DeleteMarkForTest(int index);
+  void ActivateMarkForTest(int index);
+  QString MarkStateForTest() const;
+  int MarkCountForTest() const;
+  std::int64_t MarkFrameAtForTest(int index) const;
+  void ResetMarkPerfSamplesForTest();
+  QString MarkStoragePathForTest() const;
+  bool MarkUsingFallbackForTest() const;
+  int MarkWarningCountForTest() const;
+  QString MarkPerfSummaryForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
+  void closeEvent(QCloseEvent* event) override;
 
  private slots:
   void OpenDialog();
@@ -108,12 +126,24 @@ class MainWindow : public QMainWindow {
   void ShowScrubTarget(std::int64_t frame);
   void StopPreview();
   void ShowOpenError(const QString& message);
-  void SaveCurrentStatePlaceholder();
   void ApplySpeed(double rate);
+  void AddMarkAtCurrentFrame();
+  void ApplyAddMark();
+  void ActivateMark(const QString& id, std::int64_t frame);
+  void ApplyDeleteMark(const QString& id, bool confirm);
+  bool SaveMarks(bool show_errors);
+  void RefreshMarksUi(const QString& select_id = QString());
+  void UpdateMarkStorageUi();
+  bool FlushMarksBeforeSwitch();
+  bool FlushMarksOnClose();
+  void ShowMarkSaveFailure(const lapian::core::SaveResult& result);
+  void ShowMarkWarnings();
+  void CancelPendingMarkJump();
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
+  MarkPanel* mark_panel_ = nullptr;
   QLabel* status_label_ = nullptr;
   QLabel* audio_label_ = nullptr;
   QLabel* speed_label_ = nullptr;
@@ -136,6 +166,7 @@ class MainWindow : public QMainWindow {
   QAction* loop_out_action_ = nullptr;
   QAction* loop_toggle_action_ = nullptr;
   QAction* loop_clear_action_ = nullptr;
+  QAction* mark_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
@@ -143,15 +174,20 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
   std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
+  std::unique_ptr<lapian::core::MarkStore> marks_;
   lapian::core::LoopRange loop_;
   QTimer* preview_timer_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::uint64_t audio_status_revision_ = 0;
   std::uint64_t waveform_status_revision_ = 0;
+  std::uint64_t navigation_generation_ = 0;
+  std::vector<double> mark_ui_samples_;
+  std::vector<double> mark_exact_samples_;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;
   bool muted_ = false;
   bool audio_error_shown_ = false;
   bool error_shown_ = false;
+  bool marks_dirty_ = false;
 };

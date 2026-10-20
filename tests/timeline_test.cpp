@@ -334,6 +334,108 @@ void TestLoopRender() {
   Check(average_green(image, 91, 102, 42, 53) < 60.0, "清除 A/B 后 A 标签消失");
 }
 
+void TestMarkRenderAndHit() {
+  TimelineWidget widget;
+  widget.resize(960, 72);
+  widget.SetFrameCount(120);
+  widget.SetPixelsPerFrame(8.0);
+  widget.SetMarks({33, 11});
+  widget.show();
+  QApplication::processEvents();
+
+  Check(widget.marks().size() == 2, "时间轴保存两个标记");
+  Check(widget.marks().front() == 11, "标记按帧号排序");
+
+  QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::black);
+  {
+    QPainter painter(&image);
+    widget.render(&painter);
+  }
+  const QColor marker_line = image.pixelColor(264, 40);
+  const QColor marker_flag = image.pixelColor(264, 4);
+  const QColor background = image.pixelColor(40, 40);
+  Check(marker_line.red() > marker_line.green() + 20,
+        "帧 33 标记画粉色竖线");
+  Check(marker_flag.red() > 200 && marker_flag.green() < 160,
+        "标记顶部小旗可见");
+  Check(background.red() < 80, "无标记区域保持底色");
+
+  Check(widget.MarkFrameAtX(264.0) == 33, "标记 x 命中帧 33");
+  Check(widget.MarkFrameAtX(268.0) == 33, "4px 内仍吸附到帧 33");
+  Check(widget.MarkFrameAtX(272.0) == -1, "超过 5px 不吸附");
+  Check(widget.MarkFrameAtX(88.0) == 11, "第二个标记可命中");
+
+  qint64 started = -1;
+  qint64 finished = -1;
+  QObject::connect(&widget, &TimelineWidget::scrubStarted,
+                   [&started](qint64 frame) { started = frame; });
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(264.5, 30.0),
+                    QPointF(264.5, 30.0), Qt::LeftButton, Qt::LeftButton,
+                    Qt::NoModifier);
+  QApplication::sendEvent(&widget, &press);
+  Check(started == 33, "点击标记线吸附到帧 33");
+  Check(widget.current_frame() == 33, "点击标记后播放头到帧 33");
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(264.5, 30.0),
+                      QPointF(264.5, 30.0), Qt::LeftButton, Qt::NoButton,
+                      Qt::NoModifier);
+  QApplication::sendEvent(&widget, &release);
+  Check(finished == 33, "松手精确目标为帧 33");
+
+  widget.Clear();
+  Check(widget.marks().empty(), "Clear 清空标记");
+  Check(widget.MarkFrameAtX(264.0) == -1, "清空后没有标记命中");
+}
+
+void TestMarkDensityBenchmark() {
+  TimelineWidget widget;
+  widget.resize(1920, 72);
+  widget.SetFrameCount(432000);
+  std::vector<std::int64_t> frames;
+  frames.reserve(100);
+  for (int i = 0; i < 100; ++i) {
+    frames.push_back(i * 1000);
+  }
+  widget.SetMarks(frames);
+  widget.show();
+  QApplication::processEvents();
+
+  QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+  auto render_once = [&image, &widget]() {
+    image.fill(Qt::black);
+    QPainter painter(&image);
+    widget.render(&painter);
+  };
+  for (int i = 0; i < 5; ++i) {
+    render_once();
+  }
+
+  auto measure = [&](const char* name) {
+    std::vector<double> samples;
+    samples.reserve(200);
+    for (int i = 0; i < 200; ++i) {
+      QElapsedTimer timer;
+      timer.start();
+      render_once();
+      samples.push_back(static_cast<double>(timer.nsecsElapsed()) / 1.0e6);
+    }
+    std::sort(samples.begin(), samples.end());
+    const double p95 =
+        samples[static_cast<std::size_t>(samples.size() * 0.95)];
+    std::printf("[perf] %s p50=%.3fms p95=%.3fms\n", name,
+                samples[samples.size() / 2], p95);
+    Check(p95 < 16.0, std::string(name) + " 标记重绘 p95 < 16ms");
+  };
+
+  widget.FitToWindow();
+  measure("fit 432k + 100 marks");
+
+  widget.SetPixelsPerFrame(8.0);
+  measure("8px/frame + 100 marks");
+}
+
 void TestPaintBenchmark() {
   TimelineWidget widget;
   widget.resize(1920, 72);
@@ -405,6 +507,8 @@ int main(int argc, char** argv) {
   TestPointerInteraction();
   TestWaveformRender();
   TestLoopRender();
+  TestMarkRenderAndHit();
+  TestMarkDensityBenchmark();
   TestPaintBenchmark();
 
   if (g_failures > 0) {
