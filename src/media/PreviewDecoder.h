@@ -10,9 +10,18 @@ namespace lapian::media {
 
 class FrameIndex;
 
+// 预览帧元数据。frame 所有权归调用方，取走后需 av_frame_free(&frame)。
+// frame_index/pts_us 用于丢弃“目标已回退、旧目标帧还在队列里”的过期预览。
+struct PreviewFrame {
+  AVFrame* frame = nullptr;
+  std::int64_t pts_us = 0;
+  std::int64_t frame_index = -1;
+  std::uint64_t generation = 0;
+};
+
 // T2.9 拖动预览解码器：独立线程、独立解封装/解码上下文。
-// 只服务拖动预览：从目标之前最近关键帧向前解码，发布“目前最新的帧”；
-// 不参与松手/步进/输入的精确落点（那些仍走 MediaSession 的精确解码器）。
+// 只服务拖动预览：正向拖动从最近关键帧向前解码并发布经过帧；反向拖动只发布
+// 目标帧，避免“重新从关键帧向前冲”造成频闪。不参与松手/步进/输入的精确落点。
 // 预览帧为软件 NV12，并按最长边约 1280 降采样，避免 4K 全分辨率上传卡 UI。
 class PreviewDecoder {
  public:
@@ -31,9 +40,9 @@ class PreviewDecoder {
   void End();
   void Close();
 
-  // 取走最新预览帧；返回的 AVFrame 由调用方 av_frame_free。
-  // 没有新帧时返回 nullptr；End/Close 后不会返回旧帧。
-  AVFrame* TakeLatestFrame();
+  // 取走最新预览帧；没有可用的新帧时 frame == nullptr。
+  // 目标回退后，比当前目标更靠后的旧帧会被丢弃，不会返回。
+  PreviewFrame TakeLatestFrame();
 
   bool IsReady() const;
   std::string last_error() const;

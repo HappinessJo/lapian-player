@@ -1614,12 +1614,13 @@ void MainWindow::OnPreviewTick() {
   if (timing) {
     tick_timer.start();
   }
-  AVFrame* frame = preview_->TakeLatestFrame();
-  if (frame == nullptr) {
+  lapian::media::PreviewFrame preview_frame = preview_->TakeLatestFrame();
+  if (preview_frame.frame == nullptr) {
     return;
   }
-  gfx_->SetVideoFrame(frame, session_->info().rotation.counterclockwise_degrees);
-  av_frame_free(&frame);
+  gfx_->SetVideoFrame(preview_frame.frame,
+                      session_->info().rotation.counterclockwise_degrees);
+  av_frame_free(&preview_frame.frame);
   if (timing && tick_timer.elapsed() > 200) {
     std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",
                  static_cast<long long>(tick_timer.elapsed()));

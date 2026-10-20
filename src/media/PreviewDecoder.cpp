@@ -5,6 +5,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -33,6 +34,15 @@ namespace {
 constexpr auto kDecodeSlice = std::chrono::milliseconds(15);
 // 预览最长边约 1280；4K 降到 1280×720 左右再上传。
 constexpr int kPreviewMaxSide = 1280;
+// 反向拖动的小缓存：只存已经降采样的预览帧，最多 32 帧（约 44MB @720p NV12）。
+// 不是 T7.2 的正式 LRU 帧缓存；End/Close 会释放。
+constexpr std::size_t kMaxPreviewCacheFrames = 32;
+
+struct CachedPreview {
+  std::int64_t pts_us = 0;
+  std::int64_t frame_index = -1;
+  AVFrame* frame = nullptr;
+};
 
 }  // namespace
 
@@ -46,6 +56,8 @@ struct PreviewDecoder::Impl {
   const FrameIndex* index = nullptr;
 
   std::int64_t target_frame = 0;
+  // <0：目标在回退，只发布目标帧；>0：目标在前进，可连续发布中间帧。
+  int target_direction = 0;
   std::uint64_t generation = 0;
   std::uint64_t handled_generation = 0;
   bool active = false;
@@ -55,6 +67,10 @@ struct PreviewDecoder::Impl {
   bool open_ok = false;
   std::string error;
   AVFrame* latest = nullptr;
+  std::int64_t latest_pts_us = 0;
+  std::int64_t latest_frame_index = -1;
+  std::uint64_t latest_generation = 0;
+  std::deque<CachedPreview> cache;
   SwsContext* sws = nullptr;
   std::int64_t last_pts_us = 0;
   bool position_valid = false;
@@ -77,6 +93,7 @@ struct PreviewDecoder::Impl {
     if (latest != nullptr) {
       av_frame_free(&latest);
     }
+    ClearCacheLocked();
     if (sws != nullptr) {
       sws_freeContext(sws);
       sws = nullptr;
@@ -88,10 +105,14 @@ struct PreviewDecoder::Impl {
     open_ok = false;
     error.clear();
     target_frame = 0;
+    target_direction = 0;
     generation = 0;
     handled_generation = 0;
     active = false;
     stop = false;
+    latest_pts_us = 0;
+    latest_frame_index = -1;
+    latest_generation = 0;
     last_pts_us = 0;
     position_valid = false;
   }
@@ -108,7 +129,49 @@ struct PreviewDecoder::Impl {
     ++generation;
   }
 
-  void Publish(AVFrame* frame, std::uint64_t requested_generation) {
+  // 调用方必须持有 mutex。
+  void ClearCacheLocked() {
+    for (CachedPreview& cached : cache) {
+      if (cached.frame != nullptr) {
+        av_frame_free(&cached.frame);
+      }
+    }
+    cache.clear();
+  }
+
+  AVFrame* CloneCached(std::int64_t frame_index,
+                       std::uint64_t requested_generation) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (stop || !active || generation != requested_generation) {
+      return nullptr;
+    }
+    for (auto it = cache.rbegin(); it != cache.rend(); ++it) {
+      if (it->frame_index == frame_index && it->frame != nullptr) {
+        return av_frame_clone(it->frame);
+      }
+    }
+    return nullptr;
+  }
+
+  void CacheFrame(AVFrame* frame, std::int64_t pts_us,
+                  std::int64_t frame_index, std::uint64_t requested_generation) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (stop || !active || generation != requested_generation) {
+      av_frame_free(&frame);
+      return;
+    }
+    cache.push_back(CachedPreview{pts_us, frame_index, frame});
+    while (cache.size() > kMaxPreviewCacheFrames) {
+      CachedPreview& oldest = cache.front();
+      if (oldest.frame != nullptr) {
+        av_frame_free(&oldest.frame);
+      }
+      cache.pop_front();
+    }
+  }
+
+  void Publish(AVFrame* frame, std::int64_t pts_us, std::int64_t frame_index,
+               std::uint64_t requested_generation) {
     std::lock_guard<std::mutex> lock(mutex);
     if (stop || !active || generation != requested_generation) {
       av_frame_free(&frame);
@@ -118,6 +181,9 @@ struct PreviewDecoder::Impl {
       av_frame_free(&latest);
     }
     latest = frame;
+    latest_pts_us = pts_us;
+    latest_frame_index = frame_index;
+    latest_generation = requested_generation;
   }
 
   AVFrame* ScalePreviewFrame(const AVFrame* source) {
@@ -189,13 +255,23 @@ struct PreviewDecoder::Impl {
   }
 
   void Process(VideoDecoder& decoder, const FrameIndex& frame_index,
-               std::int64_t target, std::uint64_t requested_generation) {
+               std::int64_t target, int direction,
+               std::uint64_t requested_generation) {
     if (!IsCurrent(requested_generation) || target < 0 ||
         static_cast<std::size_t>(target) >= frame_index.size()) {
       return;
     }
 
+    const bool backward = direction < 0;
     const std::int64_t target_pts = frame_index.PtsOfFrame(target);
+    // 反向小步拖动优先命中刚解码过的预览帧，避免每个鼠标事件都从关键帧重解。
+    if (backward) {
+      AVFrame* cached = CloneCached(target, requested_generation);
+      if (cached != nullptr) {
+        Publish(cached, target_pts, target, requested_generation);
+        return;
+      }
+    }
     // 拖动通常是向前小步移动：解码器已经在目标之前且距离不远时继续向前解，
     // 避免每个鼠标事件都从关键帧重解。后退或远跳才重新 seek。
     const bool can_continue =
@@ -233,12 +309,25 @@ struct PreviewDecoder::Impl {
         return;
       }
 
+      // 反向拖动时关键帧到目标之间的中间帧不能发布：H.264 只能从关键帧向前解，
+      // 逐帧发布会表现为“画面反复向前冲”的频闪。只在到达目标时发布一次。
       AVFrame* preview = ScalePreviewFrame(info.av_frame);
       if (preview == nullptr) {
         SetError("预览帧降采样失败");
         return;
       }
-      Publish(preview, requested_generation);
+      std::int64_t decoded_frame = frame_index.FrameOfPts(info.pts_us);
+      if (backward && decoded_frame < 0) {
+        decoded_frame = target;
+      }
+      const bool publish_frame = !backward || info.pts_us >= target_pts;
+      AVFrame* publish_copy =
+          publish_frame ? av_frame_clone(preview) : nullptr;
+      // 预览缓存只保留降采样帧；正向/反向都填，反向下一步可直接命中。
+      CacheFrame(preview, info.pts_us, decoded_frame, requested_generation);
+      if (publish_copy != nullptr) {
+        Publish(publish_copy, info.pts_us, decoded_frame, requested_generation);
+      }
 
       if (info.pts_us >= target_pts) {
         return;
@@ -293,12 +382,13 @@ struct PreviewDecoder::Impl {
       }
       const std::uint64_t requested_generation = generation;
       const std::int64_t target = target_frame;
+      const int direction = target_direction;
       const FrameIndex* current_index = index;
       const bool can_decode = open_ok;
       lock.unlock();
 
       if (can_decode && current_index != nullptr) {
-        Process(decoder, *current_index, target, requested_generation);
+        Process(decoder, *current_index, target, direction, requested_generation);
       }
 
       lock.lock();
@@ -338,10 +428,16 @@ void PreviewDecoder::Begin(std::int64_t frame) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->active = true;
   impl_->target_frame = frame;
+  // 新一次拖动先只显示起点目标帧；等用户向前移动后再发布中间帧。
+  // 这样也不会在按下时从关键帧向前“冲”一段。
+  impl_->target_direction = -1;
   ++impl_->generation;
   if (impl_->latest != nullptr) {
     av_frame_free(&impl_->latest);
   }
+  impl_->latest_pts_us = 0;
+  impl_->latest_frame_index = -1;
+  impl_->latest_generation = 0;
   impl_->condition.notify_all();
 }
 
@@ -350,7 +446,19 @@ void PreviewDecoder::UpdateTarget(std::int64_t frame) {
   if (!impl_->active) {
     return;
   }
+  if (frame < impl_->target_frame) {
+    impl_->target_direction = -1;
+  } else if (frame > impl_->target_frame) {
+    impl_->target_direction = 1;
+  }
   impl_->target_frame = frame;
+  // 目标已经回退时，旧目标留下的“更靠后”帧立即作废，避免下一次 tick 显示它。
+  if (impl_->latest != nullptr && impl_->latest_frame_index > frame) {
+    av_frame_free(&impl_->latest);
+    impl_->latest_pts_us = 0;
+    impl_->latest_frame_index = -1;
+    impl_->latest_generation = 0;
+  }
   ++impl_->generation;
   impl_->condition.notify_all();
 }
@@ -358,20 +466,46 @@ void PreviewDecoder::UpdateTarget(std::int64_t frame) {
 void PreviewDecoder::End() {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->active = false;
+  impl_->target_direction = 0;
   ++impl_->generation;
   if (impl_->latest != nullptr) {
     av_frame_free(&impl_->latest);
   }
+  impl_->ClearCacheLocked();
+  impl_->latest_pts_us = 0;
+  impl_->latest_frame_index = -1;
+  impl_->latest_generation = 0;
   impl_->condition.notify_all();
 }
 
 void PreviewDecoder::Close() { impl_->Close(); }
 
-AVFrame* PreviewDecoder::TakeLatestFrame() {
+PreviewFrame PreviewDecoder::TakeLatestFrame() {
+  PreviewFrame result;
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  AVFrame* frame = impl_->latest;
+  if (!impl_->active || impl_->latest == nullptr) {
+    return result;
+  }
+  // 1) 目标回退后，比当前目标更靠后的旧帧一律丢弃；
+  // 2) 反向拖动只接受正好是当前目标的那一帧，避免显示关键帧到目标之间的中间帧。
+  const bool ahead_of_target = impl_->latest_frame_index > impl_->target_frame;
+  const bool backward_mismatch =
+      impl_->target_direction < 0 &&
+      impl_->latest_frame_index != impl_->target_frame;
+  if (ahead_of_target || backward_mismatch) {
+    av_frame_free(&impl_->latest);
+    impl_->latest_pts_us = 0;
+    impl_->latest_frame_index = -1;
+    impl_->latest_generation = 0;
+    return result;
+  }
+  result.frame = impl_->latest;
+  result.pts_us = impl_->latest_pts_us;
+  result.frame_index = impl_->latest_frame_index;
+  result.generation = impl_->latest_generation;
   impl_->latest = nullptr;
-  return frame;
+  impl_->latest_frame_index = -1;
+  return result;
 }
 
 bool PreviewDecoder::IsReady() const {
