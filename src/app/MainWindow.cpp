@@ -177,6 +177,35 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(faster_action_, &QAction::triggered, this, &MainWindow::SpeedUp);
   addAction(faster_action_);
 
+  // T4.1 A/B：I 设入点、O 设出点、L 开关循环、Shift+L 清除。
+  loop_in_action_ = new QAction(QStringLiteral("设置入点 A"), this);
+  loop_in_action_->setShortcut(Qt::Key_I);
+  loop_in_action_->setShortcutContext(Qt::WindowShortcut);
+  loop_in_action_->setEnabled(false);
+  connect(loop_in_action_, &QAction::triggered, this, &MainWindow::SetLoopIn);
+  addAction(loop_in_action_);
+
+  loop_out_action_ = new QAction(QStringLiteral("设置出点 B"), this);
+  loop_out_action_->setShortcut(Qt::Key_O);
+  loop_out_action_->setShortcutContext(Qt::WindowShortcut);
+  loop_out_action_->setEnabled(false);
+  connect(loop_out_action_, &QAction::triggered, this, &MainWindow::SetLoopOut);
+  addAction(loop_out_action_);
+
+  loop_toggle_action_ = new QAction(QStringLiteral("循环开关"), this);
+  loop_toggle_action_->setShortcut(Qt::Key_L);
+  loop_toggle_action_->setShortcutContext(Qt::WindowShortcut);
+  loop_toggle_action_->setEnabled(false);
+  connect(loop_toggle_action_, &QAction::triggered, this, &MainWindow::ToggleLoop);
+  addAction(loop_toggle_action_);
+
+  loop_clear_action_ = new QAction(QStringLiteral("清除 A/B"), this);
+  loop_clear_action_->setShortcut(QKeySequence(QStringLiteral("Shift+L")));
+  loop_clear_action_->setShortcutContext(Qt::WindowShortcut);
+  loop_clear_action_->setEnabled(false);
+  connect(loop_clear_action_, &QAction::triggered, this, &MainWindow::ClearLoop);
+  addAction(loop_clear_action_);
+
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
   connect(playback_.get(), &PlaybackController::stateChanged, this,
@@ -197,6 +226,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   speed_label_->setObjectName(QStringLiteral("speedInfo"));
   speed_label_->setToolTip(QStringLiteral("播放速度（[ / ] 调整）"));
   statusBar()->addPermanentWidget(speed_label_);
+
+  loop_label_ = new QLabel(QStringLiteral("循环：关"), this);
+  loop_label_->setObjectName(QStringLiteral("loopInfo"));
+  loop_label_->setToolTip(
+      QStringLiteral("A/B 循环：I 入点 · O 出点 · L 开关 · Shift+L 清除"));
+  statusBar()->addPermanentWidget(loop_label_);
 
   waveform_label_ = new QLabel(QStringLiteral("波形：—"), this);
   waveform_label_->setObjectName(QStringLiteral("waveformInfo"));
@@ -277,6 +312,10 @@ void MainWindow::ShowEmptyState() {
   if (speed_label_ != nullptr) {
     speed_label_->setText(QStringLiteral("1x"));
   }
+  loop_.Clear();
+  if (loop_label_ != nullptr) {
+    loop_label_->setText(QStringLiteral("循环：关"));
+  }
   if (gfx_ != nullptr) {
     gfx_->ClearVideoFrame();
   }
@@ -327,6 +366,18 @@ void MainWindow::ShowEmptyState() {
   }
   if (faster_action_ != nullptr) {
     faster_action_->setEnabled(false);
+  }
+  if (loop_in_action_ != nullptr) {
+    loop_in_action_->setEnabled(false);
+  }
+  if (loop_out_action_ != nullptr) {
+    loop_out_action_->setEnabled(false);
+  }
+  if (loop_toggle_action_ != nullptr) {
+    loop_toggle_action_->setEnabled(false);
+  }
+  if (loop_clear_action_ != nullptr) {
+    loop_clear_action_->setEnabled(false);
   }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
@@ -399,6 +450,8 @@ void MainWindow::OpenFile(const QString& path) {
   const std::int64_t timeline_frames =
       static_cast<std::int64_t>(session_->index().size());
   timeline_->SetFrameCount(timeline_frames);
+  loop_.Clear();
+  SyncLoopUi();
   zoom_in_action_->setEnabled(timeline_frames > 0);
   zoom_out_action_->setEnabled(timeline_frames > 0);
   if (waveform_action_ != nullptr) {
@@ -668,6 +721,182 @@ void MainWindow::SpeedUp() {
 }
 
 void MainWindow::SetSpeedForTest(double rate) { ApplySpeed(rate); }
+
+bool MainWindow::CanEditLoop() const {
+  return session_ != nullptr && session_->IsOpen() &&
+         session_->index().IsReady() && !session_->index().empty();
+}
+
+void MainWindow::SyncLoopUi() {
+  const bool can_edit = CanEditLoop();
+  if (loop_in_action_ != nullptr) {
+    loop_in_action_->setEnabled(can_edit);
+  }
+  if (loop_out_action_ != nullptr) {
+    loop_out_action_->setEnabled(can_edit);
+  }
+  if (loop_toggle_action_ != nullptr) {
+    loop_toggle_action_->setEnabled(can_edit);
+  }
+  if (loop_clear_action_ != nullptr) {
+    loop_clear_action_->setEnabled(can_edit);
+  }
+  if (timeline_ != nullptr) {
+    timeline_->SetLoopRange(loop_);
+  }
+  if (loop_label_ == nullptr) {
+    return;
+  }
+  if (!loop_.has_in()) {
+    loop_label_->setText(QStringLiteral("循环：关"));
+    return;
+  }
+  if (!loop_.has_out()) {
+    loop_label_->setText(QStringLiteral("循环：关 · A=%1（未设 B）")
+                             .arg(static_cast<qlonglong>(loop_.in())));
+    return;
+  }
+  const QString range =
+      loop_.is_single_frame()
+          ? QStringLiteral("A=B=%1").arg(static_cast<qlonglong>(loop_.in()))
+          : QStringLiteral("A=%1 B=%2")
+                .arg(static_cast<qlonglong>(loop_.in()))
+                .arg(static_cast<qlonglong>(loop_.out()));
+  loop_label_->setText((loop_.enabled() ? QStringLiteral("循环：开 · ")
+                                        : QStringLiteral("循环：关 · ")) +
+                       range);
+}
+
+void MainWindow::ApplyLoopIn() {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const lapian::core::LoopEditResult result = loop_.SetIn(current_frame_);
+  switch (result) {
+    case lapian::core::LoopEditResult::kSet:
+      statusBar()->showMessage(
+          QStringLiteral("入点 A = %1 帧").arg(static_cast<qlonglong>(loop_.in())),
+          2500);
+      break;
+    case lapian::core::LoopEditResult::kClearedOut:
+      statusBar()->showMessage(
+          QStringLiteral("入点 A = %1 晚于原出点，已清除 B")
+              .arg(static_cast<qlonglong>(loop_.in())),
+          4000);
+      break;
+    default:
+      break;
+  }
+  SyncLoopUi();
+}
+
+void MainWindow::ApplyLoopOut() {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const lapian::core::LoopEditResult result = loop_.SetOut(current_frame_);
+  switch (result) {
+    case lapian::core::LoopEditResult::kSet:
+      statusBar()->showMessage(
+          QStringLiteral("出点 B = %1 帧").arg(static_cast<qlonglong>(loop_.out())),
+          2500);
+      break;
+    case lapian::core::LoopEditResult::kNeedsIn:
+      statusBar()->showMessage(QStringLiteral("请先按 I 设置入点 A"), 3500);
+      break;
+    case lapian::core::LoopEditResult::kOutBeforeIn:
+      statusBar()->showMessage(
+          QStringLiteral("出点 B 不能早于入点 A（当前 A=%1），未设置")
+              .arg(static_cast<qlonglong>(loop_.in())),
+          4000);
+      break;
+    default:
+      break;
+  }
+  SyncLoopUi();
+}
+
+void MainWindow::ApplyLoopToggle() {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const lapian::core::LoopEditResult result = loop_.Toggle();
+  if (result == lapian::core::LoopEditResult::kNeedsRange) {
+    statusBar()->showMessage(QStringLiteral("请先设置 A/B 入出点，再开循环"), 3500);
+    SyncLoopUi();
+    return;
+  }
+  SyncLoopUi();
+  if (loop_.enabled()) {
+    const QString range =
+        loop_.is_single_frame()
+            ? QStringLiteral("A=B=%1").arg(static_cast<qlonglong>(loop_.in()))
+            : QStringLiteral("A=%1 B=%2")
+                  .arg(static_cast<qlonglong>(loop_.in()))
+                  .arg(static_cast<qlonglong>(loop_.out()));
+    statusBar()->showMessage(QStringLiteral("循环开启：") + range, 3000);
+  } else {
+    statusBar()->showMessage(QStringLiteral("循环关闭"), 2500);
+  }
+}
+
+void MainWindow::ApplyLoopClear() {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const bool had_range = loop_.has_in() || loop_.has_out();
+  loop_.Clear();
+  SyncLoopUi();
+  statusBar()->showMessage(had_range ? QStringLiteral("已清除 A/B，循环关闭")
+                                     : QStringLiteral("没有 A/B 可清除"),
+                           2500);
+}
+
+void MainWindow::SetLoopIn() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplyLoopIn();
+}
+
+void MainWindow::SetLoopOut() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplyLoopOut();
+}
+
+void MainWindow::ToggleLoop() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplyLoopToggle();
+}
+
+void MainWindow::ClearLoop() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplyLoopClear();
+}
+
+void MainWindow::SetLoopInForTest() { ApplyLoopIn(); }
+
+void MainWindow::SetLoopOutForTest() { ApplyLoopOut(); }
+
+void MainWindow::ToggleLoopForTest() { ApplyLoopToggle(); }
+
+void MainWindow::ClearLoopForTest() { ApplyLoopClear(); }
+
+QString MainWindow::LoopStateForTest() const {
+  return QStringLiteral("frame=%1 loop=%2 has_in=%3 a=%4 has_out=%5 b=%6")
+      .arg(static_cast<qlonglong>(current_frame_))
+      .arg(loop_.enabled() ? 1 : 0)
+      .arg(loop_.has_in() ? 1 : 0)
+      .arg(static_cast<qlonglong>(loop_.in()))
+      .arg(loop_.has_out() ? 1 : 0)
+      .arg(static_cast<qlonglong>(loop_.out()));
+}
 
 void MainWindow::ShowScrubTarget(std::int64_t frame) {
   if (info_bar_ != nullptr) {

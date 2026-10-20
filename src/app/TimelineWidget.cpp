@@ -57,6 +57,7 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
 
 void TimelineWidget::Clear() {
   ClearWaveform();
+  loop_range_.Clear();
   SetFrameCount(0);
 }
 
@@ -64,6 +65,9 @@ void TimelineWidget::SetFrameCount(std::int64_t count) {
   if (scrubbing_) {
     scrubbing_ = false;
     follow_playhead_ = follow_before_scrub_;
+  }
+  if (count <= 0) {
+    loop_range_.Clear();
   }
   current_frame_ = 0;
   fit_mode_ = true;
@@ -241,6 +245,11 @@ void TimelineWidget::SetWaveformVisible(bool visible) {
   UpdateHeight();
 }
 
+void TimelineWidget::SetLoopRange(const lapian::core::LoopRange& range) {
+  loop_range_ = range;
+  update();
+}
+
 double TimelineWidget::FramePtsSeconds(std::int64_t frame) const {
   if (frame_pts_) {
     const std::int64_t pts_us = frame_pts_(frame);
@@ -334,6 +343,81 @@ void TimelineWidget::DrawWaveform(QPainter& painter, const QRectF& rect) {
   }
 }
 
+void TimelineWidget::DrawLoopRange(QPainter& painter, const QRectF& rect) {
+  if (model_.frame_count() <= 0 || !loop_range_.has_in()) {
+    return;
+  }
+
+  const std::int64_t last_frame = model_.frame_count() - 1;
+  const std::int64_t frame_in =
+      std::clamp<std::int64_t>(loop_range_.in(), 0, last_frame);
+  const double frame_px = std::max(1.0, model_.pixels_per_frame());
+  const double left = model_.FrameToX(frame_in);
+  double right = left + frame_px;
+  if (loop_range_.has_out()) {
+    const std::int64_t frame_out =
+        std::clamp<std::int64_t>(loop_range_.out(), frame_in, last_frame);
+    right = model_.FrameToX(frame_out) + frame_px;
+  }
+  if (right < left) {
+    right = left + frame_px;
+  }
+
+  const bool active = loop_range_.enabled();
+  const QColor edge = active ? QColor(158, 206, 106) : QColor(95, 127, 69);
+  if (loop_range_.has_out()) {
+    // 色条覆盖入点帧格左缘到出点帧格右缘；循环开启时提高不透明度。
+    painter.fillRect(
+        QRectF(left, rect.top(), right - left, rect.height()),
+        active ? QColor(158, 206, 106, 64) : QColor(158, 206, 106, 26));
+  }
+
+  QPen edge_pen(edge);
+  edge_pen.setWidthF(active ? 2.0 : 1.0);
+  painter.setPen(edge_pen);
+  if (left >= -1.0 && left <= static_cast<double>(width()) + 1.0) {
+    painter.drawLine(QPointF(left + 0.5, rect.top()),
+                     QPointF(left + 0.5, rect.bottom()));
+  }
+  if (loop_range_.has_out() && right >= -1.0 &&
+      right <= static_cast<double>(width()) + 1.0) {
+    painter.drawLine(QPointF(right - 0.5, rect.top()),
+                     QPointF(right - 0.5, rect.bottom()));
+  }
+
+  // A/B 标签画在标尺下缘，避开顶部的帧号标签。
+  QFont tag_font = painter.font();
+  tag_font.setPointSizeF(8.0);
+  tag_font.setBold(true);
+  painter.setFont(tag_font);
+  constexpr double kTagWidth = 15.0;
+  constexpr double kTagHeight = 15.0;
+  const double tag_y =
+      std::max(1.0, static_cast<double>(RulerHeight()) - kTagHeight - 3.0);
+  const bool active_tag = active;
+  auto draw_tag = [&](const QString& text, double boundary_x, bool place_right) {
+    double tag_x = place_right ? boundary_x + 1.0 : boundary_x - kTagWidth - 1.0;
+    tag_x = std::clamp(tag_x, 0.0,
+                       std::max(0.0, static_cast<double>(width()) - kTagWidth));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(edge);
+    painter.drawRect(QRectF(tag_x, tag_y, kTagWidth, kTagHeight));
+    painter.setPen(active_tag ? QColor(QStringLiteral("#101a0c"))
+                              : QColor(QStringLiteral("#d8e8cf")));
+    painter.drawText(QRectF(tag_x, tag_y, kTagWidth, kTagHeight),
+                     Qt::AlignCenter, text);
+  };
+  if (left >= 0.0 && left <= static_cast<double>(width())) {
+    draw_tag(QStringLiteral("A"), left, true);
+  }
+  if (loop_range_.has_out() && right >= 0.0 &&
+      right <= static_cast<double>(width())) {
+    // A/B 很近时 B 标签放到右边界外侧，避免压住 A。
+    const bool place_right = (right - left) < 2.0 * kTagWidth + 6.0;
+    draw_tag(QStringLiteral("B"), right, place_right);
+  }
+}
+
 void TimelineWidget::ApplyZoom(double factor, double anchor_x) {
   if (model_.frame_count() <= 0) {
     return;
@@ -422,6 +506,11 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
                         static_cast<double>(width()),
                         static_cast<double>(WaveformHeight())));
   }
+
+  // 色条叠加在刻度/波形之上，播放头最后绘制以保持可见。
+  DrawLoopRange(painter,
+                QRectF(0.0, 0.0, static_cast<double>(width()),
+                       static_cast<double>(height() - kScrollBarHeight)));
 
   const double playhead_x = model_.FrameToX(current_frame_);
   const double playhead_bottom =

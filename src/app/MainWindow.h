@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "core/LoopRange.h"
+
 struct AVFrame;
 
 class QAction;
@@ -49,6 +51,12 @@ class MainWindow : public QMainWindow {
   void GoToInputForTest(const QString& text);
   // T3.3 自动化验证入口：直接设置 0.25–2x 速度。
   void SetSpeedForTest(double rate);
+  // T4.1 自动化验证入口：与 I/O/L/Shift+L 使用同一套逻辑与提示。
+  void SetLoopInForTest();
+  void SetLoopOutForTest();
+  void ToggleLoopForTest();
+  void ClearLoopForTest();
+  QString LoopStateForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -78,11 +86,21 @@ class MainWindow : public QMainWindow {
   void ToggleWaveform(bool visible);
   void SpeedDown();
   void SpeedUp();
+  void SetLoopIn();
+  void SetLoopOut();
+  void ToggleLoop();
+  void ClearLoop();
 
  private:
   void ShowEmptyState();
   bool ApplyGotoText(const QString& text);
   bool IsTextInputFocused() const;
+  bool CanEditLoop() const;
+  void ApplyLoopIn();
+  void ApplyLoopOut();
+  void ApplyLoopToggle();
+  void ApplyLoopClear();
+  void SyncLoopUi();
   void ShowScrubTarget(std::int64_t frame);
   void StopPreview();
   void ShowOpenError(const QString& message);
@@ -95,6 +113,7 @@ class MainWindow : public QMainWindow {
   QLabel* status_label_ = nullptr;
   QLabel* audio_label_ = nullptr;
   QLabel* speed_label_ = nullptr;
+  QLabel* loop_label_ = nullptr;
   QLabel* waveform_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
   QAction* mute_action_ = nullptr;
@@ -109,6 +128,10 @@ class MainWindow : public QMainWindow {
   QAction* zoom_in_action_ = nullptr;
   QAction* zoom_out_action_ = nullptr;
   QAction* waveform_action_ = nullptr;
+  QAction* loop_in_action_ = nullptr;
+  QAction* loop_out_action_ = nullptr;
+  QAction* loop_toggle_action_ = nullptr;
+  QAction* loop_clear_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
@@ -116,6 +139,7 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
   std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
+  lapian::core::LoopRange loop_;
   QTimer* preview_timer_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::uint64_t audio_status_revision_ = 0;

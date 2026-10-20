@@ -1,8 +1,13 @@
 #include <QApplication>
+#include <QByteArray>
 #include <QCoreApplication>
+#include <QDir>
+#include <QPixmap>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+
+#include <cstdio>
 
 #include "app/MainWindow.h"
 
@@ -20,6 +25,7 @@ int main(int argc, char* argv[]) {
   QString goto_text;
   bool auto_play = false;
   bool step_test = false;
+  bool ab_test = false;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
@@ -35,6 +41,8 @@ int main(int argc, char* argv[]) {
       auto_play = true;
     } else if (arguments[i] == QStringLiteral("--step-test")) {
       step_test = true;
+    } else if (arguments[i] == QStringLiteral("--ab-test")) {
+      ab_test = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -43,8 +51,9 @@ int main(int argc, char* argv[]) {
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
-    QTimer::singleShot(0, &window, [&window, file_path, goto_text, auto_play, step_test,
-                                    playback_rate, has_playback_rate]() {
+    QTimer::singleShot(0, &window, [&window, &app, file_path, goto_text, auto_play,
+                                    step_test, ab_test, playback_rate,
+                                    has_playback_rate]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -58,6 +67,64 @@ int main(int argc, char* argv[]) {
       if (step_test) {
         QTimer::singleShot(1200, &window, [&window]() { window.StepForwardForTest(); });
         QTimer::singleShot(1800, &window, [&window]() { window.StartPlaybackForTest(); });
+      }
+      if (ab_test) {
+        // T4.1 F4-A4/A8 自动化：状态日志 + 时间轴截图（build/t4.1-ab-*.png）。
+        auto log_state = [&window](const char* step) {
+          const QByteArray state = window.LoopStateForTest().toUtf8();
+          std::fprintf(stderr, "T4.1 ab_test %s %s\n", step, state.constData());
+          std::fflush(stderr);
+        };
+        auto save_shot = [&window](const char* name) {
+          const QString dir = QDir::currentPath() + QStringLiteral("/build");
+          QDir().mkpath(dir);
+          const QString path = dir + QStringLiteral("/t4.1-ab-") +
+                               QString::fromLatin1(name) + QStringLiteral(".png");
+          const bool ok = window.grab().save(path);
+          std::fprintf(stderr, "T4.1 ab_test shot=%s ok=%d\n",
+                       path.toUtf8().constData(), ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+
+        QTimer::singleShot(400, &window, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.SetLoopInForTest();
+          log_state("a100");
+        });
+        QTimer::singleShot(600, &window, [&window, log_state, save_shot]() {
+          window.GoToInputForTest(QStringLiteral("160"));
+          window.SetLoopOutForTest();
+          log_state("b160");
+          save_shot("range-off");
+        });
+        QTimer::singleShot(800, &window, [&window, log_state, save_shot]() {
+          window.ToggleLoopForTest();
+          log_state("loop-on");
+          save_shot("loop-on");
+        });
+        QTimer::singleShot(1000, &window, [&window, log_state, save_shot]() {
+          window.GoToInputForTest(QStringLiteral("90"));
+          window.SetLoopOutForTest();  // F4-A8：必须被拒绝，A/B 与循环不变
+          log_state("reject-out90");
+          save_shot("reject-out90");
+        });
+        QTimer::singleShot(1200, &window, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("170"));
+          window.SetLoopInForTest();  // 晚于原 B：清 B 并关循环
+          log_state("in170-clears-b");
+        });
+        QTimer::singleShot(1400, &window, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("190"));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          log_state("loop-on2");
+        });
+        QTimer::singleShot(1600, &window, [&window, log_state, save_shot]() {
+          window.ClearLoopForTest();  // F4-A4：色条消失、循环关闭
+          log_state("cleared");
+          save_shot("cleared");
+        });
+        QTimer::singleShot(1800, &app, &QCoreApplication::quit);
       }
     });
   }

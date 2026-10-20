@@ -19,6 +19,12 @@ lapian_apply_common_options(lapian_clock_test)
 target_link_libraries(lapian_clock_test PRIVATE lapian_framemath)
 add_test(NAME lapian_clock_test COMMAND lapian_clock_test)
 
+# T4.1 A/B 区间：入出点校验、I 晚于 B 清 B、循环开关、清除。纯 C++。
+add_executable(lapian_loop_range_test loop_range_test.cpp)
+lapian_apply_common_options(lapian_loop_range_test)
+target_link_libraries(lapian_loop_range_test PRIVATE lapian_framemath)
+add_test(NAME lapian_loop_range_test COMMAND lapian_loop_range_test)
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)

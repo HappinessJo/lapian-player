@@ -38,6 +38,7 @@ set_source_files_properties(platform/gfx/VideoRenderer.hlsl PROPERTIES HEADER_FI
 add_library(lapian_framemath STATIC
   core/FrameMath.cpp
   core/FrameMath.h
+  core/LoopRange.h
   core/MediaClock.cpp
   core/MediaClock.h)
 lapian_apply_common_options(lapian_framemath)

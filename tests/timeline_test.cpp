@@ -261,6 +261,79 @@ void TestWaveformRender() {
   Check(widget.height() == 72, "清空波形后恢复基础高度");
 }
 
+void TestLoopRender() {
+  using lapian::core::LoopRange;
+
+  TimelineWidget widget;
+  widget.resize(960, 72);
+  widget.SetFrameCount(120);
+  widget.SetPixelsPerFrame(8.0);
+  widget.show();
+  QApplication::processEvents();
+
+  auto render = [&widget]() {
+    QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::black);
+    QPainter painter(&image);
+    widget.render(&painter);
+    return image;
+  };
+  auto average_green = [](const QImage& image, int x0, int x1, int y0, int y1) {
+    int sum = 0;
+    int count = 0;
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) {
+        sum += image.pixelColor(x, y).green();
+        ++count;
+      }
+    }
+    return count > 0 ? static_cast<double>(sum) / count : 0.0;
+  };
+
+  // A=11/B=21：边界 x=88/176 不与主刻度（每 10 帧 x=80/160）重合，
+  // 区间内取 x=120、y=30（次刻度从 y=36 起，不干扰）。
+  LoopRange range;
+  range.SetIn(11);
+  range.SetOut(21);
+  widget.SetLoopRange(range);
+  QImage image = render();
+
+  const QColor inside = image.pixelColor(120, 24);
+  const QColor outside = image.pixelColor(40, 24);
+  const QColor edge = image.pixelColor(88, 24);
+  Check(inside.green() > inside.red() && inside.green() > inside.blue(),
+        "未开循环时 A/B 区间内出现淡色条");
+  Check(outside.green() <= 30, "区间外保持时间轴底色");
+  Check(edge.green() > edge.red() + 20, "入点 A 处画边界线");
+  const double tag_green = average_green(image, 91, 102, 42, 53);
+  Check(tag_green > 90.0, "入点标签块可见");
+
+  range.Toggle();
+  widget.SetLoopRange(range);
+  image = render();
+  const QColor active_inside = image.pixelColor(120, 24);
+  const QColor active_edge = image.pixelColor(88, 24);
+  Check(active_inside.green() > active_inside.red() + 8,
+        "循环开启后色条高亮");
+  Check(active_edge.green() > 180 && active_edge.red() > 120,
+        "循环开启后边界线变亮绿");
+  const double active_tag_green = average_green(image, 91, 102, 42, 53);
+  Check(active_tag_green > 160.0, "循环开启后 A 标签高亮");
+
+  LoopRange a_only;
+  a_only.SetIn(11);
+  widget.SetLoopRange(a_only);
+  image = render();
+  Check(image.pixelColor(120, 24).green() <= 30, "只有 A 时不画区间色条");
+  Check(image.pixelColor(88, 24).green() > 50, "只有 A 时仍画入点线");
+
+  LoopRange empty;
+  widget.SetLoopRange(empty);
+  image = render();
+  Check(image.pixelColor(88, 24).green() <= 30, "清除 A/B 后色条与边界线消失");
+  Check(average_green(image, 91, 102, 42, 53) < 60.0, "清除 A/B 后 A 标签消失");
+}
+
 void TestPaintBenchmark() {
   TimelineWidget widget;
   widget.resize(1920, 72);
@@ -331,6 +404,7 @@ int main(int argc, char** argv) {
   TestWidgetViewState();
   TestPointerInteraction();
   TestWaveformRender();
+  TestLoopRender();
   TestPaintBenchmark();
 
   if (g_failures > 0) {

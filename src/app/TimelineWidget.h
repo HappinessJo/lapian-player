@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "core/LoopRange.h"
 #include "core/TimelineModel.h"
 
 class QMouseEvent;
@@ -63,6 +64,10 @@ class TimelineWidget : public QWidget {
   bool waveform_visible() const { return waveform_visible_; }
   bool waveform_active() const { return waveform_active_; }
 
+  // T4.1 A/B 色条与标签；循环开启时高亮。数据校验由 core::LoopRange 负责。
+  void SetLoopRange(const lapian::core::LoopRange& range);
+  const lapian::core::LoopRange& loop_range() const { return loop_range_; }
+
  signals:
   // 按下时发一次；拖动中目标帧变化时发；松开时发最终目标帧。
   void scrubStarted(qint64 frame);
@@ -84,6 +89,7 @@ class TimelineWidget : public QWidget {
   int WaveformHeight() const;
   void UpdateHeight();
   void DrawWaveform(QPainter& painter, const QRectF& rect);
+  void DrawLoopRange(QPainter& painter, const QRectF& rect);
   double FramePtsSeconds(std::int64_t frame) const;
   void SyncScrollBar();
   void ApplyZoom(double factor, double anchor_x);
@@ -104,4 +110,5 @@ class TimelineWidget : public QWidget {
   double fallback_frame_seconds_ = 1.0 / 30.0;
   bool waveform_active_ = false;
   bool waveform_visible_ = true;
+  lapian::core::LoopRange loop_range_;
 };
