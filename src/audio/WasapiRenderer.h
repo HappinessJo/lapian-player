@@ -11,6 +11,7 @@ namespace lapian::audio {
 struct WasapiDeviceInfo {
   AudioFormat format;
   std::uint32_t buffer_frames = 0;
+  std::uint64_t clock_frequency = 0;  // IAudioClock::GetFrequency；0 表示不可用
   std::string device_name;
 };
 
@@ -42,7 +43,8 @@ class WasapiRenderer {
   bool WriteFrames(const float* samples, std::size_t frames, std::string* error);
 
   bool IsDeviceLost() const;
-  bool PositionFrames(std::uint64_t* frames) const;
+  // IAudioClock 的位置单位，不一定是帧；用 device_info().clock_frequency 换算秒。
+  bool ClockPosition(std::uint64_t* position) const;
 
  private:
   struct Impl;

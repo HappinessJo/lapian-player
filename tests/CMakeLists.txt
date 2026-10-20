@@ -13,6 +13,12 @@ lapian_apply_common_options(lapian_frame_math_test)
 target_link_libraries(lapian_frame_math_test PRIVATE lapian_framemath)
 add_test(NAME lapian_frame_math_test COMMAND lapian_frame_math_test)
 
+# T3.2 媒体时钟（QPC 回退/rate/seek/暂停）测试；注入墙上时间，纯 C++。
+add_executable(lapian_clock_test clock_test.cpp)
+lapian_apply_common_options(lapian_clock_test)
+target_link_libraries(lapian_clock_test PRIVATE lapian_framemath)
+add_test(NAME lapian_clock_test COMMAND lapian_clock_test)
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)

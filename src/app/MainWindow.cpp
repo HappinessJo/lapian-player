@@ -216,6 +216,7 @@ void MainWindow::ShowEmptyState() {
   }
   if (playback_ != nullptr) {
     playback_->Pause();
+    playback_->SetAudioEngine(nullptr);
     playback_->SetSession(nullptr);
   }
   if (gfx_ != nullptr) {
@@ -374,6 +375,7 @@ void MainWindow::OpenFile(const QString& path) {
       audio_ = std::move(audio);
     }
   }
+  playback_->SetAudioEngine(audio_.get());
 
   // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
   if (can_seek) {

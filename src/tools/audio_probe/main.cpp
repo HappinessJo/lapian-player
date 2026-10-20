@@ -77,9 +77,11 @@ int main(int argc, char* argv[]) {
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() <
          seconds) {
     const lapian::audio::AudioStatus status = engine.status();
-    std::printf("state=%s pos=%.3f underruns=%llu\n", StateName(status.state),
-                status.position_seconds,
-                static_cast<unsigned long long>(status.underruns));
+    double clock_seconds = 0.0;
+    const bool has_clock = engine.ClockSeconds(&clock_seconds);
+    std::printf("state=%s pos=%.3f clock=%.3f has_clock=%d underruns=%llu\n",
+                StateName(status.state), status.position_seconds, clock_seconds,
+                has_clock ? 1 : 0, static_cast<unsigned long long>(status.underruns));
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 

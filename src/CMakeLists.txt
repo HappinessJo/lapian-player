@@ -37,7 +37,9 @@ set_source_files_properties(platform/gfx/VideoRenderer.hlsl PROPERTIES HEADER_FI
 # T2.1 帧数学核心：纯 C++，不依赖 Qt/FFmpeg，先单测再接到 UI/解码。
 add_library(lapian_framemath STATIC
   core/FrameMath.cpp
-  core/FrameMath.h)
+  core/FrameMath.h
+  core/MediaClock.cpp
+  core/MediaClock.h)
 lapian_apply_common_options(lapian_framemath)
 target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 

@@ -188,6 +188,12 @@ struct WasapiRenderer::Impl {
     if (FAILED(client->GetService(IID_PPV_ARGS(audio_clock.GetAddressOf())))) {
       audio_clock.Reset();
     }
+    if (audio_clock != nullptr) {
+      UINT64 frequency = 0;
+      if (SUCCEEDED(audio_clock->GetFrequency(&frequency)) && frequency > 0) {
+        info.clock_frequency = frequency;
+      }
+    }
     device_lost = false;
     started = false;
     return true;
@@ -375,19 +381,19 @@ bool WasapiRenderer::WriteFrames(const float* samples, std::size_t frames,
 
 bool WasapiRenderer::IsDeviceLost() const { return impl_->device_lost; }
 
-bool WasapiRenderer::PositionFrames(std::uint64_t* frames) const {
-  if (frames == nullptr || impl_->audio_clock == nullptr) {
+bool WasapiRenderer::ClockPosition(std::uint64_t* position) const {
+  if (position == nullptr || impl_->audio_clock == nullptr) {
     return false;
   }
-  UINT64 position = 0;
-  const HRESULT result = impl_->audio_clock->GetPosition(&position, nullptr);
+  UINT64 current = 0;
+  const HRESULT result = impl_->audio_clock->GetPosition(&current, nullptr);
   if (FAILED(result)) {
     if (IsDeviceLostHresult(result)) {
       impl_->device_lost = true;
     }
     return false;
   }
-  *frames = position;
+  *position = current;
   return true;
 }
 

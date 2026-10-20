@@ -47,6 +47,10 @@ class AudioEngine {
   void SetVolume(int percent);
   void SetMute(bool muted);
 
+  // T3.2：IAudioClock 推算的当前媒体秒；不可用时返回 false（调用方回退 QPC）。
+  // 只在播放中有效；暂停、设备失效、音频结束时失效。
+  bool ClockSeconds(double* seconds) const;
+
   AudioStatus status() const;
 
  private:

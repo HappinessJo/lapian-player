@@ -67,6 +67,8 @@ struct AudioEngine::Impl {
   std::atomic<std::uint64_t> seek_serial{0};
   std::atomic<int> volume{100};
   std::atomic<bool> muted{false};
+  std::atomic<double> clock_seconds{0.0};
+  std::atomic<bool> clock_valid{false};
 
   mutable std::mutex status_mutex;
   AudioStatus status;
@@ -86,6 +88,10 @@ struct AudioEngine::Impl {
   double position_seconds = 0.0;
   std::uint64_t frames_since_start = 0;
   std::uint64_t underruns = 0;
+  std::uint64_t clock_base_frames = 0;
+  std::uint64_t clock_frequency = 0;
+  double clock_anchor_seconds = 0.0;
+  int clock_failures = 0;
   std::chrono::steady_clock::time_point last_position_publish;
 
   int sample_rate() const { return renderer.device_info().format.sample_rate; }
@@ -129,9 +135,11 @@ struct AudioEngine::Impl {
       renderer.Shutdown();
       return false;
     }
-    AudioLog("audio device: %d Hz %d ch %s buffer=%u", format.sample_rate, format.channels,
+    AudioLog("audio device: %d Hz %d ch %s buffer=%u clock_freq=%llu", format.sample_rate,
+             format.channels,
              format.encoding == SampleEncoding::kFloat32 ? "float32" : "pcm16",
-             renderer.device_info().buffer_frames);
+             renderer.device_info().buffer_frames,
+             static_cast<unsigned long long>(renderer.device_info().clock_frequency));
 
     ring.Reset(static_cast<std::size_t>(format.sample_rate) *
                    static_cast<std::size_t>(kMaxBufferMs) / 1000,
@@ -191,6 +199,55 @@ struct AudioEngine::Impl {
     }
   }
 
+  void UpdateClock() {
+    if (!playing) {
+      return;
+    }
+    std::uint64_t position = 0;
+    if (!renderer.ClockPosition(&position)) {
+      if (clock_valid.load()) {
+        ++clock_failures;
+        if (clock_failures >= 3) {
+          clock_valid.store(false);
+        }
+      }
+      return;
+    }
+    clock_failures = 0;
+
+    // 第一次成功查询只用来建立基准：音频设备位置可能是流内位置，也可能是
+    // 设备累计位置；不能假定 Start 后一定为 0。
+    if (!clock_valid.load()) {
+      clock_base_frames = position;
+      clock_anchor_seconds = clock_seconds.load();
+      clock_valid.store(true);
+      return;
+    }
+    if (position < clock_base_frames) {
+      clock_base_frames = position;
+      return;
+    }
+    const double seconds =
+        clock_anchor_seconds +
+        static_cast<double>(position - clock_base_frames) /
+            static_cast<double>(clock_frequency > 0 ? clock_frequency : sample_rate());
+
+    // 设备时钟若发生秒级跳变（驱动重置/累计位置混用），重新锚定而不是让
+    // 视频跳一大段；正常播放不会触发。
+    if (seconds > clock_seconds.load() + 1.0) {
+      AudioLog("audio clock jump: pos=%llu base=%llu seconds=%.3f current=%.3f",
+               static_cast<unsigned long long>(position),
+               static_cast<unsigned long long>(clock_base_frames), seconds,
+               clock_seconds.load());
+      clock_base_frames = position;
+      clock_anchor_seconds = clock_seconds.load();
+      return;
+    }
+    if (seconds > clock_seconds.load()) {
+      clock_seconds.store(seconds);
+    }
+  }
+
   void StopPlayback(bool publish_status) {
     if (playing && ready && renderer.IsOpen()) {
       std::uint32_t padding = 0;
@@ -206,6 +263,7 @@ struct AudioEngine::Impl {
     ring.Clear();
     decoder_eof = false;
     playing = false;
+    clock_valid.store(false);
     if (publish_status) {
       Publish(AudioState::kPaused, "已暂停");
     }
@@ -262,9 +320,15 @@ struct AudioEngine::Impl {
     anchor_seconds = target;
     position_seconds = target;
     frames_since_start = 0;
+    clock_base_frames = 0;
+    clock_frequency = renderer.device_info().clock_frequency;
+    clock_anchor_seconds = target;
+    clock_seconds.store(target);
+    clock_valid.store(false);
+    clock_failures = 0;
     playing = true;
     handled_serial = serial;
-    AudioLog("audio start: target=%.3fs", target);
+    AudioLog("audio start: target=%.3fs clock=wait", target);
     Publish(AudioState::kPlaying, "播放中");
     return true;
   }
@@ -315,6 +379,7 @@ struct AudioEngine::Impl {
     if (!playing || !ready) {
       return;
     }
+    UpdateClock();
 
     std::string error;
     const std::size_t target =
@@ -384,6 +449,7 @@ struct AudioEngine::Impl {
     position_seconds =
         anchor_seconds + static_cast<double>(played) / static_cast<double>(sample_rate());
     frames_since_start += frames;
+    UpdateClock();
     PublishPosition();
   }
 
@@ -519,6 +585,7 @@ void AudioEngine::Close() {
   if (impl_->thread.joinable()) {
     impl_->thread.join();
   }
+  impl_->clock_valid.store(false);
   {
     std::lock_guard<std::mutex> lock(impl_->status_mutex);
     impl_->status = AudioStatus{};
@@ -531,6 +598,8 @@ void AudioEngine::PlayFrom(double media_seconds) {
   if (!std::isfinite(media_seconds) || media_seconds < 0.0) {
     media_seconds = 0.0;
   }
+  impl_->clock_seconds.store(media_seconds);
+  impl_->clock_valid.store(false);
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->play_target = media_seconds;
@@ -541,6 +610,7 @@ void AudioEngine::PlayFrom(double media_seconds) {
 }
 
 void AudioEngine::Pause() {
+  impl_->clock_valid.store(false);
   impl_->want_play.store(false);
   impl_->cv.notify_all();
 }
@@ -569,6 +639,18 @@ void AudioEngine::SetMute(bool muted) {
 AudioStatus AudioEngine::status() const {
   std::lock_guard<std::mutex> lock(impl_->status_mutex);
   return impl_->status;
+}
+
+bool AudioEngine::ClockSeconds(double* seconds) const {
+  if (seconds == nullptr || !impl_->clock_valid.load()) {
+    return false;
+  }
+  const double value = impl_->clock_seconds.load();
+  if (!std::isfinite(value)) {
+    return false;
+  }
+  *seconds = value;
+  return true;
 }
 
 }  // namespace lapian::audio
