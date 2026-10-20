@@ -90,6 +90,8 @@ target_link_libraries(lapian_timeline PUBLIC Qt6::Widgets)
 
 # T1.1 媒体探测核心：纯 C++ + FFmpeg，不依赖 Qt，便于单测与后续复用。
 add_library(lapian_media STATIC
+  media/FrameCache.cpp
+  media/FrameCache.h
   media/FrameIndex.cpp
   media/FrameIndex.h
   media/MediaInfo.h
@@ -136,8 +138,12 @@ qt_add_executable(lapian WIN32
   app/GfxWidget.h
   app/InfoBar.cpp
   app/InfoBar.h
+  app/MemoryTestRunner.cpp
+  app/MemoryTestRunner.h
   app/PlaybackController.cpp
   app/PlaybackController.h
+  app/ProcessMemory.cpp
+  app/ProcessMemory.h
   app/SnapshotService.cpp
   app/SnapshotService.h)
 lapian_apply_common_options(lapian)

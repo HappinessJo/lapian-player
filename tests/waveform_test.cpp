@@ -59,6 +59,21 @@ void TestData() {
 
   data.SetDuration(12.5);
   CheckNear(data.duration_seconds(), 12.5, 1e-9, "duration 设置");
+
+  // T7.2：波形 bucket 有硬上限，且字节数可测。
+  Check(sizeof(lapian::audio::WaveformBucket) == 4, "WaveformBucket 为 4 字节");
+  Check(data.byte_size() == data.bucket_count() * sizeof(lapian::audio::WaveformBucket),
+        "byte_size 与 bucket_count 一致");
+  const std::size_t before = data.bucket_count();
+  data.SetBucket(WaveformData::kMaxBuckets + 10, -1, 1);
+  Check(data.bucket_count() == before, "超过 kMaxBuckets 的 bucket 被忽略");
+  Check(data.byte_size() <=
+            WaveformData::kMaxBuckets * sizeof(lapian::audio::WaveformBucket),
+        "波形字节数不超过硬上限");
+  std::printf("       4h 波形上限=%.1fMB\n",
+              static_cast<double>(WaveformData::kMaxBuckets *
+                                  sizeof(lapian::audio::WaveformBucket)) /
+                  (1024.0 * 1024.0));
 }
 
 void TestV9() {

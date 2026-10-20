@@ -37,6 +37,7 @@
 #include <psapi.h>
 
 #include "app/MainWindow.h"
+#include "app/MemoryTestRunner.h"
 
 int main(int argc, char* argv[]) {
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。
@@ -71,6 +72,13 @@ int main(int argc, char* argv[]) {
   bool startup_test = false;
   // T7.1：后台索引路径回归（扫描中状态 → 就绪 → 导航/标记可用）。
   bool index_test = false;
+  // T7.2：进程内存测量模式（empty/pause/play/step/switch）。
+  bool memory_test = false;
+  QString memory_mode = QStringLiteral("pause");
+  QString memory_tag;
+  int memory_seconds = 60;
+  int memory_steps = 40;
+  int memory_switch_cycles = 3;
   QString settings_path_arg;
   QString dpi_tag;
   QString banner_tag;
@@ -130,6 +138,23 @@ int main(int argc, char* argv[]) {
       startup_test = true;
     } else if (arguments[i] == QStringLiteral("--index-test")) {
       index_test = true;
+    } else if (arguments[i] == QStringLiteral("--memory-test")) {
+      memory_test = true;
+    } else if (arguments[i] == QStringLiteral("--memory-mode") &&
+               i + 1 < arguments.size()) {
+      memory_mode = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--memory-seconds") &&
+               i + 1 < arguments.size()) {
+      memory_seconds = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--memory-steps") &&
+               i + 1 < arguments.size()) {
+      memory_steps = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--memory-switch-cycles") &&
+               i + 1 < arguments.size()) {
+      memory_switch_cycles = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--memory-tag") &&
+               i + 1 < arguments.size()) {
+      memory_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--banner-tag") &&
                i + 1 < arguments.size()) {
       banner_tag = arguments[++i];
@@ -285,6 +310,18 @@ int main(int argc, char* argv[]) {
   window.show();
   log_startup("window_shown");
 
+  // T7.2：内存测量走产品异步索引路径；runner 自己负责打开/播放/切文件。
+  std::unique_ptr<lapian::app::MemoryTestRunner> memory_runner;
+  if (memory_test) {
+    if (memory_tag.isEmpty()) {
+      memory_tag = memory_mode;
+    }
+    memory_runner = std::make_unique<lapian::app::MemoryTestRunner>(
+        &window, memory_mode, memory_tag, memory_seconds, memory_steps,
+        memory_switch_cycles, file_path, file_b);
+    memory_runner->Start();
+  }
+
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
   QTimer::singleShot(0, &window, [&app, &window, startup_test, startup_log, startup_ms,
                                   file_path]() {
@@ -299,7 +336,7 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if (!file_path.isEmpty()) {
+  if (!file_path.isEmpty() && !memory_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
                                     snapshot_test, fullscreen_test, key_test, settings_test,
@@ -773,13 +810,27 @@ int main(int argc, char* argv[]) {
                     QStringLiteral("frame=100 label=转场A note=第一行\\n第二行"));
         });
         schedule(1200, [&window]() { window.ActivateMarkForTest(0); });
+        // T7.2：ActivateMark 按 T5.2 语义把精确解码放到下一个事件循环；前面
+        // OpenFile 的同步索引可能把 1200/1350 两个定时器一起拖到索引之后。
+        // 固定 150ms 等待会与 0ms 跳转事件竞争，这里改成有界轮询。
         schedule(1350, [&window, check]() {
-          const QString state = window.MarkStateForTest();
-          std::fprintf(stderr, "T5.3 note_click %s\n", state.toUtf8().constData());
-          std::fflush(stderr);
-          check("f6a1-click-jump-pause",
-                state.contains(QStringLiteral("frame=100")) &&
-                    state.contains(QStringLiteral("playing=0")));
+          auto tries = std::make_shared<int>(0);
+          auto poll = std::make_shared<std::function<void()>>();
+          *poll = [&window, check, tries, poll]() {
+            const QString state = window.MarkStateForTest();
+            const bool done = state.contains(QStringLiteral("frame=100")) ||
+                              ++(*tries) >= 20;
+            if (!done) {
+              QTimer::singleShot(25, &window, [poll]() { (*poll)(); });
+              return;
+            }
+            std::fprintf(stderr, "T5.3 note_click %s\n", state.toUtf8().constData());
+            std::fflush(stderr);
+            check("f6a1-click-jump-pause",
+                  state.contains(QStringLiteral("frame=100")) &&
+                      state.contains(QStringLiteral("playing=0")));
+          };
+          (*poll)();
         });
         schedule(1500, [&window, log_text, check]() {
           window.SetMarkNoteForTest(0, QString(), QString());

@@ -1,9 +1,23 @@
 #include "media/MediaSession.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#endif
+extern "C" {
+#include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/pixfmt.h>
+}
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 namespace lapian::media {
 
@@ -15,11 +29,25 @@ double ElapsedMs(Clock::time_point started) {
   return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
 }
 
+int BitDepthOfFormat(int format) {
+  switch (format) {
+    case AV_PIX_FMT_P010:
+    case AV_PIX_FMT_P016:
+      return 10;
+    default:
+      return 8;
+  }
+}
+
 }  // namespace
 
 MediaSession::MediaSession() = default;
 
-MediaSession::~MediaSession() = default;
+MediaSession::~MediaSession() {
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+}
 
 bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std::string* error,
                         bool build_index) {
@@ -27,6 +55,11 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
     return false;
   }
   error->clear();
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+  frame_cache_.Clear();
+  decoder_stale_ = true;
 
   // T7.1：分段计时只用于冷启动报告；失败路径也记录，便于区分探测/解码/索引。
   const auto open_started = Clock::now();
@@ -90,6 +123,13 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
   decoder_ = std::move(decoder);
   first_frame_ = first_frame;
   open_ = true;
+  // 首帧已解码，解码器下一次 DecodeNextFrame 返回第 1 帧。
+  decoder_stale_ = false;
+  // T7.2：预算随分辨率/位深固定，不随片长增长。缓存为空时不影响 P10。
+  const lapian::media::FrameCacheLimits limits = FrameCache::LimitsForFrame(
+      probe_.info.video.width, probe_.info.video.height,
+      probe_.info.video.bit_depth);
+  frame_cache_.SetLimits(limits.max_bytes, limits.max_entries);
   return true;
 }
 
@@ -118,17 +158,26 @@ bool MediaSession::BuildIndexNow(std::string* error, const std::atomic<bool>* ca
 }
 
 void MediaSession::InstallIndex(FrameIndex index, double build_ms) {
+  // 新索引可能改变帧号/PTS 映射，旧缓存必须丢弃。
+  frame_cache_.Clear();
+  decoder_stale_ = true;
   index_ = std::move(index);
   last_open_timings_.index_ok = HasIndex();
   last_open_timings_.index_frames = index_.size();
   last_open_timings_.index_ms = build_ms;
 }
 
-bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::string* error) {
+bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
+                               std::string* error, FrameCacheMode cache_mode) {
   if (error == nullptr || out == nullptr) {
     return false;
   }
   error->clear();
+  // 上一帧的命中引用只保证到下一次 Seek；先释放，避免调用方看到悬空指针。
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+  decoder_stale_ = true;
   if (!open_ || decoder_ == nullptr) {
     *error = "会话未打开";
     return false;
@@ -142,14 +191,50 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::s
     return false;
   }
 
+  if (cache_mode != FrameCacheMode::kNone) {
+    AVFrame* hit = nullptr;
+    FrameCacheEntryInfo cache_info;
+    if (frame_cache_.Get(frame, &hit, &cache_info)) {
+      last_hit_frame_ = hit;
+      out->width = hit->width;
+      out->height = hit->height;
+      out->pixel_format = hit->format;
+      const char* format_name =
+          av_get_pix_fmt_name(static_cast<AVPixelFormat>(hit->format));
+      out->pixel_format_name = format_name != nullptr ? format_name : "unknown";
+      out->bit_depth = BitDepthOfFormat(hit->format);
+      out->pts = cache_info.pts;
+      out->duration = 0;  // 缓存只保留微秒时长；调用方用 duration_us。
+      out->pts_us = cache_info.pts_us;
+      out->duration_us = cache_info.duration_us;
+      out->key_frame = cache_info.keyframe;
+      out->hardware = false;
+      out->av_frame = hit;
+      // 缓存命中没有移动解码器；起播前必须重新定位。
+      decoder_stale_ = true;
+      return true;
+    }
+  }
+
+  const std::size_t max_entries = frame_cache_.stats().max_entries;
   auto decode_range = [&](std::int64_t start_frame) -> bool {
+    std::int64_t cache_from = frame + 1;
+    if (cache_mode == FrameCacheMode::kBackwardWindow && max_entries > 0) {
+      cache_from = std::max(
+          start_frame, frame - static_cast<std::int64_t>(max_entries) + 1);
+    }
     for (std::int64_t index = start_frame; index <= frame; ++index) {
       DecodedFrameInfo info;
       if (!decoder_->DecodeNextFrame(&info, error)) {
         return false;
       }
+      if (cache_mode != FrameCacheMode::kNone && index >= cache_from) {
+        frame_cache_.Put(info.av_frame, index, info.pts, info.pts_us,
+                         info.duration_us, info.key_frame);
+      }
       if (index == frame) {
         *out = info;
+        decoder_stale_ = false;
         return true;
       }
     }
@@ -176,7 +261,36 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::s
   return decode_range(0);
 }
 
+bool MediaSession::EnsureSequentialPosition(std::int64_t frame, std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (!open_ || decoder_ == nullptr) {
+    if (error != nullptr) {
+      *error = "会话未打开";
+    }
+    return false;
+  }
+  if (!decoder_stale_) {
+    return true;
+  }
+  DecodedFrameInfo info;
+  std::string seek_error;
+  if (!SeekToFrame(frame, &info, &seek_error, FrameCacheMode::kNone)) {
+    if (error != nullptr) {
+      *error = seek_error;
+    }
+    return false;
+  }
+  return true;
+}
+
 void MediaSession::Close() {
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+  frame_cache_.Clear();
+  decoder_stale_ = true;
   decoder_.reset();
   index_.Reset();
   probe_ = MediaProbeResult{};

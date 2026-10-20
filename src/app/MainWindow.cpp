@@ -445,7 +445,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
       step_repeat_timer_->setInterval(70);
     }
     const std::int64_t before = current_frame_;
-    GoToFrame(before + step_direction_);
+    GoToFrameForStep(before + step_direction_, step_direction_ < 0);
     if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
       std::fprintf(stderr, "T6.2 step_timer before=%lld after=%lld dir=%d active=%d\n",
                    static_cast<long long>(before),
@@ -1527,6 +1527,24 @@ QString MainWindow::IndexStateForTest() const {
       .arg(total_state);
 }
 
+QString MainWindow::FrameCacheStateForTest() const {
+  if (session_ == nullptr) {
+    return QStringLiteral("none");
+  }
+  const lapian::media::FrameCacheStats stats = session_->frame_cache().stats();
+  return QStringLiteral(
+             "count=%1 bytes=%2 max_bytes=%3 max_entries=%4 hits=%5 misses=%6 "
+             "puts=%7 evictions=%8")
+      .arg(stats.entries)
+      .arg(stats.bytes)
+      .arg(stats.max_bytes)
+      .arg(stats.max_entries)
+      .arg(stats.hits)
+      .arg(stats.misses)
+      .arg(stats.puts)
+      .arg(stats.evictions);
+}
+
 void MainWindow::ShowGotoDialog() {
   if (IsTextInputFocused()) {
     return;
@@ -2309,7 +2327,8 @@ void MainWindow::StartStepRepeat(int delta) {
   }
   step_direction_ = delta;
   const std::int64_t before = current_frame_;
-  GoToFrame(before + delta);
+  // T7.2：后退键先预热最近一窗帧，后续连发可直接命中缓存。
+  GoToFrameForStep(before + delta, delta < 0);
   if (current_frame_ == before) {
     StopStepRepeat();  // 已在边界：不启动连发
     return;
@@ -2661,18 +2680,31 @@ double MainWindow::LastSettingsLoadMsForTest() const {
 void MainWindow::StepBackward() {
   if (session_ != nullptr && session_->IsOpen()) {
     CancelPendingMarkJump();
-    GoToFrame(current_frame_ - 1);
+    GoToFrameForStep(current_frame_ - 1, true);
   }
 }
 
 void MainWindow::StepForward() {
   if (session_ != nullptr && session_->IsOpen()) {
     CancelPendingMarkJump();
-    GoToFrame(current_frame_ + 1);
+    GoToFrameForStep(current_frame_ + 1, false);
   }
 }
 
 void MainWindow::GoToFrame(std::int64_t frame) {
+  // 普通跳转/拖动松手/标记跳转不写缓存：实测每次多一次 3MB 回拷，
+  // 而连续后退需要的是“目标之前一窗帧”，由 GoToFrameForStep 单独预热。
+  GoToFrameInternal(frame, lapian::media::FrameCacheMode::kNone);
+}
+
+void MainWindow::GoToFrameForStep(std::int64_t frame, bool backward) {
+  // 后退步进预热一窗帧；前进步进顺序解码本身不命中缓存，写缓存只会增加拷贝。
+  GoToFrameInternal(frame, backward ? lapian::media::FrameCacheMode::kBackwardWindow
+                                    : lapian::media::FrameCacheMode::kNone);
+}
+
+void MainWindow::GoToFrameInternal(std::int64_t frame,
+                                   lapian::media::FrameCacheMode mode) {
   if (session_ == nullptr || !session_->IsOpen() || !session_->index().IsReady() ||
       session_->index().empty()) {
     return;
@@ -2684,7 +2716,7 @@ void MainWindow::GoToFrame(std::int64_t frame) {
 
   lapian::media::DecodedFrameInfo info;
   std::string error;
-  if (!session_->SeekToFrame(target, &info, &error)) {
+  if (!session_->SeekToFrame(target, &info, &error, mode)) {
     // 拖动时 UI 已先显示目标帧；失败必须退回实际呈现帧，不能把目标当结果。
     if (timeline_ != nullptr) {
       timeline_->SetCurrentFrame(current_frame_);
@@ -2703,6 +2735,19 @@ void MainWindow::GoToFrame(std::int64_t frame) {
   timeline_->SetCurrentFrame(target);
   playback_->SetPosition(target, info.pts_us);
   current_frame_ = target;
+  if (qEnvironmentVariableIsSet("LAPIAN_CACHE_LOG")) {
+    const lapian::media::FrameCacheStats stats = session_->frame_cache().stats();
+    std::fprintf(stderr,
+                 "T7.2 cache frame=%lld mode=%d count=%zu bytes=%zu max_bytes=%zu "
+                 "hits=%llu misses=%llu puts=%llu evictions=%llu\n",
+                 static_cast<long long>(target), static_cast<int>(mode), stats.entries,
+                 stats.bytes, stats.max_bytes,
+                 static_cast<unsigned long long>(stats.hits),
+                 static_cast<unsigned long long>(stats.misses),
+                 static_cast<unsigned long long>(stats.puts),
+                 static_cast<unsigned long long>(stats.evictions));
+    std::fflush(stderr);
+  }
   statusBar()->showMessage(QStringLiteral("第 %1 帧").arg(target), 2000);
 }
 

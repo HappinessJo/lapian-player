@@ -4,11 +4,13 @@
 #include <memory>
 #include <string>
 
+#include "media/FrameCache.h"
 #include "media/FrameIndex.h"
 #include "media/MediaInfo.h"
 #include "media/MediaProbe.h"
 #include "media/VideoDecoder.h"
 
+struct AVFrame;
 struct ID3D11Device;
 
 namespace lapian::media {
@@ -47,7 +49,12 @@ class MediaSession {
   void InstallIndex(FrameIndex index, double build_ms);
   bool HasIndex() const { return index_.IsReady() && !index_.empty(); }
   int video_stream_index() const { return probe_.info.video.stream_index; }
-  bool SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::string* error);
+  // T7.2：普通跳转/播放循环默认 kNone（保证解码器停在目标帧之后）；
+  // 后退步进传 kBackwardWindow 预热最近若干帧，后续连续后退可直接命中。
+  bool SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::string* error,
+                   FrameCacheMode cache_mode = FrameCacheMode::kNone);
+  // 缓存命中后解码器可能不在目标帧之后；起播前调用一次，必要时真正 seek。
+  bool EnsureSequentialPosition(std::int64_t frame, std::string* error);
 
   bool IsOpen() const { return open_; }
   const MediaInfo& info() const { return probe_.info; }
@@ -56,6 +63,8 @@ class MediaSession {
   const MediaProbeResult& last_attempt() const { return last_attempt_; }
   const DecodedFrameInfo& first_frame() const { return first_frame_; }
   const FrameIndex& index() const { return index_; }
+  // T7.2：帧缓存上限/命中统计（日志与测试用）。
+  const FrameCache& frame_cache() const { return frame_cache_; }
   // 最近一次 Open 的分段耗时（T7.1 冷启动报告）。
   const MediaOpenTimings& last_open_timings() const { return last_open_timings_; }
   VideoDecoder& decoder() { return *decoder_; }
@@ -66,9 +75,14 @@ class MediaSession {
   MediaProbeResult probe_;
   MediaProbeResult last_attempt_;
   FrameIndex index_;
+  FrameCache frame_cache_;
   std::unique_ptr<VideoDecoder> decoder_;
   DecodedFrameInfo first_frame_;
   MediaOpenTimings last_open_timings_;
+  // 缓存命中时返回的软件帧，保持到下一次 Seek/Close，沿用解码器帧的生命周期约定。
+  AVFrame* last_hit_frame_ = nullptr;
+  // true 表示解码器未必停在“最后返回帧的下一帧”，起播前需要重新定位。
+  bool decoder_stale_ = true;
   bool open_ = false;
 };
 

@@ -9,6 +9,10 @@
 
 #include "media/FrameIndex.h"
 
+// T7.2：索引内存按“每帧 16B + keyframe 向量”预算，结构不能悄悄变大。
+static_assert(sizeof(lapian::media::FrameIndexEntry) == 16,
+              "FrameIndexEntry 必须是 16 字节（T7.2 内存预算）");
+
 namespace {
 
 int g_failures = 0;

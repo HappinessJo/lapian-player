@@ -177,6 +177,14 @@ void PlaybackController::Play() {
   if (end_ && !LoopActive()) {
     return;
   }
+  // T7.2：上一步进可能命中帧缓存，解码器没有停在当前帧之后；起播前补一次定位。
+  std::string position_error;
+  if (!session_->EnsureSequentialPosition(current_frame_, &position_error)) {
+    std::fprintf(stderr, "T7.2 play_position_failed frame=%d error=%s\n", current_frame_,
+                 position_error.c_str());
+    std::fflush(stderr);
+    return;
+  }
   playing_ = true;
   frozen_ = false;
   start_media_seconds_ = current_pts_seconds_;
@@ -226,7 +234,8 @@ bool PlaybackController::SeekToFrameInternal(std::int64_t frame) {
   }
   lapian::media::DecodedFrameInfo info;
   std::string error;
-  if (!session_->SeekToFrame(frame, &info, &error)) {
+  if (!session_->SeekToFrame(frame, &info, &error,
+                            lapian::media::FrameCacheMode::kNone)) {
     std::fprintf(stderr, "T4.2 seek_to_frame failed frame=%lld error=%s\n",
                  static_cast<long long>(frame), error.c_str());
     std::fflush(stderr);

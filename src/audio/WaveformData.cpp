@@ -19,6 +19,9 @@ void WaveformData::SetDuration(double duration_seconds) {
 void WaveformData::SetBucket(std::size_t index, std::int16_t min_value,
                              std::int16_t max_value) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (index >= kMaxBuckets) {
+    return;
+  }
   if (index >= buckets_.size()) {
     buckets_.resize(index + 1);
   }
@@ -30,6 +33,11 @@ void WaveformData::SetBucket(std::size_t index, std::int16_t min_value,
 std::size_t WaveformData::bucket_count() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return buckets_.size();
+}
+
+std::size_t WaveformData::byte_size() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return buckets_.size() * sizeof(WaveformBucket);
 }
 
 WaveformBucket WaveformData::BucketAt(std::size_t index) const {

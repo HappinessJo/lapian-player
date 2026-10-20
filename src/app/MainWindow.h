@@ -43,6 +43,7 @@ class SettingsStore;
 }  // namespace lapian::core
 
 namespace lapian::media {
+enum class FrameCacheMode;
 class MediaSession;
 class PreviewDecoder;
 }
@@ -201,6 +202,8 @@ class MainWindow : public QMainWindow {
   bool IndexReadyForTest() const;
   qint64 IndexFrameCountForTest() const;
   QString IndexStateForTest() const;
+  // T7.2：帧缓存上限/占用/命中统计（用于 --memory-test 与日志）。
+  QString FrameCacheStateForTest() const;
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
@@ -247,6 +250,8 @@ class MainWindow : public QMainWindow {
 
  private:
   void ShowEmptyState();
+  void GoToFrameInternal(std::int64_t frame, lapian::media::FrameCacheMode mode);
+  void GoToFrameForStep(std::int64_t frame, bool backward);
   bool ApplyGotoText(const QString& text);
   bool IsTextInputFocused() const;
   bool CanEditLoop() const;

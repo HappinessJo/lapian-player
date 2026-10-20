@@ -113,6 +113,15 @@ set_tests_properties(lapian_media_session_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# T7.2 帧缓存：字节预算、条目上限、LRU、克隆独立性、分辨率预算。合成 NV12，无素材依赖。
+add_executable(lapian_frame_cache_test frame_cache_test.cpp)
+lapian_apply_common_options(lapian_frame_cache_test)
+target_link_libraries(lapian_frame_cache_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_frame_cache_test)
+add_test(NAME lapian_frame_cache_test COMMAND lapian_frame_cache_test)
+set_tests_properties(lapian_frame_cache_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T2.2 PTS 索引：纯索引单测 + 真实文件 demux。
 add_executable(lapian_frame_index_test frame_index_test.cpp)
 lapian_apply_common_options(lapian_frame_index_test)
