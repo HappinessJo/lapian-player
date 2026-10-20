@@ -19,7 +19,7 @@
 3. 跑一次 ctest（命令见下），确认 15/15
 
 当前基线（以 git log 为准）：
-- 参考 HEAD：c76a813（T5.1 代码与单测）；本提示词提交后会再前进一格；工作区应 clean。
+- 参考基线：T5.1 文档提交 9132202；本提示词更新后 HEAD 会再前进一格，以 git log 为准；工作区应 clean。
 - M0–M4 与 T5.1 代码完成；ctest 15/15；dist 31.97MB / 25 文件。
 - 已有：打开/播放/逐帧/seek/长按/帧号/时间码、时间轴缩放滚动/点击拖动/拖动预览、
   WASAPI、IAudioClock+QPC、0.25–2x 变速/变调、A/V offset、200/s 波形生成与绘制、
@@ -30,6 +30,22 @@
   波形/听感真人验收。
 - 已知缺口：长 GOP 压力片 proxy-V1 的循环 B→A 为 148–157ms，未达 F4-A2 的 1 帧；
   已按可用档记录，优化留 T7。不要把短 GOP 的 13–20ms 冒充全素材通过。
+
+## T5.1 已交付的接口（直接复用，不要重写）
+
+- 存储层：`src/core/MarkStore.h` / `.cpp`；静态库 `lapian_marks`；测试
+  `tests/mark_store_test.cpp`（161 断言）。
+- `MarkStore::Open(video_path_utf8, duration_us, MarkStoreOptions, FrameLookup)`；
+  `AddMark(frame, pts_us, label, note, &id)`、`SetMarkText(id, label, note)`、
+  `RemoveMark(id)`、`Save()`；`storage_path()`、`using_fallback()`、`warnings()`。
+- `MarkStoreOptions.appdata_marks_dir` 是完整的 `marks` 目录；生产留空即
+  `%APPDATA%\拉片软件\marks`。
+- sidecar 命名是 `<视频完整文件名>.lapian.json`（如 `测试.mp4.lapian.json`），
+  不要改成 stem；若要改，先改 `ResolveMarkPaths` 与单测。
+- `Open` 可能自动合并 sidecar/AppData 并迁移、写文件；加载后把 warnings 展示出来。
+  保存是同步的，100 标记量级可接受；网络盘慢留 T7.5。
+- 注意：`lapian_marks` 目前只被测试链接，`src/CMakeLists.txt` 的 `lapian` 目标还没
+  链接它；T5.2 要补上。
 
 下一步：T5.2 标记 UI 与跳转（T5.1 只做存储层，未接 MainWindow）
 
@@ -96,7 +112,7 @@ ctest --test-dir build\release -C Release --output-on-failure
 ## 使用说明
 
 - 这段提示词自包含；新 agent 仍应先读文件、跑 `ctest`，不要只信这段摘要。
-- 若 HEAD 已不是 `c76a813`，以 `git log` 和当前 `tasks.md` 为准。
+- 若 HEAD 已前进（交接/提示词提交），以 `git log` 和当前 `tasks.md` 为准。
 - 若 T5.2 已完成，把“下一步”替换为 `tasks.md` 中下一个未完成任务，并先读最新交接。
 - T5.1 交接的 sidecar 命名决策（含扩展名）如要改，先改 `ResolveMarkPaths` 与单测，
   再改 T5.2 的路径显示；不要在 UI 层绕过存储层。
