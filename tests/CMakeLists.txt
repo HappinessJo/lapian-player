@@ -43,6 +43,15 @@ add_test(NAME lapian_app_settings_test COMMAND lapian_app_settings_test)
 set_tests_properties(lapian_app_settings_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T6.5 状态提示：六类提示生成、优先级、唯一横幅与状态栏摘要。纯 C++。
+add_executable(lapian_status_notice_test status_notice_test.cpp)
+lapian_apply_common_options(lapian_status_notice_test)
+target_link_libraries(lapian_status_notice_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_status_notice_test)
+add_test(NAME lapian_status_notice_test COMMAND lapian_status_notice_test)
+set_tests_properties(lapian_status_notice_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

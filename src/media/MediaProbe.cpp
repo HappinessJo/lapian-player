@@ -320,6 +320,16 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
 
   const char* pixel_format = av_get_pix_fmt_name(static_cast<AVPixelFormat>(video_parameters->format));
   video.pixel_format = pixel_format != nullptr ? pixel_format : "unknown";
+  // T6.5：优先用容器/编码参数里的位深；缺失时从像素格式描述推导。
+  if (video_parameters->bits_per_raw_sample > 0) {
+    video.bit_depth = video_parameters->bits_per_raw_sample;
+  } else if (video_parameters->format != AV_PIX_FMT_NONE) {
+    const AVPixFmtDescriptor* descriptor =
+        av_pix_fmt_desc_get(static_cast<AVPixelFormat>(video_parameters->format));
+    if (descriptor != nullptr && descriptor->comp[0].depth > 0) {
+      video.bit_depth = descriptor->comp[0].depth;
+    }
+  }
   video.width = video_parameters->width;
   video.height = video_parameters->height;
   video.average_frame_rate = ToRational(video_stream->avg_frame_rate);

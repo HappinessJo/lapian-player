@@ -183,6 +183,13 @@ class MainWindow : public QMainWindow {
   QString InfoFileLabelForTest() const;
   QString InfoFileNameForTest() const;
   bool InfoNarrowModeForTest() const;
+  // T6.5 状态横幅：真实媒体/合成提示、状态栏次要提示与布局断言。
+  void SetBannerNoticesForTest(const QStringList& kinds);
+  void ClearBannerNoticesForTest();
+  QString BannerStateForTest() const;
+  QString BannerUiStateForTest() const;
+  QString SecondaryStatusTextForTest() const;
+  int InfoBarHeightForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -278,6 +285,8 @@ class MainWindow : public QMainWindow {
   // T6.4：初始窗口按屏幕可用区收缩；侧栏/次要状态在窄宽度下让位。
   void ApplyInitialWindowSize();
   void UpdateResponsiveLayout();
+  // T6.5：InfoBar 只显示一条横幅，其余提示汇总到状态栏常驻标签。
+  void UpdateStatusNotices();
 
   GfxWidget* gfx_ = nullptr;
   QWidget* stage_ = nullptr;
@@ -289,6 +298,7 @@ class MainWindow : public QMainWindow {
   QLabel* speed_label_ = nullptr;
   QLabel* loop_label_ = nullptr;
   QLabel* waveform_label_ = nullptr;
+  QLabel* notice_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
   QAction* mute_action_ = nullptr;
   QAction* slower_action_ = nullptr;

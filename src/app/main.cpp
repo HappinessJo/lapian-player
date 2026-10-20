@@ -3,12 +3,15 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
@@ -59,8 +62,13 @@ int main(int argc, char* argv[]) {
   bool settings_test = false;
   bool settings_expect = false;
   bool dpi_test = false;
+  bool banner_test = false;
   QString settings_path_arg;
   QString dpi_tag;
+  QString banner_tag;
+  QString banner_vfr;
+  QString banner_tenbit;
+  QString banner_noaudio;
   int settings_expect_volume = -1;
   bool settings_expect_waveform = false;
   double dpi_expect_scale = -1.0;
@@ -108,6 +116,20 @@ int main(int argc, char* argv[]) {
       settings_path_arg = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--dpi-test")) {
       dpi_test = true;
+    } else if (arguments[i] == QStringLiteral("--banner-test")) {
+      banner_test = true;
+    } else if (arguments[i] == QStringLiteral("--banner-tag") &&
+               i + 1 < arguments.size()) {
+      banner_tag = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--banner-vfr") &&
+               i + 1 < arguments.size()) {
+      banner_vfr = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--banner-tenbit") &&
+               i + 1 < arguments.size()) {
+      banner_tenbit = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--banner-noaudio") &&
+               i + 1 < arguments.size()) {
+      banner_noaudio = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--dpi-expect-scale") &&
                i + 1 < arguments.size()) {
       dpi_expect_scale = arguments[++i].toDouble();
@@ -133,14 +155,18 @@ int main(int argc, char* argv[]) {
   }
   // T6.3：--settings-test 用独立根，默认 build/t6.3-settings，避免碰用户配置；
   // --settings-path 可指向 %APPDATA%\拉片软件 做真实默认路径验证。
+  // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
-  if ((settings_test || settings_expect) && settings_root.isEmpty()) {
-    settings_root = QDir::currentPath() + QStringLiteral("/build/t6.3-settings");
+  if ((settings_test || settings_expect || banner_test) && settings_root.isEmpty()) {
+    settings_root =
+        QDir::currentPath() +
+        ((settings_test || settings_expect) ? QStringLiteral("/build/t6.3-settings")
+                                           : QStringLiteral("/build/t6.5-settings"));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
   }
-  if (settings_test) {
+  if (settings_test || (banner_test && settings_path_arg.isEmpty())) {
     QDir().mkpath(settings_root);
     const QString settings_file =
         QDir(settings_root).filePath(QStringLiteral("settings.json"));
@@ -148,6 +174,25 @@ int main(int argc, char* argv[]) {
       QDir(settings_file).removeRecursively();
     } else {
       QFile::remove(settings_file);
+    }
+  }
+  if (banner_test) {
+    // 真实素材优先；缺文件时测试按 skip 处理，不阻塞其他检查。
+    const QString media_dir = QDir::currentPath() + QStringLiteral("/build/test-media");
+    if (banner_vfr.isEmpty()) {
+      banner_vfr = media_dir + QStringLiteral("/vfr.mp4");
+    }
+    if (banner_tenbit.isEmpty()) {
+      banner_tenbit = media_dir + QStringLiteral("/10bit.mp4");
+    }
+    if (banner_noaudio.isEmpty()) {
+      banner_noaudio = media_dir + QStringLiteral("/noaudio.mp4");
+    }
+    if (file_b.isEmpty()) {
+      const QString v4 = QDir::currentPath() + QStringLiteral("/media/proxy/proxy-V4.mp4");
+      if (QFileInfo::exists(v4)) {
+        file_b = v4;
+      }
     }
   }
   QString snapshot_pictures_root;
@@ -177,7 +222,8 @@ int main(int argc, char* argv[]) {
                                     snapshot_test, fullscreen_test, key_test, settings_test,
                                     settings_expect, settings_expect_volume,
                                     settings_expect_waveform, settings_root, dpi_test,
-                                    dpi_expect_scale, dpi_tag,
+                                    dpi_expect_scale, dpi_tag, banner_test, banner_tag,
+                                    banner_vfr, banner_tenbit, banner_noaudio,
                                     snapshot_pictures_root, playback_rate,
                                     has_playback_rate, process_start]() {
       window.OpenFile(file_path);
@@ -1798,6 +1844,305 @@ int main(int argc, char* argv[]) {
               });
             });
           });
+        });
+      }
+      if (banner_test) {
+        // T6.5：真实素材（4K/VFR/10-bit/无音频/错误）+ 合成全量提示，
+        // 验证同一时刻只有一条横幅、其余进状态栏、且不遮挡时间轴/帧号/播放控件。
+        auto failures = std::make_shared<int>(0);
+        auto checks = std::make_shared<int>(0);
+        struct BannerTestState {
+          int baseline_info_h = 0;
+          qint64 baseline_frame = -1;
+          bool have_4k = false;
+          bool have_vfr = false;
+          bool have_10bit = false;
+          bool have_noaudio = false;
+        };
+        auto state = std::make_shared<BannerTestState>();
+        auto banner_perf = std::make_shared<std::vector<double>>();
+        banner_perf->reserve(50);
+        const QString base_video = file_path;
+        const QString fourk_video = file_b;
+        const QString vfr_video = banner_vfr;
+        const QString tenbit_video = banner_tenbit;
+        const QString noaudio_video = banner_noaudio;
+        const QString shot_tag = banner_tag;
+        state->have_4k = !fourk_video.isEmpty() && QFileInfo(fourk_video).isFile();
+        state->have_vfr = !vfr_video.isEmpty() && QFileInfo(vfr_video).isFile();
+        state->have_10bit =
+            !tenbit_video.isEmpty() && QFileInfo(tenbit_video).isFile();
+        state->have_noaudio =
+            !noaudio_video.isEmpty() && QFileInfo(noaudio_video).isFile();
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto check = [failures, checks](const char* name, bool ok) {
+          ++(*checks);
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.5 banner_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray state_text = window.BannerStateForTest().toUtf8();
+          std::fprintf(stderr, "T6.5 banner_state %s %s\n", step,
+                       state_text.constData());
+          std::fflush(stderr);
+        };
+        auto check_layout = [&window, check, log_state](const char* phase) {
+          if (window.centralWidget() != nullptr &&
+              window.centralWidget()->layout() != nullptr) {
+            window.centralWidget()->layout()->activate();
+          }
+          log_state(phase);
+          const QStringList problems = window.LayoutProblemsForTest();
+          for (const QString& problem : problems) {
+            std::fprintf(stderr, "T6.5 banner_problem %s %s\n", phase,
+                         problem.toUtf8().constData());
+          }
+          const std::string prefix(phase);
+          check((prefix + "-layout").c_str(), problems.isEmpty());
+          const QString ui = window.BannerUiStateForTest();
+          std::fprintf(stderr, "T6.5 banner_ui %s %s\n", phase,
+                       ui.toUtf8().constData());
+          std::fflush(stderr);
+          check((prefix + "-controls").c_str(),
+                ui.contains(QStringLiteral("timeline=1")) &&
+                    ui.contains(QStringLiteral("play=1")) &&
+                    ui.contains(QStringLiteral("volume=1")) &&
+                    ui.contains(QStringLiteral("loop=1")) &&
+                    ui.contains(QStringLiteral("frame=帧")));
+          check((prefix + "-one-banner").c_str(),
+                window.BannerStateForTest().contains(QStringLiteral("banners=1")));
+        };
+        auto shot = [&window, shot_tag, check](const char* phase) {
+          const QString dir = QDir::currentPath() + QStringLiteral("/build");
+          QDir().mkpath(dir);
+          const QString tag =
+              shot_tag.isEmpty() ? QStringLiteral("x") : shot_tag;
+          const QString path = dir + QStringLiteral("/t6.5-banner-") + tag +
+                               QStringLiteral("-") + QString::fromLatin1(phase) +
+                               QStringLiteral(".png");
+          const bool saved = window.grab().save(path);
+          std::fprintf(stderr, "T6.5 banner_shot %s path=%s ok=%d\n", phase,
+                       path.toUtf8().constData(), saved ? 1 : 0);
+          std::fflush(stderr);
+          check((std::string(phase) + "-shot").c_str(), saved);
+        };
+        // 打开失败会弹模态框；测试里 250ms 兜底关闭，避免任何意外素材把进程卡住。
+        auto* watchdog = new QTimer(&window);
+        QObject::connect(watchdog, &QTimer::timeout, &window, []() {
+          auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+          if (box != nullptr) {
+            std::fprintf(stderr, "T6.5 banner_modal_closed\n");
+            std::fflush(stderr);
+            box->done(QMessageBox::Cancel);
+          }
+        });
+        watchdog->start(250);
+
+        schedule(500, [&window, state, check, check_layout, shot]() {
+          const QString banner = window.BannerStateForTest();
+          check("baseline-kind", banner.contains(QStringLiteral("kind=none")));
+          check("baseline-hidden", !banner.contains(QStringLiteral("visible=1")));
+          check("baseline-secondary", window.SecondaryStatusTextForTest().isEmpty());
+          state->baseline_info_h = window.InfoBarHeightForTest();
+          state->baseline_frame = window.CurrentFrameForTest();
+          check_layout("baseline");
+          shot("baseline");
+        });
+
+        if (state->have_4k) {
+          schedule(750, [&window, fourk_video]() { window.OpenFile(fourk_video); });
+          schedule(1250, [&window, state, check, check_layout, shot]() {
+            const QString banner = window.BannerStateForTest();
+            check("4k-kind", banner.contains(QStringLiteral("kind=out-of-range")));
+            check("4k-visible", banner.contains(QStringLiteral("visible=1")));
+            check("4k-resolution", banner.contains(QStringLiteral("3840×2160")));
+            check("4k-height",
+                  window.InfoBarHeightForTest() > state->baseline_info_h);
+            check_layout("4k");
+            shot("4k");
+          });
+        } else {
+          std::fprintf(stderr, "T6.5 banner_skip 4k\n");
+        }
+
+        if (state->have_vfr) {
+          schedule(1600, [&window, vfr_video]() { window.OpenFile(vfr_video); });
+          schedule(2100, [&window, check, check_layout, shot]() {
+            const QString banner = window.BannerStateForTest();
+            check("vfr-kind", banner.contains(QStringLiteral("kind=vfr")));
+            check("vfr-text", banner.contains(QStringLiteral("可变帧率")));
+            check("vfr-scanning-secondary",
+                  banner.contains(QStringLiteral("扫描中")));
+            check_layout("vfr");
+            shot("vfr");
+          });
+        } else {
+          std::fprintf(stderr, "T6.5 banner_skip vfr\n");
+        }
+
+        if (state->have_10bit) {
+          schedule(2400, [&window, tenbit_video]() { window.OpenFile(tenbit_video); });
+          schedule(2900, [&window, check, check_layout, shot]() {
+            const QString banner = window.BannerStateForTest();
+            check("10bit-kind", banner.contains(QStringLiteral("kind=10-bit")));
+            check("10bit-text", banner.contains(QStringLiteral("颜色")));
+            check("10bit-noaudio-secondary",
+                  banner.contains(QStringLiteral("无音频")));
+            check_layout("10bit");
+            shot("10bit");
+          });
+        } else {
+          std::fprintf(stderr, "T6.5 banner_skip 10bit\n");
+        }
+
+        if (state->have_noaudio) {
+          schedule(3200, [&window, noaudio_video]() { window.OpenFile(noaudio_video); });
+          schedule(3700, [&window, check, check_layout, shot]() {
+            const QString banner = window.BannerStateForTest();
+            check("noaudio-kind", banner.contains(QStringLiteral("kind=no-audio")));
+            check("noaudio-text", banner.contains(QStringLiteral("波形")));
+            check("noaudio-only", window.SecondaryStatusTextForTest().isEmpty());
+            check_layout("noaudio");
+            shot("noaudio");
+          });
+        } else {
+          std::fprintf(stderr, "T6.5 banner_skip noaudio\n");
+        }
+
+        schedule(4000, [&window, base_video]() { window.OpenFile(base_video); });
+        schedule(4500, [&window, check, check_layout]() {
+          const QString banner = window.BannerStateForTest();
+          check("restore-kind", banner.contains(QStringLiteral("kind=none")));
+          check("restore-secondary", window.SecondaryStatusTextForTest().isEmpty());
+          check_layout("restore");
+        });
+
+        // V8：打开不存在/损坏文件，错误横幅最高优先级，旧画面保留。
+        schedule(4700, [&window, state, check, check_layout, shot, base_video]() {
+          const QString missing = base_video + QStringLiteral(".t6.5-missing.mp4");
+          QTimer::singleShot(80, &window, []() {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (box != nullptr) {
+              box->done(QMessageBox::Cancel);
+            }
+          });
+          window.OpenFile(missing);
+          const QString banner = window.BannerStateForTest();
+          check("error-kind", banner.contains(QStringLiteral("kind=error")));
+          check("error-visible", banner.contains(QStringLiteral("visible=1")));
+          check("error-text", banner.contains(QStringLiteral("打开失败")));
+          check("error-secondary", window.SecondaryStatusTextForTest().isEmpty());
+          check("error-kept-frame",
+                window.CurrentFrameForTest() == state->baseline_frame);
+          check_layout("error");
+          shot("error");
+        });
+
+        schedule(5300, [&window, base_video]() { window.OpenFile(base_video); });
+        schedule(5800, [&window, check, check_layout]() {
+          const QString banner = window.BannerStateForTest();
+          check("error-cleared", banner.contains(QStringLiteral("kind=none")));
+          check_layout("cleared");
+        });
+
+        // 横幅切换成本（开发机探针）：setText + 重新布局激活，不含 GPU 呈现。
+        schedule(5900, [&window, banner_perf]() {
+          const QStringList scenarios[] = {
+              QStringList{QStringLiteral("vfr"), QStringLiteral("no-audio")},
+              QStringList{QStringLiteral("10-bit"), QStringLiteral("scanning")},
+              QStringList{QStringLiteral("error")},
+              QStringList{QStringLiteral("out-of-range")}};
+          QElapsedTimer timer;
+          timer.start();
+          for (int i = 0; i < 50; ++i) {
+            window.SetBannerNoticesForTest(scenarios[i % 4]);
+            if (window.centralWidget() != nullptr &&
+                window.centralWidget()->layout() != nullptr) {
+              window.centralWidget()->layout()->activate();
+            }
+            banner_perf->push_back(
+                static_cast<double>(timer.nsecsElapsed()) / 1.0e6);
+            timer.restart();
+          }
+          window.ClearBannerNoticesForTest();
+        });
+
+        // 合成全量：六类同开时只有错误横幅，其余 5 条进状态栏。
+        schedule(6000, [&window]() {
+          window.SetBannerNoticesForTest(
+              QStringList{QStringLiteral("no-audio"), QStringLiteral("scanning"),
+                          QStringLiteral("out-of-range"), QStringLiteral("10-bit"),
+                          QStringLiteral("vfr"), QStringLiteral("error")});
+        });
+        schedule(6500, [&window, check, check_layout, shot]() {
+          const QString banner = window.BannerStateForTest();
+          check("all-kind", banner.contains(QStringLiteral("kind=error")));
+          check("all-active",
+                banner.contains(QStringLiteral("no-audio")) &&
+                    banner.contains(QStringLiteral("scanning")) &&
+                    banner.contains(QStringLiteral("out-of-range")) &&
+                    banner.contains(QStringLiteral("10-bit")) &&
+                    banner.contains(QStringLiteral("vfr")));
+          check("all-secondary-count",
+                window.SecondaryStatusTextForTest().contains(QStringLiteral("等 5 条")));
+          check("all-secondary-visible",
+                window.BannerUiStateForTest().contains(QStringLiteral("notice=1")));
+          check_layout("all");
+          shot("all");
+        });
+
+        // 去掉错误后 VFR 成为唯一横幅；再压到 820 窄窗验证换行/不裁切。
+        schedule(6800, [&window]() {
+          window.SetBannerNoticesForTest(
+              QStringList{QStringLiteral("no-audio"), QStringLiteral("scanning"),
+                          QStringLiteral("out-of-range"), QStringLiteral("10-bit"),
+                          QStringLiteral("vfr")});
+        });
+        schedule(7200, [&window, check, check_layout]() {
+          const QString banner = window.BannerStateForTest();
+          check("vfr-primary", banner.contains(QStringLiteral("kind=vfr")));
+          check("vfr-secondary-count",
+                window.SecondaryStatusTextForTest().contains(QStringLiteral("等 4 条")));
+          check_layout("vfr-primary");
+          const QSize available = window.AvailableScreenForTest();
+          const int narrow_height =
+              std::min(500, std::max(360, available.height() - 64));
+          window.resize(820, narrow_height);
+        });
+        schedule(7800, [&window, check, check_layout, shot]() {
+          check("narrow-width", std::abs(window.width() - 820) <= 2);
+          check("narrow-mode", window.InfoNarrowModeForTest());
+          check("narrow-kind",
+                window.BannerStateForTest().contains(QStringLiteral("kind=vfr")));
+          check_layout("narrow");
+          shot("narrow");
+        });
+        schedule(8300, [&window, failures, checks, check, log_state,
+                        banner_perf]() {
+          log_state("final");
+          std::vector<double> samples = *banner_perf;
+          std::sort(samples.begin(), samples.end());
+          if (!samples.empty()) {
+            const double p50 = samples[samples.size() / 2];
+            const std::size_t p95_index = std::min(
+                samples.size() - 1,
+                static_cast<std::size_t>(static_cast<double>(samples.size()) * 0.95));
+            std::fprintf(stderr,
+                         "T6.5 banner_perf updates=%zu p50=%.3fms p95=%.3fms "
+                         "max=%.3fms\n",
+                         samples.size(), p50, samples[p95_index], samples.back());
+          }
+          std::fprintf(stderr,
+                       "T6.5 banner_summary checks=%d fails=%d dpr=%.2f info_h=%d\n",
+                       *checks, *failures, window.devicePixelRatioF(),
+                       window.InfoBarHeightForTest());
+          std::fflush(stderr);
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });
       }
     });

@@ -190,6 +190,7 @@ void TestV9() {
   Check(std::abs(result.info.av_offset_us) <= 42000,
         "V9 首包 PTS+priming 与视频对齐（≤1 帧）");
   Check(result.info.rotation.counterclockwise_degrees == 0, "V9 无旋转");
+  Check(result.info.video.bit_depth == 8, "V9 位深 8-bit");
   Check(!result.info.vfr.suspect, "V9 不误报 VFR");
   Check(result.info.duration_us >= 4000000 && result.info.duration_us <= 6000000,
         "V9 时长约 5 秒");
@@ -219,6 +220,17 @@ void TestProxies() {
     Check(v4.info.video.codec.find("h264") != std::string::npos, "proxy-V4 H.264");
     Check(v4.info.has_audio, "proxy-V4 有音轨");
   }
+}
+
+void TestHighBitDepthFixture() {
+  lapian::media::MediaProbeResult result;
+  if (!ProbeFixture("build/test-media/10bit.mp4", &result)) {
+    return;
+  }
+  Check(result.info.video.pixel_format.find("10") != std::string::npos,
+        "10bit 素材像素格式带 10");
+  Check(result.info.video.bit_depth == 10, "T6.5 探测到 10-bit 位深");
+  Check(!result.info.has_audio, "10bit 素材无音轨（同时覆盖无音频提示）");
 }
 
 void TestUnicodePath() {
@@ -257,6 +269,7 @@ int main() {
   TestErrorCases();
   TestV9();
   TestProxies();
+  TestHighBitDepthFixture();
   TestUnicodePath();
 
   if (g_failures > 0) {

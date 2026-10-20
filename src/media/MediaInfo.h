@@ -30,6 +30,8 @@ struct VideoStreamInfo {
   int width = 0;
   int height = 0;
   std::string pixel_format;
+  // T6.5：探测阶段就能判断 10-bit，不依赖首帧解码。默认 8，无法判断时保守按 8。
+  int bit_depth = 8;
   Rational average_frame_rate;
   Rational real_frame_rate;
   Rational frame_rate;

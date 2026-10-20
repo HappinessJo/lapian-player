@@ -11,6 +11,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -19,6 +20,10 @@ QString FormatFps(const lapian::core::FrameRate& rate) {
     return QStringLiteral("—");
   }
   return QString::number(rate.ToDouble(), 'f', 3);
+}
+
+QString FromUtf8(const std::string& text) {
+  return QString::fromUtf8(text.data(), static_cast<int>(text.size()));
 }
 
 }  // namespace
@@ -59,10 +64,15 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
 
   root->addLayout(grid_);
 
+  // T6.5：唯一横幅。六类提示共享这一个 QLabel，天然不会叠 banner；
+  // 参与 root 纵向布局，出现时把时间轴/画面向上推，而不是覆盖它们。
   banner_label_ = new QLabel(this);
   banner_label_->setObjectName(QStringLiteral("infoBanner"));
-  banner_label_->setStyleSheet(
-      QStringLiteral("background:#4a3600; color:#ffd37a; padding:2px 6px;"));
+  banner_label_->setTextFormat(Qt::PlainText);
+  banner_label_->setWordWrap(true);
+  banner_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  banner_label_->setMinimumWidth(0);
+  banner_label_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
   banner_label_->hide();
   root->addWidget(banner_label_);
 
@@ -74,6 +84,9 @@ void InfoBar::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   UpdateLayoutMode();
   UpdateFileText();
+  if (banner_label_ != nullptr) {
+    banner_label_->updateGeometry();
+  }
 }
 
 void InfoBar::UpdateLayoutMode() {
@@ -129,23 +142,74 @@ QString InfoBar::FileLabelTextForTest() const {
   return file_label_ == nullptr ? QString() : file_label_->text();
 }
 
+QString InfoBar::BannerKindForTest() const {
+  if (primary_index_ == lapian::media::kNoNotice ||
+      primary_index_ >= notices_.size()) {
+    return QStringLiteral("none");
+  }
+  return QString::fromLatin1(
+      lapian::media::StatusNoticeKindName(notices_[primary_index_].kind));
+}
+
+QString InfoBar::BannerTextForTest() const {
+  return banner_label_ == nullptr ? QString() : banner_label_->text();
+}
+
+QString InfoBar::BannerTooltipForTest() const {
+  return banner_label_ == nullptr ? QString() : banner_label_->toolTip();
+}
+
+bool InfoBar::BannerVisibleForTest() const {
+  return banner_label_ != nullptr && banner_label_->isVisible();
+}
+
+QRect InfoBar::BannerGeometryForTest() const {
+  return banner_label_ == nullptr ? QRect() : banner_label_->geometry();
+}
+
+QString InfoBar::SecondarySummaryForTest() const {
+  return FromUtf8(lapian::media::SecondaryNoticeSummary(notices_, primary_index_));
+}
+
+QString InfoBar::SecondaryTooltipForTest() const {
+  return FromUtf8(
+      lapian::media::SecondaryNoticeTooltip(notices_, primary_index_));
+}
+
+QStringList InfoBar::ActiveNoticeKindsForTest() const {
+  QStringList kinds;
+  for (const lapian::media::StatusNotice& notice : notices_) {
+    kinds << QString::fromLatin1(lapian::media::StatusNoticeKindName(notice.kind));
+  }
+  return kinds;
+}
+
 void InfoBar::Clear() {
   rate_ = lapian::core::FrameRate();
   vfr_ = false;
+  has_media_ = false;
+  scanning_ = false;
+  synthetic_ = false;
+  error_text_.clear();
+  info_ = lapian::media::MediaInfo{};
   file_name_.clear();
   file_label_->setText(QStringLiteral("未打开文件"));
   format_label_->clear();
   frame_label_->setText(QStringLiteral("帧 —"));
   timecode_label_->setText(QStringLiteral("--:--:--:--"));
   total_label_->clear();
-  banner_label_->clear();
-  banner_label_->hide();
+  UpdateNotices();
   UpdateFileText();
 }
 
 void InfoBar::SetMedia(const lapian::media::MediaInfo& info, bool vfr) {
-  rate_ = lapian::core::FrameRate(info.video.frame_rate.num, info.video.frame_rate.den);
+  info_ = info;
+  has_media_ = true;
   vfr_ = vfr;
+  scanning_ = false;
+  synthetic_ = false;
+  error_text_.clear();
+  rate_ = lapian::core::FrameRate(info.video.frame_rate.num, info.video.frame_rate.den);
 
   const QString path = QString::fromUtf8(info.path_utf8.c_str());
   file_name_ = QFileInfo(path).fileName();
@@ -175,18 +239,107 @@ void InfoBar::SetFrame(int frame_index) {
 void InfoBar::SetTotal(const lapian::core::TotalFrameCount& total) {
   total_label_->setText(QStringLiteral("总帧数 %1")
                             .arg(QString::fromStdString(total.Display())));
+  scanning_ = total.state() == lapian::core::TotalFramesState::kScanning;
+  UpdateNotices();
+}
 
-  if (vfr_) {
-    banner_label_->setText(QStringLiteral(
-        "可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"));
-    banner_label_->show();
-  } else if (total.state() == lapian::core::TotalFramesState::kScanning) {
-    banner_label_->setText(QStringLiteral("总帧数扫描中…"));
-    banner_label_->show();
-  } else {
-    banner_label_->clear();
-    banner_label_->hide();
+void InfoBar::SetError(const QString& message) {
+  error_text_ = message;
+  synthetic_ = false;
+  UpdateNotices();
+}
+
+void InfoBar::ClearError() {
+  if (error_text_.isEmpty()) {
+    return;
   }
+  error_text_.clear();
+  UpdateNotices();
+}
+
+void InfoBar::UpdateNotices() {
+  if (synthetic_) {
+    ApplyNotices();
+    return;
+  }
+
+  notices_.clear();
+  if (has_media_) {
+    notices_ = lapian::media::BuildMediaStatusNotices(info_, vfr_, scanning_);
+  }
+  const QString trimmed = error_text_.trimmed();
+  if (!trimmed.isEmpty()) {
+    const QString first_line = trimmed.section(QChar('\n'), 0, 0).trimmed();
+    lapian::media::StatusNotice notice =
+        lapian::media::MakeStatusNotice(lapian::media::StatusNoticeKind::kError);
+    notice.text = QStringLiteral("打开失败：%1").arg(first_line).toStdString();
+    notice.detail = trimmed.toStdString();
+    notices_.push_back(std::move(notice));
+  }
+  ApplyNotices();
+}
+
+void InfoBar::ApplyNotices() {
+  primary_index_ = lapian::media::SelectPrimaryNotice(notices_);
+  if (primary_index_ == lapian::media::kNoNotice ||
+      primary_index_ >= notices_.size()) {
+    banner_label_->clear();
+    banner_label_->setToolTip(QString());
+    banner_label_->hide();
+  } else {
+    const lapian::media::StatusNotice& notice = notices_[primary_index_];
+    banner_label_->setText(FromUtf8(notice.text));
+    banner_label_->setToolTip(
+        FromUtf8(notice.detail.empty() ? notice.text : notice.detail));
+    UpdateBannerStyle(notice.kind);
+    banner_label_->show();
+  }
+  emit noticesChanged();
+}
+
+void InfoBar::UpdateBannerStyle(lapian::media::StatusNoticeKind kind) {
+  QString style;
+  switch (kind) {
+    case lapian::media::StatusNoticeKind::kError:
+      style = QStringLiteral(
+          "background:#4a1616; color:#ffc4c4; padding:3px 6px; "
+          "border-top:1px solid #7a2a2a;");
+      break;
+    case lapian::media::StatusNoticeKind::kNoAudio:
+    case lapian::media::StatusNoticeKind::kScanning:
+      style = QStringLiteral(
+          "background:#1f2a36; color:#bcd6ee; padding:3px 6px; "
+          "border-top:1px solid #2f4358;");
+      break;
+    case lapian::media::StatusNoticeKind::kOutOfGuarantee:
+    case lapian::media::StatusNoticeKind::kTenBit:
+    case lapian::media::StatusNoticeKind::kVfr:
+      style = QStringLiteral(
+          "background:#4a3600; color:#ffd37a; padding:3px 6px; "
+          "border-top:1px solid #6a5200;");
+      break;
+  }
+  banner_label_->setStyleSheet(style);
+}
+
+void InfoBar::SetSyntheticNoticesForTest(const QStringList& kinds) {
+  synthetic_ = true;
+  notices_.clear();
+  for (const QString& name : kinds) {
+    lapian::media::StatusNoticeKind kind = lapian::media::StatusNoticeKind::kNoAudio;
+    if (lapian::media::ParseStatusNoticeKind(name.toStdString(), &kind)) {
+      notices_.push_back(lapian::media::MakeStatusNotice(kind));
+    }
+  }
+  ApplyNotices();
+}
+
+void InfoBar::ClearSyntheticNoticesForTest() {
+  if (!synthetic_) {
+    return;
+  }
+  synthetic_ = false;
+  UpdateNotices();
 }
 
 void InfoBar::UpdateTimecode(int frame_index) {

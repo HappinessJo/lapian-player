@@ -344,6 +344,15 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   preview_timer_->setTimerType(Qt::PreciseTimer);
   connect(preview_timer_, &QTimer::timeout, this, &MainWindow::OnPreviewTick);
 
+  // T6.5：InfoBar 只显示一条横幅；其余状态提示汇总到这里，常驻状态栏。
+  notice_label_ = new QLabel(this);
+  notice_label_->setObjectName(QStringLiteral("noticeInfo"));
+  notice_label_->setStyleSheet(QStringLiteral("color:#e8c46a;"));
+  notice_label_->setMaximumWidth(240);
+  notice_label_->setToolTip(QStringLiteral("其他状态提示"));
+  notice_label_->hide();
+  statusBar()->addPermanentWidget(notice_label_);
+
   audio_label_ = new QLabel(QStringLiteral("无音频"), this);
   audio_label_->setObjectName(QStringLiteral("audioInfo"));
   audio_label_->setToolTip(QStringLiteral("音频轨道与输出状态"));
@@ -387,6 +396,9 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   status_label_->setObjectName(QStringLiteral("statusInfo"));
   status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
   statusBar()->addPermanentWidget(status_label_);
+
+  connect(info_bar_, &InfoBar::noticesChanged, this, &MainWindow::UpdateStatusNotices);
+  UpdateStatusNotices();
 
   audio_status_timer_ = new QTimer(this);
   audio_status_timer_->setInterval(200);
@@ -614,6 +626,77 @@ bool MainWindow::InfoNarrowModeForTest() const {
   return info_bar_ != nullptr && info_bar_->NarrowModeForTest();
 }
 
+void MainWindow::SetBannerNoticesForTest(const QStringList& kinds) {
+  if (info_bar_ != nullptr) {
+    info_bar_->SetSyntheticNoticesForTest(kinds);
+  }
+}
+
+void MainWindow::ClearBannerNoticesForTest() {
+  if (info_bar_ != nullptr) {
+    info_bar_->ClearSyntheticNoticesForTest();
+  }
+}
+
+QString MainWindow::BannerStateForTest() const {
+  if (info_bar_ == nullptr) {
+    return QStringLiteral("none");
+  }
+  const QRect banner = info_bar_->BannerGeometryForTest();
+  const int banner_count =
+      info_bar_->findChildren<QLabel*>(QStringLiteral("infoBanner")).size();
+  return QStringLiteral(
+             "kind=%1 visible=%2 banners=%3 text=%4 banner=%5,%6 %7x%8 info_h=%9 "
+             "secondary=%10 active=%11")
+      .arg(info_bar_->BannerKindForTest())
+      .arg(info_bar_->BannerVisibleForTest() ? 1 : 0)
+      .arg(banner_count)
+      .arg(info_bar_->BannerTextForTest())
+      .arg(banner.x())
+      .arg(banner.y())
+      .arg(banner.width())
+      .arg(banner.height())
+      .arg(info_bar_->height())
+      .arg(info_bar_->SecondarySummaryForTest())
+      .arg(info_bar_->ActiveNoticeKindsForTest().join(QLatin1Char(',')));
+}
+
+QString MainWindow::BannerUiStateForTest() const {
+  return QStringLiteral("timeline=%1 frame=%2 play=%3 volume=%4 loop=%5 notice=%6")
+      .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0)
+      .arg(InfoFrameTextForTest())
+      .arg(play_action_ != nullptr && play_action_->isEnabled() ? 1 : 0)
+      .arg(volume_slider_ != nullptr && volume_slider_->isVisible() ? 1 : 0)
+      .arg(loop_label_ != nullptr && loop_label_->isVisible() ? 1 : 0)
+      .arg(notice_label_ != nullptr && notice_label_->isVisible() ? 1 : 0);
+}
+
+QString MainWindow::SecondaryStatusTextForTest() const {
+  return notice_label_ == nullptr ? QString() : notice_label_->text();
+}
+
+int MainWindow::InfoBarHeightForTest() const {
+  return info_bar_ == nullptr ? 0 : info_bar_->height();
+}
+
+void MainWindow::UpdateStatusNotices() {
+  if (notice_label_ == nullptr || info_bar_ == nullptr) {
+    return;
+  }
+  const QString summary = info_bar_->SecondarySummaryForTest();
+  const QString tooltip = info_bar_->SecondaryTooltipForTest();
+  const int available = std::max(0, notice_label_->maximumWidth() - 6);
+  const QString shown =
+      summary.isEmpty()
+          ? QString()
+          : notice_label_->fontMetrics().elidedText(summary, Qt::ElideRight, available);
+  notice_label_->setText(shown);
+  notice_label_->setToolTip(tooltip.isEmpty()
+                                ? QStringLiteral("其他状态提示")
+                                : tooltip);
+  notice_label_->setVisible(!summary.isEmpty());
+}
+
 QString MainWindow::LayoutStateForTest() const {
   auto rect_text = [](const QRect& rect) {
     return QStringLiteral("%1,%2 %3x%4")
@@ -660,7 +743,8 @@ QString MainWindow::LayoutStateForTest() const {
   }
   if (statusBar() != nullptr) {
     parts << QStringLiteral("status=%1").arg(rect_text(statusBar()->geometry()));
-    for (QWidget* widget : {static_cast<QWidget*>(audio_label_),
+    for (QWidget* widget : {static_cast<QWidget*>(notice_label_),
+                            static_cast<QWidget*>(audio_label_),
                             static_cast<QWidget*>(speed_label_),
                             static_cast<QWidget*>(loop_label_),
                             static_cast<QWidget*>(waveform_label_),
@@ -768,11 +852,43 @@ QStringList MainWindow::LayoutProblemsForTest() const {
           file_label->width() + 2) {
     problems << QStringLiteral("file-label-clipped");
   }
+  QLabel* banner_label = info_bar_ == nullptr
+                             ? nullptr
+                             : info_bar_->findChild<QLabel*>(
+                                   QStringLiteral("infoBanner"));
+  if (banner_label != nullptr && banner_label->isVisible()) {
+    if (banner_label->height() < banner_label->fontMetrics().height()) {
+      problems << QStringLiteral("banner-clipped");
+    }
+    if (banner_label->hasHeightForWidth() &&
+        banner_label->heightForWidth(banner_label->width()) >
+            banner_label->height() + 2) {
+      problems << QStringLiteral("banner-text-clipped");
+    }
+    auto global_rect = [](QWidget* widget) {
+      return QRect(widget->mapToGlobal(QPoint(0, 0)), widget->size());
+    };
+    const QRect banner_rect = global_rect(banner_label);
+    QLabel* frame_label =
+        info_bar_->findChild<QLabel*>(QStringLiteral("infoFrame"));
+    if (frame_label != nullptr && frame_label->isVisible() &&
+        banner_rect.intersects(global_rect(frame_label))) {
+      problems << QStringLiteral("banner-overlaps-frame");
+    }
+    if (timeline_ != nullptr && timeline_->isVisible() &&
+        banner_rect.intersects(global_rect(timeline_))) {
+      problems << QStringLiteral("banner-overlaps-timeline");
+    }
+    if (statusBar() != nullptr &&
+        banner_rect.intersects(global_rect(statusBar()))) {
+      problems << QStringLiteral("banner-overlaps-status");
+    }
+  }
 
   if (statusBar() != nullptr) {
     const std::vector<QWidget*> status_widgets = {
-        audio_label_, speed_label_, loop_label_, waveform_label_, volume_slider_,
-        status_label_};
+        notice_label_, audio_label_, speed_label_, loop_label_, waveform_label_,
+        volume_slider_, status_label_};
     for (QWidget* widget : status_widgets) {
       if (widget == nullptr || !widget->isVisible()) {
         continue;
@@ -2372,6 +2488,9 @@ void MainWindow::OnPlaybackEnded() {
 
 void MainWindow::ShowOpenError(const QString& message) {
   qWarning() << "打开失败:" << message;
+  if (info_bar_ != nullptr) {
+    info_bar_->SetError(message);
+  }
   statusBar()->showMessage(message);
   QMessageBox::warning(this, QStringLiteral("打开失败"), message);
 }
