@@ -65,6 +65,8 @@ struct AudioEngine::Impl {
   double play_target = 0.0;
   std::atomic<bool> want_play{false};
   std::atomic<std::uint64_t> seek_serial{0};
+  std::atomic<double> requested_rate{1.0};
+  std::atomic<std::uint64_t> rate_serial{0};
   std::atomic<int> volume{100};
   std::atomic<bool> muted{false};
   std::atomic<double> clock_seconds{0.0};
@@ -77,6 +79,8 @@ struct AudioEngine::Impl {
   WasapiRenderer renderer;
   AudioRingBuffer ring;
   std::vector<float> scratch;
+  std::vector<float> last_frame;
+  std::size_t fade_in_remaining = 0;
 
   bool ready = false;
   bool playing = false;
@@ -84,6 +88,8 @@ struct AudioEngine::Impl {
   bool device_retry = false;
   std::chrono::steady_clock::time_point next_retry;
   std::uint64_t handled_serial = 0;
+  std::uint64_t handled_rate_serial = 0;
+  double rate = 1.0;
   double anchor_seconds = 0.0;
   double position_seconds = 0.0;
   std::uint64_t frames_since_start = 0;
@@ -96,6 +102,18 @@ struct AudioEngine::Impl {
 
   int sample_rate() const { return renderer.device_info().format.sample_rate; }
   int channels() const { return renderer.device_info().format.channels; }
+
+  // 为了“音高随速度变化”，把源重采样到 device_rate / rate：
+  // 2x -> 24k 输出、设备 48k 播放 -> 时长减半、音高升高；0.25x 反之。
+  int OutputSampleRate() const {
+    const int device_rate = sample_rate();
+    if (device_rate <= 0) {
+      return 0;
+    }
+    const double divisor = rate > 0.0 ? rate : 1.0;
+    return std::max(1, static_cast<int>(std::lround(
+                           static_cast<double>(device_rate) / divisor)));
+  }
 
   void Publish(AudioState state, std::string message) {
     AudioLog("audio state=%d message=%s", static_cast<int>(state), message.c_str());
@@ -135,6 +153,9 @@ struct AudioEngine::Impl {
       renderer.Shutdown();
       return false;
     }
+    rate = requested_rate.load();
+    AudioFormat output = format;
+    output.sample_rate = OutputSampleRate();
     AudioLog("audio device: %d Hz %d ch %s buffer=%u clock_freq=%llu", format.sample_rate,
              format.channels,
              format.encoding == SampleEncoding::kFloat32 ? "float32" : "pcm16",
@@ -147,13 +168,14 @@ struct AudioEngine::Impl {
     scratch.resize(static_cast<std::size_t>(renderer.device_info().buffer_frames) *
                    static_cast<std::size_t>(format.channels));
 
-    if (!decoder.Open(path, stream_index, format, error)) {
+    if (!decoder.Open(path, stream_index, output, error)) {
       *decoder_failed = true;
       renderer.Shutdown();
       return false;
     }
-    AudioLog("audio decoder: %s %d Hz %d ch", decoder.info().codec.c_str(),
-             decoder.info().source_sample_rate, decoder.info().source_channels);
+    AudioLog("audio decoder: %s %d Hz %d ch -> %d Hz", decoder.info().codec.c_str(),
+             decoder.info().source_sample_rate, decoder.info().source_channels,
+             output.sample_rate);
     return true;
   }
 
@@ -229,8 +251,9 @@ struct AudioEngine::Impl {
     }
     const double seconds =
         clock_anchor_seconds +
-        static_cast<double>(position - clock_base_frames) /
-            static_cast<double>(clock_frequency > 0 ? clock_frequency : sample_rate());
+        (static_cast<double>(position - clock_base_frames) /
+         static_cast<double>(clock_frequency > 0 ? clock_frequency : sample_rate())) *
+            rate;
 
     // 设备时钟若发生秒级跳变（驱动重置/累计位置混用），重新锚定而不是让
     // 视频跳一大段；正常播放不会触发。
@@ -248,14 +271,89 @@ struct AudioEngine::Impl {
     }
   }
 
+  void ApplyFadeIn(float* samples, std::size_t frames, int channel_count) {
+    if (fade_in_remaining == 0 || channel_count <= 0) {
+      return;
+    }
+    const std::size_t total =
+        static_cast<std::size_t>(sample_rate()) * 5 / 1000;  // 5ms
+    if (total == 0) {
+      fade_in_remaining = 0;
+      return;
+    }
+    for (std::size_t frame = 0; frame < frames && fade_in_remaining > 0;
+         ++frame) {
+      const float gain =
+          1.0f - static_cast<float>(fade_in_remaining) / static_cast<float>(total);
+      for (int channel = 0; channel < channel_count; ++channel) {
+        samples[frame * static_cast<std::size_t>(channel_count) +
+                static_cast<std::size_t>(channel)] *= gain;
+      }
+      --fade_in_remaining;
+    }
+  }
+
+  void StoreLastFrame(const float* samples, std::size_t frames, int channel_count) {
+    if (samples == nullptr || frames == 0 || channel_count <= 0) {
+      return;
+    }
+    last_frame.resize(static_cast<std::size_t>(channel_count));
+    const std::size_t offset =
+        (frames - 1) * static_cast<std::size_t>(channel_count);
+    for (int channel = 0; channel < channel_count; ++channel) {
+      last_frame[static_cast<std::size_t>(channel)] =
+          samples[offset + static_cast<std::size_t>(channel)];
+    }
+  }
+
+  // 变速/暂停/切文件前写入 5ms 衰减，降低截断波形造成的爆音；
+  // 更完整的步进/拖动淡入淡出仍在 T3.7。
+  void FadeOut() {
+    if (!playing || !ready || !renderer.IsOpen() || last_frame.empty()) {
+      return;
+    }
+    std::uint32_t padding = 0;
+    std::string error;
+    if (!renderer.Padding(&padding, &error)) {
+      return;
+    }
+    const std::uint32_t buffer_frames = renderer.device_info().buffer_frames;
+    const std::uint32_t space =
+        buffer_frames > padding ? buffer_frames - padding : 0;
+    const std::size_t fade_frames = std::min<std::size_t>(
+        static_cast<std::size_t>(space),
+        static_cast<std::size_t>(sample_rate()) * 5 / 1000);
+    if (fade_frames < 2) {
+      return;
+    }
+    const int channel_count = channels();
+    scratch.resize(fade_frames * static_cast<std::size_t>(channel_count));
+    for (std::size_t frame = 0; frame < fade_frames; ++frame) {
+      const float gain =
+          1.0f - static_cast<float>(frame) / static_cast<float>(fade_frames - 1);
+      for (int channel = 0; channel < channel_count; ++channel) {
+        scratch[frame * static_cast<std::size_t>(channel_count) +
+                static_cast<std::size_t>(channel)] =
+            last_frame[static_cast<std::size_t>(channel)] * gain;
+      }
+    }
+    if (renderer.WriteFrames(scratch.data(), fade_frames, &error)) {
+      frames_since_start += fade_frames;
+      last_frame.assign(static_cast<std::size_t>(channel_count), 0.0f);
+    }
+  }
+
   void StopPlayback(bool publish_status) {
     if (playing && ready && renderer.IsOpen()) {
+      FadeOut();
       std::uint32_t padding = 0;
       std::string error;
       if (renderer.Padding(&padding, &error) && frames_since_start >= padding) {
         position_seconds =
-            anchor_seconds + static_cast<double>(frames_since_start - padding) /
-                                 static_cast<double>(sample_rate());
+            anchor_seconds +
+            (static_cast<double>(frames_since_start - padding) /
+             static_cast<double>(sample_rate())) *
+                rate;
       }
       renderer.Stop();
       renderer.Reset();
@@ -263,6 +361,7 @@ struct AudioEngine::Impl {
     ring.Clear();
     decoder_eof = false;
     playing = false;
+    fade_in_remaining = 0;
     clock_valid.store(false);
     if (publish_status) {
       Publish(AudioState::kPaused, "已暂停");
@@ -290,8 +389,19 @@ struct AudioEngine::Impl {
       return false;
     }
     StopPlayback(false);
+    rate = requested_rate.load();
+    if (!std::isfinite(rate) || rate <= 0.0) {
+      rate = 1.0;
+    }
 
     std::string error;
+    AudioFormat output = renderer.device_info().format;
+    output.sample_rate = OutputSampleRate();
+    if (!decoder.SetOutputFormat(output, &error)) {
+      want_play.store(false);
+      Publish(AudioState::kError, error);
+      return false;
+    }
     if (!decoder.SeekTo(target, &error)) {
       want_play.store(false);
       Publish(AudioState::kError, error);
@@ -328,7 +438,9 @@ struct AudioEngine::Impl {
     clock_failures = 0;
     playing = true;
     handled_serial = serial;
-    AudioLog("audio start: target=%.3fs clock=wait", target);
+    fade_in_remaining = static_cast<std::size_t>(sample_rate()) * 5 / 1000;
+    last_frame.assign(static_cast<std::size_t>(channels()), 0.0f);
+    AudioLog("audio start: target=%.3fs rate=%.2fx clock=wait", target, rate);
     Publish(AudioState::kPlaying, "播放中");
     return true;
   }
@@ -432,6 +544,8 @@ struct AudioEngine::Impl {
       return;
     }
     ApplyGain(scratch.data(), frames * static_cast<std::size_t>(channel_count));
+    ApplyFadeIn(scratch.data(), frames, channel_count);
+    StoreLastFrame(scratch.data(), frames, channel_count);
 
     if (!renderer.WriteFrames(scratch.data(), frames, &error)) {
       if (renderer.IsDeviceLost()) {
@@ -447,7 +561,8 @@ struct AudioEngine::Impl {
     const std::uint64_t played =
         frames_since_start > padding ? frames_since_start - padding : 0;
     position_seconds =
-        anchor_seconds + static_cast<double>(played) / static_cast<double>(sample_rate());
+        anchor_seconds +
+        (static_cast<double>(played) / static_cast<double>(sample_rate())) * rate;
     frames_since_start += frames;
     UpdateClock();
     PublishPosition();
@@ -467,6 +582,8 @@ struct AudioEngine::Impl {
       bool do_open = false;
       bool do_play = false;
       bool do_pause = false;
+      bool do_rate = false;
+      double new_rate = 1.0;
       double target = 0.0;
       std::uint64_t serial = 0;
 
@@ -478,6 +595,12 @@ struct AudioEngine::Impl {
         if (open_requested) {
           open_requested = false;
           do_open = true;
+        }
+        const std::uint64_t current_rate_serial = rate_serial.load();
+        if (current_rate_serial != handled_rate_serial) {
+          do_rate = true;
+          new_rate = requested_rate.load();
+          handled_rate_serial = current_rate_serial;
         }
         const bool want = want_play.load();
         const std::uint64_t current_serial = seek_serial.load();
@@ -497,6 +620,16 @@ struct AudioEngine::Impl {
       }
       if (do_pause) {
         StopPlayback(true);
+      }
+      if (do_rate) {
+        if (playing) {
+          const double resume_target =
+              clock_valid.load() ? clock_seconds.load() : position_seconds;
+          rate = new_rate;
+          StartPlayback(resume_target, handled_serial);
+        } else {
+          rate = new_rate;
+        }
       }
       if (do_play && ready) {
         StartPlayback(target, serial);
@@ -557,6 +690,8 @@ bool AudioEngine::Open(const std::string& utf8_path, int stream_index) {
     impl_->decoder_eof = false;
     impl_->device_retry = false;
     impl_->handled_serial = 0;
+    impl_->handled_rate_serial = 0;
+    impl_->rate = impl_->requested_rate.load();
     impl_->frames_since_start = 0;
     impl_->position_seconds = 0.0;
     impl_->underruns = 0;
@@ -612,6 +747,18 @@ void AudioEngine::PlayFrom(double media_seconds) {
 void AudioEngine::Pause() {
   impl_->clock_valid.store(false);
   impl_->want_play.store(false);
+  impl_->cv.notify_all();
+}
+
+void AudioEngine::SetRate(double rate) {
+  if (!std::isfinite(rate) || rate <= 0.0) {
+    rate = 1.0;
+  }
+  const double clamped = std::clamp(rate, 0.25, 2.0);
+  impl_->requested_rate.store(clamped);
+  impl_->rate_serial.fetch_add(1);
+  impl_->clock_valid.store(false);
+  AudioLog("audio rate=%.2fx", clamped);
   impl_->cv.notify_all();
 }
 

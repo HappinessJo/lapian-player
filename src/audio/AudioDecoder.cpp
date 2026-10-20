@@ -52,6 +52,8 @@ struct AudioDecoder::Impl {
 
   int stream_index = -1;
   AudioFormat output_format;
+  AVChannelLayout input_layout{};
+  bool has_input_layout = false;
   std::vector<float> output;
   std::int64_t discard_until_us = 0;
   std::int64_t next_pts_us = kNoPts;
@@ -63,9 +65,43 @@ struct AudioDecoder::Impl {
 
   bool IsOpen() const { return format != nullptr && codec != nullptr && stream != nullptr; }
 
+  bool ConfigureOutput(const AudioFormat& desired, std::string* error) {
+    if (!IsOpen() || !has_input_layout) {
+      *error = "音频解码器未打开";
+      return false;
+    }
+    if (!desired.valid()) {
+      *error = "音频输出格式无效";
+      return false;
+    }
+
+    swr_free(&swr);
+    AVChannelLayout output_layout{};
+    av_channel_layout_default(&output_layout, desired.channels);
+    const int ret = swr_alloc_set_opts2(
+        &swr, &output_layout, AV_SAMPLE_FMT_FLT, desired.sample_rate, &input_layout,
+        codec->sample_fmt, codec->sample_rate, 0, nullptr);
+    av_channel_layout_uninit(&output_layout);
+    if (ret < 0 || swr == nullptr) {
+      *error = "创建音频重采样器失败: " + AvErrorText(ret);
+      return false;
+    }
+    if (swr_init(swr) < 0) {
+      *error = "初始化音频重采样器失败";
+      swr_free(&swr);
+      return false;
+    }
+    output_format = desired;
+    return true;
+  }
+
   void Close() {
     if (swr != nullptr) {
       swr_free(&swr);
+    }
+    if (has_input_layout) {
+      av_channel_layout_uninit(&input_layout);
+      has_input_layout = false;
     }
     if (frame != nullptr) {
       av_frame_free(&frame);
@@ -437,21 +473,9 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
                                                  ? parameters->ch_layout.nb_channels
                                                  : 1);
   }
-  AVChannelLayout output_layout{};
-  av_channel_layout_default(&output_layout, output_format.channels);
-  ret = swr_alloc_set_opts2(&impl_->swr, &output_layout, AV_SAMPLE_FMT_FLT,
-                            output_format.sample_rate, &input_layout, impl_->codec->sample_fmt,
-                            impl_->codec->sample_rate, 0, nullptr);
-  av_channel_layout_uninit(&input_layout);
-  av_channel_layout_uninit(&output_layout);
-  if (ret < 0 || impl_->swr == nullptr) {
-    *error = "创建音频重采样器失败: " + AvErrorText(ret);
-    impl_->Close();
-    return false;
-  }
-  ret = swr_init(impl_->swr);
-  if (ret < 0) {
-    *error = "初始化音频重采样器失败: " + AvErrorText(ret);
+  impl_->input_layout = input_layout;
+  impl_->has_input_layout = true;
+  if (!impl_->ConfigureOutput(output_format, error)) {
     impl_->Close();
     return false;
   }
@@ -515,6 +539,30 @@ AudioDecodeResult AudioDecoder::DecodeChunk(std::size_t max_frames, AudioChunk* 
     ended_ = true;
   }
   return result;
+}
+
+bool AudioDecoder::SetOutputFormat(const AudioFormat& output_format, std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  error->clear();
+  if (impl_ == nullptr || !impl_->IsOpen()) {
+    *error = "音频解码器未打开";
+    return false;
+  }
+  if (!impl_->ConfigureOutput(output_format, error)) {
+    return false;
+  }
+  av_packet_unref(impl_->packet);
+  av_frame_unref(impl_->frame);
+  impl_->packet_valid = false;
+  impl_->demux_eof = false;
+  impl_->drain_sent = false;
+  impl_->resampler_drained = false;
+  impl_->next_pts_us = kNoPts;
+  impl_->discard_until_us = 0;
+  ended_ = false;
+  return true;
 }
 
 }  // namespace lapian::audio

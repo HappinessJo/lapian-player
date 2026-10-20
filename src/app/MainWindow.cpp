@@ -29,6 +29,8 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -43,6 +45,7 @@ extern "C" {
 #include "app/TimelineWidget.h"
 #include "audio/AudioEngine.h"
 #include "core/FrameMath.h"
+#include "core/MediaClock.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
 #include "media/PreviewDecoder.h"
@@ -57,6 +60,10 @@ QString DescribeAudioChannels(int channels) {
     return QStringLiteral("立体声");
   }
   return QStringLiteral("%1 声道").arg(channels);
+}
+
+QString FormatSpeed(double rate) {
+  return QString::number(rate, 'g', 3) + QStringLiteral("x");
 }
 
 QString DescribeProbeError(lapian::media::MediaProbeError error) {
@@ -146,6 +153,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(zoom_out_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineOut);
   addAction(zoom_out_action_);
 
+  slower_action_ = new QAction(QStringLiteral("减速"), this);
+  slower_action_->setShortcut(Qt::Key_BracketLeft);
+  slower_action_->setShortcutContext(Qt::WindowShortcut);
+  slower_action_->setEnabled(false);
+  connect(slower_action_, &QAction::triggered, this, &MainWindow::SpeedDown);
+  addAction(slower_action_);
+
+  faster_action_ = new QAction(QStringLiteral("加速"), this);
+  faster_action_->setShortcut(Qt::Key_BracketRight);
+  faster_action_->setShortcutContext(Qt::WindowShortcut);
+  faster_action_->setEnabled(false);
+  connect(faster_action_, &QAction::triggered, this, &MainWindow::SpeedUp);
+  addAction(faster_action_);
+
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
   connect(playback_.get(), &PlaybackController::stateChanged, this,
@@ -161,6 +182,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   audio_label_->setObjectName(QStringLiteral("audioInfo"));
   audio_label_->setToolTip(QStringLiteral("音频轨道与输出状态"));
   statusBar()->addPermanentWidget(audio_label_);
+
+  speed_label_ = new QLabel(QStringLiteral("1x"), this);
+  speed_label_->setObjectName(QStringLiteral("speedInfo"));
+  speed_label_->setToolTip(QStringLiteral("播放速度（[ / ] 调整）"));
+  statusBar()->addPermanentWidget(speed_label_);
 
   volume_slider_ = new QSlider(Qt::Horizontal, this);
   volume_slider_->setRange(0, 100);
@@ -218,6 +244,11 @@ void MainWindow::ShowEmptyState() {
     playback_->Pause();
     playback_->SetAudioEngine(nullptr);
     playback_->SetSession(nullptr);
+    playback_->SetRate(1.0);
+  }
+  rate_ = 1.0;
+  if (speed_label_ != nullptr) {
+    speed_label_->setText(QStringLiteral("1x"));
   }
   if (gfx_ != nullptr) {
     gfx_->ClearVideoFrame();
@@ -260,6 +291,12 @@ void MainWindow::ShowEmptyState() {
   }
   if (zoom_out_action_ != nullptr) {
     zoom_out_action_->setEnabled(false);
+  }
+  if (slower_action_ != nullptr) {
+    slower_action_->setEnabled(false);
+  }
+  if (faster_action_ != nullptr) {
+    faster_action_->setEnabled(false);
   }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
@@ -330,6 +367,9 @@ void MainWindow::OpenFile(const QString& path) {
   timeline_->SetFrameCount(timeline_frames);
   zoom_in_action_->setEnabled(timeline_frames > 0);
   zoom_out_action_->setEnabled(timeline_frames > 0);
+  slower_action_->setEnabled(true);
+  faster_action_->setEnabled(true);
+  speed_label_->setText(FormatSpeed(rate_));
 
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -360,6 +400,7 @@ void MainWindow::OpenFile(const QString& path) {
     auto audio = std::make_unique<lapian::audio::AudioEngine>();
     audio->SetVolume(volume_);
     audio->SetMute(muted_);
+    audio->SetRate(rate_);
     if (!audio->Open(path_utf8, info.audio.stream_index)) {
       audio_label_->setText(QStringLiteral("音频不可用"));
       statusBar()->showMessage(QStringLiteral("音频线程启动失败，视频继续静音播放"), 5000);
@@ -376,6 +417,7 @@ void MainWindow::OpenFile(const QString& path) {
     }
   }
   playback_->SetAudioEngine(audio_.get());
+  playback_->SetRate(rate_);
 
   // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
   if (can_seek) {
@@ -504,6 +546,39 @@ void MainWindow::ZoomTimelineOut() {
     timeline_->ZoomOut();
   }
 }
+
+void MainWindow::ApplySpeed(double rate) {
+  if (!std::isfinite(rate)) {
+    return;
+  }
+  rate_ = std::clamp(rate, 0.25, 2.0);
+  if (speed_label_ != nullptr) {
+    speed_label_->setText(FormatSpeed(rate_));
+  }
+  if (playback_ != nullptr) {
+    playback_->SetRate(rate_);
+  }
+  if (audio_ != nullptr) {
+    audio_->SetRate(rate_);
+  }
+  statusBar()->showMessage(QStringLiteral("速度 %1").arg(FormatSpeed(rate_)), 1500);
+}
+
+void MainWindow::SpeedDown() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplySpeed(lapian::core::StepPlaybackRate(rate_, -1));
+}
+
+void MainWindow::SpeedUp() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ApplySpeed(lapian::core::StepPlaybackRate(rate_, 1));
+}
+
+void MainWindow::SetSpeedForTest(double rate) { ApplySpeed(rate); }
 
 void MainWindow::ShowScrubTarget(std::int64_t frame) {
   if (info_bar_ != nullptr) {

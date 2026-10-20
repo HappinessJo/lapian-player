@@ -1,5 +1,6 @@
 #include "app/PlaybackController.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -54,6 +55,7 @@ void PlaybackController::SetAudioEngine(lapian::audio::AudioEngine* engine) {
   audio_ = engine;
   audio_clock_active_ = false;
   start_pending_ = false;
+  rate_pending_ = false;
 }
 
 double PlaybackController::PtsToSeconds(std::int64_t pts) const {
@@ -77,11 +79,24 @@ void PlaybackController::SetPosition(std::int64_t frame, std::int64_t pts_us) {
   end_ = false;
   audio_clock_active_ = false;
   start_pending_ = false;
+  rate_pending_ = false;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
   pending_info_ = lapian::media::DecodedFrameInfo{};
   clock_.Seek(current_pts_seconds_);
+}
+
+void PlaybackController::SetRate(double rate) {
+  if (!std::isfinite(rate) || rate <= 0.0) {
+    rate = 1.0;
+  }
+  rate_ = std::clamp(rate, 0.25, 2.0);
+  clock_.SetRate(rate_);
+  if (playing_) {
+    rate_pending_ = (audio_ != nullptr);
+    audio_clock_active_ = false;
+  }
 }
 
 void PlaybackController::Play() {
@@ -90,9 +105,10 @@ void PlaybackController::Play() {
   }
   playing_ = true;
   start_media_seconds_ = current_pts_seconds_;
-  clock_.Start(start_media_seconds_);
+  clock_.Start(start_media_seconds_, rate_);
   audio_clock_active_ = false;
   start_pending_ = (audio_ != nullptr);
+  rate_pending_ = false;
   start_pending_since_ = std::chrono::steady_clock::now();
   timer_.start();
   emit stateChanged(true);
@@ -108,6 +124,7 @@ void PlaybackController::Pause() {
   clock_.Pause();
   start_pending_ = false;
   audio_clock_active_ = false;
+  rate_pending_ = false;
   emit stateChanged(false);
 }
 
@@ -120,6 +137,21 @@ void PlaybackController::Toggle() {
 }
 
 double PlaybackController::TargetSeconds() {
+  // 变速后音频引擎会重配重采样并重建时钟；这期间先走 QPC，
+  // 音频时钟重新可用后切回，避免整段播放永久掉到 QPC。
+  if (rate_pending_) {
+    double target = 0.0;
+    if (audio_ != nullptr && audio_->ClockSeconds(&target) && std::isfinite(target)) {
+      rate_pending_ = false;
+      audio_clock_active_ = true;
+      return target;
+    }
+    if (audio_clock_active_) {
+      audio_clock_active_ = false;
+      clock_.Seek(current_pts_seconds_);
+    }
+    return clock_.NowSeconds();
+  }
   if (audio_clock_active_) {
     double target = 0.0;
     if (audio_ != nullptr && audio_->ClockSeconds(&target) && std::isfinite(target)) {
@@ -233,6 +265,7 @@ void PlaybackController::Finish() {
   clock_.Pause();
   start_pending_ = false;
   audio_clock_active_ = false;
+  rate_pending_ = false;
   emit stateChanged(false);
   emit reachedEnd();
 }

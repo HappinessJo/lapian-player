@@ -1,7 +1,9 @@
 // T3.1 音频链路开发探针：控制台播放 N 秒并打印状态/位置/underrun。
 // 不渲染视频、不入分发；用于开发机手测与 docs/perf 记录。
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -43,6 +45,7 @@ int main(int argc, char* argv[]) {
 
   double seconds = 3.0;
   double start_seconds = 0.0;
+  double rate = 1.0;
   int volume = 100;
   bool mute = false;
   for (int i = 2; i < argc; ++i) {
@@ -51,6 +54,8 @@ int main(int argc, char* argv[]) {
       mute = true;
     } else if (argument == "--seek" && i + 1 < argc) {
       start_seconds = std::atof(argv[++i]);
+    } else if (argument == "--rate" && i + 1 < argc) {
+      rate = std::atof(argv[++i]);
     } else if (argument == "--volume" && i + 1 < argc) {
       volume = std::atoi(argv[++i]);
     } else {
@@ -63,16 +68,22 @@ int main(int argc, char* argv[]) {
   if (start_seconds < 0.0) {
     start_seconds = 0.0;
   }
+  if (!std::isfinite(rate) || rate <= 0.0) {
+    rate = 1.0;
+  }
+  rate = std::clamp(rate, 0.25, 2.0);
 
   lapian::audio::AudioEngine engine;
   engine.SetVolume(volume);
   engine.SetMute(mute);
+  engine.SetRate(rate);
   if (!engine.Open(argv[1], -1)) {
     std::printf("启动音频线程失败\n");
     return 1;
   }
 
   const auto started = std::chrono::steady_clock::now();
+  std::printf("rate=%.2fx\n", rate);
   engine.PlayFrom(start_seconds);
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() <
          seconds) {

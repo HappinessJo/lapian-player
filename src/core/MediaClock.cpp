@@ -22,6 +22,29 @@ double SanitizeRate(double rate) {
 
 }  // namespace
 
+int PlaybackRateIndex(double rate) {
+  if (!std::isfinite(rate) || rate <= 0.0) {
+    return 3;  // 1.0
+  }
+  int best = 0;
+  double best_distance = std::abs(kPlaybackRates[0] - rate);
+  for (int i = 1; i < static_cast<int>(kPlaybackRates.size()); ++i) {
+    const double distance = std::abs(kPlaybackRates[i] - rate);
+    if (distance < best_distance) {
+      best = i;
+      best_distance = distance;
+    }
+  }
+  return best;
+}
+
+double StepPlaybackRate(double rate, int delta) {
+  const int index = PlaybackRateIndex(rate);
+  const int next = std::clamp(index + delta, 0,
+                              static_cast<int>(kPlaybackRates.size()) - 1);
+  return kPlaybackRates[static_cast<std::size_t>(next)];
+}
+
 MediaClock::MediaClock() : now_(&SteadyNowSeconds) {}
 
 MediaClock::MediaClock(NowFunction now_seconds)

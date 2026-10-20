@@ -19,12 +19,17 @@ int main(int argc, char* argv[]) {
   QString file_path;
   QString goto_text;
   bool auto_play = false;
+  double playback_rate = 1.0;
+  bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--goto") && i + 1 < arguments.size()) {
       goto_text = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--rate") && i + 1 < arguments.size()) {
+      playback_rate = arguments[++i].toDouble();
+      has_playback_rate = true;
     } else if (arguments[i] == QStringLiteral("--play")) {
       auto_play = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
@@ -35,10 +40,14 @@ int main(int argc, char* argv[]) {
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
-    QTimer::singleShot(0, &window, [&window, file_path, goto_text, auto_play]() {
+    QTimer::singleShot(0, &window, [&window, file_path, goto_text, auto_play, playback_rate,
+                                    has_playback_rate]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
+      }
+      if (has_playback_rate) {
+        window.SetSpeedForTest(playback_rate);
       }
       if (auto_play) {
         window.StartPlaybackForTest();

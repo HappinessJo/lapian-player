@@ -1,8 +1,18 @@
 #pragma once
 
+#include <array>
 #include <functional>
 
 namespace lapian::core {
+
+// spec F4 的固定速度档位。
+inline constexpr std::array<double, 7> kPlaybackRates{
+    0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0};
+
+// 最近档位；无效输入返回 1.0 的下标。
+int PlaybackRateIndex(double rate);
+// 在档位表中移动 delta 格并 clamp；无效输入先落到 1.0。
+double StepPlaybackRate(double rate, int delta);
 
 // 媒体时钟：把“墙上时间”换算成媒体时间。T3.2 用作 QPC 回退，
 // T3.3 的变速也复用同一套 rate 语义。时间基准可注入，便于单测。

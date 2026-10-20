@@ -55,6 +55,10 @@ class AudioDecoder {
   // 最多输出 max_frames 帧；返回 kEnd 表示解码结束，kError 时 error 非空。
   AudioDecodeResult DecodeChunk(std::size_t max_frames, AudioChunk* chunk, std::string* error);
 
+  // T3.3：保持文件/解码器打开，只重建 swresample 输出格式（变速用）。
+  // 调用方应在之后 SeekTo 到当前媒体位置，再继续 DecodeChunk。
+  bool SetOutputFormat(const AudioFormat& output_format, std::string* error);
+
   bool ended() const { return ended_; }
 
  private:

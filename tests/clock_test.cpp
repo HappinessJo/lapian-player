@@ -80,6 +80,17 @@ int main() {
   clock.Seek(-5.0);
   CheckNear(clock.NowSeconds(), 0.0, 1e-9, "负 Seek clamp 到 0");
 
+  using lapian::core::PlaybackRateIndex;
+  using lapian::core::StepPlaybackRate;
+  Check(PlaybackRateIndex(1.0) == 3, "1.0x 档位索引 3");
+  Check(PlaybackRateIndex(0.26) == 0, "0.26x 最近 0.25x");
+  Check(PlaybackRateIndex(1.9) == 6, "1.9x 最近 2.0x");
+  CheckNear(StepPlaybackRate(1.0, 1), 1.25, 1e-9, "1.0x 加速到 1.25x");
+  CheckNear(StepPlaybackRate(1.0, -1), 0.75, 1e-9, "1.0x 减速到 0.75x");
+  CheckNear(StepPlaybackRate(2.0, 1), 2.0, 1e-9, "2.0x 加速 clamp");
+  CheckNear(StepPlaybackRate(0.25, -1), 0.25, 1e-9, "0.25x 减速 clamp");
+  CheckNear(StepPlaybackRate(1.0, 100), 2.0, 1e-9, "大步加速 clamp 到 2.0x");
+
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);
     return 1;

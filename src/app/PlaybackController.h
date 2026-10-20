@@ -32,12 +32,15 @@ class PlaybackController : public QObject {
   void SetAudioEngine(lapian::audio::AudioEngine* engine);
   // T2.4：seek 后同步播放位置；解码器已经停在目标帧之后。
   void SetPosition(std::int64_t frame, std::int64_t pts_us);
+  // T3.3：0.25–2x；不改变当前帧/时间码，只改变媒体时间推进速度。
+  void SetRate(double rate);
   void Play();
   void Pause();
   void Toggle();
 
   bool IsPlaying() const { return playing_; }
   int CurrentFrame() const { return current_frame_; }
+  double rate() const { return rate_; }
   // 当前帧的媒体时间（秒）；T3.1 音频起播用它作为 seek 目标。
   double CurrentMediaSeconds() const { return current_pts_seconds_; }
 
@@ -60,12 +63,14 @@ class PlaybackController : public QObject {
   lapian::core::MediaClock clock_;
   double start_media_seconds_ = 0.0;
   double current_pts_seconds_ = 0.0;
+  double rate_ = 1.0;
   int current_frame_ = 0;
   int last_decoded_frame_ = 0;
   bool playing_ = false;
   bool end_ = false;
   bool audio_clock_active_ = false;
   bool start_pending_ = false;
+  bool rate_pending_ = false;
   std::chrono::steady_clock::time_point start_pending_since_;
   bool timing_log_ = false;
   bool has_pending_ = false;

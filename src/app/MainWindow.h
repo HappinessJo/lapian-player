@@ -45,6 +45,8 @@ class MainWindow : public QMainWindow {
   void StartPlaybackForTest();
   // T2.6 自动化验证入口：与 Ctrl+G 输入框使用同一套解析。
   void GoToInputForTest(const QString& text);
+  // T3.3 自动化验证入口：直接设置 0.25–2x 速度。
+  void SetSpeedForTest(double rate);
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -70,6 +72,8 @@ class MainWindow : public QMainWindow {
   void OnVolumeChanged(int value);
   void ToggleMute(bool muted);
   void PollAudioStatus();
+  void SpeedDown();
+  void SpeedUp();
 
  private:
   void ShowEmptyState();
@@ -79,14 +83,18 @@ class MainWindow : public QMainWindow {
   void StopPreview();
   void ShowOpenError(const QString& message);
   void SaveCurrentStatePlaceholder();
+  void ApplySpeed(double rate);
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   QLabel* status_label_ = nullptr;
   QLabel* audio_label_ = nullptr;
+  QLabel* speed_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
   QAction* mute_action_ = nullptr;
+  QAction* slower_action_ = nullptr;
+  QAction* faster_action_ = nullptr;
   QTimer* audio_status_timer_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* play_action_ = nullptr;
@@ -105,6 +113,7 @@ class MainWindow : public QMainWindow {
   std::int64_t current_frame_ = 0;
   std::uint64_t audio_status_revision_ = 0;
   int volume_ = 100;
+  double rate_ = 1.0;
   bool muted_ = false;
   bool audio_error_shown_ = false;
   bool error_shown_ = false;

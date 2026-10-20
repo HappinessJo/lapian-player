@@ -43,6 +43,8 @@ class AudioEngine {
   // 从媒体秒开始播放；音频时钟/精确同步留 T3.2。
   void PlayFrom(double media_seconds);
   void Pause();
+  // T3.3：0.25–2x。播放中会重配重采样比并从当前媒体位置续播。
+  void SetRate(double rate);
 
   void SetVolume(int percent);
   void SetMute(bool muted);
