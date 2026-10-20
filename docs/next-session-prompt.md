@@ -6,12 +6,13 @@
 
 请先读：
 - E:\拉片软件开发\AGENTS.md
-- docs\handoff-2026-10-20-t5.2.md（当前交接）
+- docs\handoff-2026-10-20-t5.3.md（当前交接）
+- docs\handoff-2026-10-20-t5.2.md（标记 UI/跳转接口）
 - docs\handoff-2026-10-20-t5.1.md（sidecar 存储接口）
 - docs\handoff-2026-10-20-t4.2.md（循环/定帧历史）
 - spec.md（v0.3，冻结）、plan.md、tasks.md
-- docs\adr\ADR-001 到 ADR-006（尤其 006 持久化）
-- docs\perf\T5.2-marks.md（T5.2 数字与缺口）
+- docs\adr\ADR-001 到 ADR-006（尤其 006 持久化、005 帧缓存/预览）
+- docs\perf\T5.3-notes.md（T5.3 数字与缺口）
 
 第一步核对，不要相信旧对话的转述：
 1. git status --short；git log --oneline -8
@@ -19,66 +20,61 @@
 3. 跑一次 ctest（命令见下），确认 16/16
 
 当前基线（以 git log 为准）：
-- 参考基线：T5.2 文档提交 `33964e2`（代码提交 `8ff61b7`；其后可能有一格 HEAD 对齐提交；以 git log 为准）；工作区应 clean。
-- M0–M4、T5.1 存储层与 T5.2 标记 UI 代码完成；ctest 16/16；dist 32.11MB / 25 文件。
+- 参考基线：T5.3 代码提交 `c46e989`（文档提交紧随其后；以 git log 为准）；工作区应 clean。
+- M0–M4、T5.1 存储层、T5.2 标记 UI、T5.3 备注编辑代码完成；ctest 16/16；dist 32.15MB / 25 文件。
 - 已有：打开/播放/逐帧/seek/长按/帧号/时间码、时间轴缩放滚动/点击拖动/拖动预览、
   WASAPI、IAudioClock+QPC、0.25–2x 变速/变调、A/V offset、200/s 波形生成与绘制、
   步进/拖动静音、A/B 色条/循环播放/A=B 定帧；T5.1 sidecar 存储；T5.2 Ctrl+M、
-  侧栏标记列表（帧/标签/备注摘要）、点击跳转+暂停、删除确认、时间轴粉色标记与
-  5px 吸附、存储位置/回退/警告展示、切文件/关窗 flush。
-- 未完成：T5.3 备注编辑/自动保存、T5.4 截图、LRU 帧缓存、后台 index worker、
-  全屏/键位/DPI、正式 V1–V8/V10、基线机/4K、10min soak、设备拔出恢复、波形/听感真人验收。
-- 已知缺口：长 GOP proxy-V1 循环 B→A 148–157ms，未达 F4-A2；T5.2 的 F6-A8 只有
-  V9 1080p 短 GOP 数字（UI p95 5.91ms，画面 p95 31.34ms），不是正式 P9；不要把
-  短 GOP 数字冒充全素材/基线机通过。
+  侧栏标记列表/删除确认/时间轴粉色标记与 5px 吸附；T5.3 标签/备注编辑、
+  失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离。
+- 未完成：T5.4 截图、LRU 帧缓存、后台 index worker、全屏/键位/DPI、正式 V1–V8/V10、
+  基线机/4K、10min soak、设备拔出恢复、波形/听感真人验收。
+- 已知缺口：长 GOP proxy-V1 循环 B→A 148–157ms，未达 F4-A2；F6-A8 只有 V9 1080p
+  短 GOP 数字（T5.2 UI p95 6.22ms、画面 p95 30.76ms），不是正式 P9；T5.3 的
+  F8-A2/F6-A1 只有程序化输入，中文 IME/真人键盘仍待；不要把短 GOP 数字冒充
+  全素材/基线机通过。
 
-## T5.2 已交付的接口（直接复用，不要重写）
+## T5.3 已交付的接口（直接复用，不要重写）
 
-- `src/app/MarkPanel.h` / `.cpp`；静态库 `lapian_mark_ui`，测试 `tests/mark_panel_test.cpp`。
-  - `SetMarks(vector<core::Mark>)`、`SetStorage(path, using_fallback)`、`SetWarnings(...)`；
-  - `SelectMark(id)`、`SelectNearFrame(frame)`、`SelectedMarkId()`、`MarkCount()`、
-    `WarningCount()`、`StorageSummary()`；
-  - 信号 `markActivated(id, frame)`、`deleteRequested(id)`；Delete 键/右键菜单删除。
+- `src/app/MarkPanel.h` / `.cpp`（`lapian_mark_ui`）：
+  - `SetMarks/SetStorage/SetWarnings/SelectMark/SelectNearFrame/SelectedMarkId/MarkCount/
+    WarningCount/StorageSummary`；
+  - T5.3 新增：`FlushEditor()`、`UpdateMarkText(id,label,note)`、`markTextEdited(id,label,note)`、
+    `SetEditorTextForTest/EditorLabelForTest/EditorNoteForTest/FocusNoteEditorForTest`；
+  - 编辑区控件名：`markEditor`/`markLabelEdit`/`markNoteEdit`/`markEditorTitle`；
+  - 标签 Enter 保存；备注 Enter 换行、Ctrl+Enter 保存；失焦/切换选中/关窗都提交；
+    编辑框接受除 Esc 外的 `ShortcutOverride`（spec §3.7 焦点隔离）。
 - `MainWindow` 内部：
-  - `MarkStore::Open` 已用 `MediaInfo.duration_us` + `FrameIndex` 构造 `FrameLookup`；
-  - `marks_`（`unique_ptr<MarkStore>`）、`marks_dirty_`、`SaveMarks(show_errors)`、
-    `RefreshMarksUi(select_id)`、`UpdateMarkStorageUi()`、
-    `FlushMarksBeforeSwitch()`、`FlushMarksOnClose()`、`ShowMarkSaveFailure()`、
-    `ShowMarkWarnings()`；
-  - 点击标记走 `ActivateMark(id, frame)`：先选中/播放头/帧号更新并 `repaint()`，
-    再 `QTimer::singleShot(0)` 精确 `GoToFrame`；`navigation_generation_` 负责取消。
-  - 删除确认：`ApplyDeleteMark(id, confirm=true)`，默认 No。
-- `TimelineWidget`：`SetMarks(vector<int64_t>)`、`ClearMarks()`、`MarkFrameAtX()`；
-  标记绘制不依赖 MarkStore，同帧去重、只画可见区。
-- 自动化：`--mark-test`（`--file A --file-b B`，A/B 各拷一份 V9）；
-  `MainWindow` 暴露 `AddMarkForTest/DeleteMarkForTest/ActivateMarkForTest/
-  MarkStateForTest/MarkCountForTest/MarkFrameAtForTest/MarkPerfSummaryForTest` 等。
+  - `ApplyMarkTextEdited`（SetMarkText + SaveMarks(true)）、`FlushMarkEditor()`；
+    已接 `FlushMarksBeforeSwitch/FlushMarksOnClose/ApplyAddMark/ApplyDeleteMark`；
+  - 全局快捷键入口都有 `IsTextInputFocused()` 让位（Space/W/M/Ctrl+G/Ctrl+O/循环/速度/缩放/
+    Ctrl+M；Delete 在 MarkPanel 内让位）；新增快捷键必须同时加事件过滤与入口检查；
+  - T5.3 测试入口：`SetMarkNoteForTest/CommitNoteForTest/MarkTextForTest/
+    DeleteMarkWithConfirmForTest/FocusNoteEditorForTest/CloseForTest/
+    ResetNotePerfSamplesForTest/NotePerfSummaryForTest`。
+- 自动化：`--note-test`（`--file A --file-b B`，A/B 各拷一份 V9；退出码 0/1）；
+  `--mark-test` 仍是 T5.2 回归；`--ab-test`、`--loop-test` 不变。
 - sidecar 命名仍是 `<视频完整文件名>.lapian.json`；不要改 schema 字段名、不要建 SQLite。
 
-## 下一步：T5.3 备注编辑与自动保存（tasks.md T5.3）
+## 下一步：T5.4 截图（tasks.md T5.4）
 
 目标与验收：
-- 侧栏可编辑标记标签与备注；失焦或回车即时保存；备注允许为空；纯文本。
-- 焦点隔离：文本框聚焦时，除 Esc/Enter 外不触发全局快捷键（spec §3.7）。
-- F8-A2：编辑备注后直接关窗，重开文件内容已保存；单测：空备注、覆盖保存；关窗不丢。
-- 不改变 T5.1 sidecar/schema；不新增“保存”按钮；不做导出/分享。
+- `S` 截取当前显示帧，PNG；不暂停播放；不含 UI；源帧分辨率；按 display matrix
+  旋转到显示方向（竖屏 V5 为 1080×1920）。
+- 默认视频同目录 `snapshots/`；目录不可写回退用户图片目录；给出提示。
+- 命名 `{视频名}_f{帧号}_{HH-MM-SS-FF}.png`；重名自动加序号，不覆盖。
+- F6-A3/A4/A5/A7；单测：命名/非法字符；4K 截图不中断播放、P11 不超。
 
 实现建议：
-- 在 MarkPanel 底部加详情编辑区：标签 QLineEdit + 备注 QPlainTextEdit；
-  选中标记时载入，切换标记/清空前 flush。标签 Enter 保存；备注建议
-  Ctrl+Enter 保存、Enter 换行（规格“回车保存”与多行备注有歧义，写进交接，
-  不要静默选；若按 Enter 保存，则备注不能多行）。
-- 保存调用 `MarkStore::SetMarkText(id, label, note)`，更新 `marks_dirty_`，
-  走 `SaveMarks(true)`；可选 200–300ms 防抖，但失焦/回车/切文件/关窗必须 flush。
-- 列表行只更新当前行文本，避免每次按键重建 100 行；保持选中与滚动位置。
-- 焦点隔离：`IsTextInputFocused` 已覆盖 QLineEdit/QTextEdit/QPlainTextEdit；
-  但 `TogglePlayback`（Space）、`ToggleMute`、`ShowGotoDialog` 等全局 QAction
-  还没有统一让位，T5.3 要补，否则备注输入时按空格会播放。
-- 自动化：MainWindow 加 `SetMarkNoteForTest(id 或 index, label, note)`、
-  `CommitNoteForTest`、`CloseForTest`/`window.close()`；序列“编辑→关窗→重开→
-  内容一致”；再跑 `--mark-test` 防回归。
-- F6-A1 的备注部分、F6-A2 的确认对话框真人路径放到 T5.3 一起补；仍不宣称
-  F6-A8 正式 P9、长 GOP F4-A2、正式 V1/基线机通过。
+- 截图来源必须是“按键瞬间已显示的帧”，不要重新 seek；优先从 GfxWidget/MediaSession
+  持有的当前 AVFrame 做 CPU 拷贝（NV12/P010 → RGBA 或直接 WIC 编码），不要在 UI 线程
+  做 4K 回读+编码；写盘/编码放后台线程，按键路径只抓引用/拷贝。
+- 旋转用 `MediaInfo.rotation.counterclockwise_degrees`（T1.3 已有渲染路径），
+  输出尺寸按显示方向；WIC PNG（Windows Imaging Component），不要引入新第三方库。
+- 命名/序号/非法字符抽成纯函数单测；目录回退与只读目录要有可测入口。
+- 自动化建议 `--snapshot-test`：V9 帧 100 按 3 次（3 个文件、不覆盖、PNG 尺寸 1920×1080）、
+  文件名含 `f100`、图像无 UI；再跑 `--note-test`/`--mark-test` 防回归。
+- 不宣称 F6-A3/A4/A5/A7 的 4K/竖屏/只读目录真人验收，除非真的跑了。
 
 构建与验证命令：
 # 全量构建 + 单测 + dist
@@ -91,14 +87,18 @@ $env:TMP=$tmp; $env:TEMP=$tmp
 $env:PATH="$PWD\third_party\Qt\6.8.3\msvc2022_64\bin;$env:PATH"
 ctest --test-dir build\release -C Release --output-on-failure
 
-# T5.2 标记自动化（V9 拷到 build，避免污染 media）
-$dir = Join-Path $PWD 'build\t5.3-marks'
+# T5.3 备注自动化（V9 拷到 build，避免污染 media；GUI 程序用 Start-Process 抓 stderr）
+$dir = Join-Path $PWD 'build\t5.4-notes'
 Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $dir | Out-Null
 Copy-Item '.\media\V9.mp4' (Join-Path $dir 'A.mp4')
 Copy-Item '.\media\V9.mp4' (Join-Path $dir 'B.mp4')
-.\dist\lapian.exe --file (Join-Path $dir 'A.mp4') `
-  --file-b (Join-Path $dir 'B.mp4') --mark-test
+$p = Start-Process -FilePath (Join-Path $PWD 'dist\lapian.exe') `
+  -ArgumentList @('--file',(Join-Path $dir 'A.mp4'),'--file-b',(Join-Path $dir 'B.mp4'),'--note-test') `
+  -Wait -PassThru -RedirectStandardError (Join-Path $PWD 'build\t5.4-note.log')
+Write-Host "exit=$($p.ExitCode)"
+
+# T5.2 标记回归同样用 build\t5.4-marks 的 A/B 副本 + --mark-test。
 
 # 手动回归
 .\dist\lapian.exe --file ".\media\测试.mp4"
@@ -114,6 +114,10 @@ Copy-Item '.\media\V9.mp4' (Join-Path $dir 'B.mp4')
 - media/、dist/、build/ 都不入库；没有素材时先向用户确认，不要编造 V1 验收。
 - `--step-test` 不会自动退出；回归时用 Start-Process + 3s 后 Stop-Process，或只跑 ctest。
 - 截图 `QWidget::grab()` 抓不到 GfxWidget 的 D3D11 原生 HWND，视频区会是黑的，不是播放失败。
+- `dist\lapian.exe` 是 GUI 子系统程序；直接 `&` 运行可能拿不到 stderr/退出码，自动化用
+  Start-Process + RedirectStandardError + PassThru。
+- 控制台是 GBK 时中文日志会花屏；日志本身是 UTF-8，用
+  `[System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes(path))` 读。
 
 工作方式：
 - 计划内任务不要逐项找我确认，直接做；只有计划外、不可逆、规格歧义、权限/硬件限制才问。
@@ -122,16 +126,16 @@ Copy-Item '.\media\V9.mp4' (Join-Path $dir 'B.mp4')
 - 只做 F1–F8 / P1–P14；候选池不进首期；技术栈按 ADR-001/004；spec v0.3 冻结，
   改动只走 §9 版本记录。
 - 不提交 third_party/、media/、build/、dist/；不要删 docs/perf/ 证据。
-- 不要重做 T1–T5.2；不要提前宣称 F6/F8、F4-A2 长 GOP、正式 V1/基线机通过。
+- 不要重做 T1–T5.3；不要提前宣称 F6/F8、F4-A2 长 GOP、正式 V1/基线机通过。
 - 如果上下文变长到影响判断，先告诉我“建议开新会话”，并把当前状态写进交接，不要硬撑。
 
-开始时可给一个 3–5 行的极短计划，但不用等我确认；随后直接改文件。先做 T5.3。
+开始时可给一个 3–5 行的极短计划，但不用等我确认；随后直接改文件。先做 T5.4。
 ```
 
 ## 使用说明
 
 - 这段提示词自包含；新 agent 仍应先读文件、跑 `ctest`，不要只信这段摘要。
 - 若 HEAD 已前进（交接/提示词提交），以 `git log` 和当前 `tasks.md` 为准。
-- 若 T5.3 已完成，把“下一步”替换为 `tasks.md` 中下一个未完成任务，并先读最新交接。
-- T5.2 的 sidecar 命名、`MarkPanel` 信号与 `ActivateMark` 的 deferred 解码是已审查路径；
-  不要为 T5.3 的编辑方便重写 MarkStore 或改 sidecar 字段。
+- 若 T5.4 已完成，把“下一步”替换为 `tasks.md` 中下一个未完成任务（M6），并先读最新交接。
+- T5.1 的 sidecar、T5.2 的 `ActivateMark` deferred 解码、T5.3 的编辑 flush 与焦点让位都是
+  已审查路径；不要为截图重写 MarkStore、MarkPanel 或改变关窗保存顺序。
