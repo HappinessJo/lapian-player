@@ -7,10 +7,8 @@
 
 struct AVFrame;
 struct ID3D11Device;
-class QFocusEvent;
 class QKeyEvent;
 class QMouseEvent;
-class QTimer;
 
 namespace lapian::gfx {
 class D3D11Device;
@@ -40,7 +38,6 @@ class GfxWidget : public QWidget {
   void deviceReady(const QString& summary);
   void deviceError(const QString& message);
   void playPauseRequested();
-  void stepRequested(int delta);
   void gotoRequested();
   // T6.1：双击画面进入/退出全屏；单击仍走 QWidget 默认（不吞拖动/焦点）。
   void fullScreenToggleRequested();
@@ -50,8 +47,6 @@ class GfxWidget : public QWidget {
   void paintEvent(QPaintEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
-  void keyReleaseEvent(QKeyEvent* event) override;
-  void focusOutEvent(QFocusEvent* event) override;
   void mouseDoubleClickEvent(QMouseEvent* event) override;
 
  private:
@@ -64,7 +59,4 @@ class GfxWidget : public QWidget {
   std::unique_ptr<lapian::gfx::VideoRenderer> video_renderer_;
   bool init_failed_ = false;
   bool device_lost_reported_ = false;
-  QTimer* step_timer_ = nullptr;
-  int step_direction_ = 0;
-  bool step_repeat_started_ = false;
 };

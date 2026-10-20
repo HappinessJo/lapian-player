@@ -50,6 +50,7 @@ int main(int argc, char* argv[]) {
   bool note_test = false;
   bool snapshot_test = false;
   bool fullscreen_test = false;
+  bool key_test = false;
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
@@ -80,6 +81,8 @@ int main(int argc, char* argv[]) {
       snapshot_test = true;
     } else if (arguments[i] == QStringLiteral("--fullscreen-test")) {
       fullscreen_test = true;
+    } else if (arguments[i] == QStringLiteral("--key-test")) {
+      key_test = true;
     } else if (arguments[i] == QStringLiteral("--snapshot-pictures") &&
                i + 1 < arguments.size()) {
       snapshot_pictures_arg = arguments[++i];
@@ -121,8 +124,9 @@ int main(int argc, char* argv[]) {
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
-                                    snapshot_test, fullscreen_test, snapshot_pictures_root,
-                                    playback_rate, has_playback_rate, process_start]() {
+                                    snapshot_test, fullscreen_test, key_test,
+                                    snapshot_pictures_root, playback_rate,
+                                    has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -1084,6 +1088,353 @@ int main(int argc, char* argv[]) {
           check("maximized-restored", window.IsMaximizedForTest());
           std::fprintf(stderr, "T6.1 fullscreen_toggle_ms=%lld\n",
                        static_cast<long long>(window.LastFullScreenToggleMsForTest()));
+          std::fflush(stderr);
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (key_test) {
+        // T6.2 键位/焦点矩阵：spec §3.7 全表、焦点切换、OS 重复、文本让位、模态让位。
+        auto failures = std::make_shared<int>(0);
+        struct KeyTestState {
+          bool goto_seen = false;
+          qint64 goto_frame_before = -1;
+          bool modal_seen = false;
+          qint64 modal_frame_before = -1;
+          qint64 modal_frame_after = -1;
+          int marks_before_modal = 0;
+          qint64 hold_start_frame = -1;
+          qint64 hold_auto_before = -1;
+          qint64 hold_auto_after = -1;
+          qint64 hold_release_frame = -1;
+          qint64 focus_hold_frame = -1;
+          qint64 long_hold_start = -1;
+          qint64 long_hold_steps = -1;
+          QString editor_before;
+          int snapshots_before_editor = 0;
+        };
+        auto state = std::make_shared<KeyTestState>();
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.2 key_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray text = window.KeyStateForTest().toUtf8();
+          std::fprintf(stderr, "T6.2 key_state %s %s\n", step, text.constData());
+          std::fflush(stderr);
+        };
+
+        schedule(500, [&window, state, check, log_state]() {
+          auto press = [&window](int key, int modifiers) {
+            window.PressKeyForTest(key, modifiers);
+          };
+          window.GoToInputForTest(QStringLiteral("100"));
+          log_state("ready");
+
+          press(Qt::Key_PageDown, 0);
+          check("pgdn-step", window.CurrentFrameForTest() == 101);
+          press(Qt::Key_PageUp, 0);
+          check("pgup-step", window.CurrentFrameForTest() == 100);
+          press(Qt::Key_Right, 0);
+          check("right-step", window.CurrentFrameForTest() == 101);
+          press(Qt::Key_Left, 0);
+          check("left-step", window.CurrentFrameForTest() == 100);
+          press(Qt::Key_Home, 0);
+          check("home-first", window.CurrentFrameForTest() == 0);
+          const qint64 last = window.LastFrameIndexForTest();
+          check("last-index", last > 1000);
+          press(Qt::Key_End, 0);
+          check("end-last", window.CurrentFrameForTest() == last);
+          press(Qt::Key_Home, 0);
+          check("home-again", window.CurrentFrameForTest() == 0);
+
+          window.GoToInputForTest(QStringLiteral("20"));
+          press(Qt::Key_Space, 0);
+          check("space-play", window.IsPlayingForTest());
+          press(Qt::Key_Space, 0);
+          check("space-pause", !window.IsPlayingForTest());
+
+          const double speed0 = window.SpeedForTest();
+          press(Qt::Key_BracketRight, 0);
+          check("faster", window.SpeedForTest() > speed0);
+          press(Qt::Key_BracketLeft, 0);
+          check("slower-restore", std::abs(window.SpeedForTest() - speed0) < 1.0e-9);
+
+          const bool wave0 = window.WaveformVisibleForTest();
+          press(Qt::Key_W, 0);
+          check("wave-off", window.WaveformVisibleForTest() != wave0);
+          press(Qt::Key_W, 0);
+          check("wave-on", window.WaveformVisibleForTest() == wave0);
+
+          const bool mute0 = window.MutedForTest();
+          press(Qt::Key_M, 0);
+          check("mute-toggle", window.MutedForTest() != mute0);
+          press(Qt::Key_M, 0);
+          check("mute-restore", window.MutedForTest() == mute0);
+
+          window.GoToInputForTest(QStringLiteral("50"));
+          press(Qt::Key_I, 0);
+          window.GoToInputForTest(QStringLiteral("100"));
+          press(Qt::Key_O, 0);
+          press(Qt::Key_L, 0);
+          const QString loop_on = window.LoopStateForTest();
+          std::fprintf(stderr, "T6.2 key_loop %s\n", loop_on.toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-on", loop_on.contains(QStringLiteral("loop=1")) &&
+                               loop_on.contains(QStringLiteral("a=50")) &&
+                               loop_on.contains(QStringLiteral("b=100")));
+          press(Qt::Key_L, Qt::ShiftModifier);
+          check("shift-l-clears",
+                window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+
+          const int marks0 = window.MarkCountForTest();
+          press(Qt::Key_M, Qt::ControlModifier);
+          check("ctrl-m-add", window.MarkCountForTest() == marks0 + 1);
+
+          const int snaps0 = window.SnapshotSavedPathsForTest().size();
+          press(Qt::Key_S, 0);
+          window.DrainSnapshotsForTest();
+          check("s-key-saved",
+                window.SnapshotSavedPathsForTest().size() == snaps0 + 1);
+          std::fprintf(stderr, "T6.2 key_snapshot %s\n",
+                       window.SnapshotStateForTest().toUtf8().constData());
+          std::fflush(stderr);
+          check("s-key-frame", window.SnapshotLastSavedFrameForTest() == 100);
+
+          press(Qt::Key_F, 0);
+          check("f-fullscreen", window.IsFullScreenForTest());
+          press(Qt::Key_Escape, 0);
+          check("esc-exits", !window.IsFullScreenForTest());
+
+          // Ctrl+G：真实对话框路径；用定时器在嵌套事件循环里关掉。
+          window.GoToInputForTest(QStringLiteral("50"));
+          state->goto_frame_before = window.CurrentFrameForTest();
+          QTimer::singleShot(100, &window, [&window, state]() {
+            QWidget* dialog = QApplication::activeModalWidget();
+            state->goto_seen = dialog != nullptr;
+            if (dialog != nullptr) {
+              dialog->close();
+            }
+          });
+          press(Qt::Key_G, Qt::ControlModifier);
+          check("ctrlg-opened", state->goto_seen);
+          check("ctrlg-no-jump",
+                window.CurrentFrameForTest() == state->goto_frame_before);
+
+          const QString mapping = window.ShortcutMapForTest();
+          check("map-open", mapping.contains(QStringLiteral("open=Ctrl+O")));
+          check("map-goto", mapping.contains(QStringLiteral("goto=Ctrl+G")));
+          check("map-play", mapping.contains(QStringLiteral("play=Space")));
+          check("map-in", mapping.contains(QStringLiteral("in=I")));
+          check("map-out", mapping.contains(QStringLiteral("out=O")));
+          check("map-loop", mapping.contains(QStringLiteral("loop=L")));
+          check("map-clear", mapping.contains(QStringLiteral("clear=Shift+L")));
+          check("map-slower", mapping.contains(QStringLiteral("slower=[")));
+          check("map-faster", mapping.contains(QStringLiteral("faster=]")));
+          check("map-wave", mapping.contains(QStringLiteral("wave=W")));
+          check("map-mute", mapping.contains(QStringLiteral("mute=M")));
+          check("map-mark", mapping.contains(QStringLiteral("mark=Ctrl+M")));
+          check("map-snap", mapping.contains(QStringLiteral("snap=S")));
+          check("map-full", mapping.contains(QStringLiteral("full=F")));
+          check("map-esc", mapping.contains(QStringLiteral("esc=Esc")));
+          check("map-zoom-in", mapping.contains(QStringLiteral("zoom_in=+")));
+          check("map-zoom-out", mapping.contains(QStringLiteral("zoom_out=-")));
+
+          // +/-：60s 短片 fit 约 0.68px/帧，放大/缩小都有空间。
+          // 比例断言同时确认没有“QAction + 过滤器”双触发。
+          const double ppf0 = window.TimelinePixelsPerFrameForTest();
+          press(Qt::Key_Plus, Qt::ShiftModifier);
+          const double ppf1 = window.TimelinePixelsPerFrameForTest();
+          check("zoom-in-key", ppf1 > ppf0 && ppf1 / ppf0 > 1.1 &&
+                                   ppf1 / ppf0 < 1.4);
+          press(Qt::Key_Minus, 0);
+          const double ppf2 = window.TimelinePixelsPerFrameForTest();
+          check("zoom-out-key", ppf2 < ppf1 && ppf2 / ppf1 > 0.7 &&
+                                    ppf2 / ppf1 < 0.9);
+          check("zoom-restore", std::abs(ppf2 - ppf0) < 1.0e-6);
+          press(Qt::Key_Plus, 0);
+          const double ppf3 = window.TimelinePixelsPerFrameForTest();
+          check("zoom-numpad-plus", ppf3 > ppf2);
+          press(Qt::Key_Minus, 0);
+          std::fprintf(stderr,
+                       "T6.2 key_zoom ppf0=%.3f ppf1=%.3f ppf2=%.3f ppf3=%.3f\n",
+                       ppf0, ppf1, ppf2, ppf3);
+          std::fflush(stderr);
+
+          // 焦点矩阵：视频/侧栏树/音量滑块/无焦点都应走同一套步进。
+          window.FocusVideoForTest();
+          window.GoToInputForTest(QStringLiteral("50"));
+          press(Qt::Key_Right, 0);
+          check("focus-video-step", window.CurrentFrameForTest() == 51);
+          check("focus-tree", window.FocusMarkTreeForTest());
+          window.GoToInputForTest(QStringLiteral("50"));
+          press(Qt::Key_PageDown, 0);
+          check("focus-tree-step", window.CurrentFrameForTest() == 51);
+          press(Qt::Key_Home, 0);
+          check("focus-tree-home", window.CurrentFrameForTest() == 0);
+          check("focus-slider", window.FocusVolumeSliderForTest());
+          window.GoToInputForTest(QStringLiteral("50"));
+          press(Qt::Key_Right, 0);
+          check("focus-slider-step", window.CurrentFrameForTest() == 51);
+          window.ClearFocusForTest();
+          window.GoToInputForTest(QStringLiteral("50"));
+          press(Qt::Key_Left, 0);
+          check("focus-none-step", window.CurrentFrameForTest() == 49);
+          log_state("matrix");
+        });
+
+        // 长按：300ms 后 70ms 连发；OS 自动重复不额外走帧。
+        schedule(3000, [&window, state]() {
+          window.FocusVideoForTest();
+          window.GoToInputForTest(QStringLiteral("50"));
+          state->hold_start_frame = window.CurrentFrameForTest();
+          window.PressKeyDownForTest(Qt::Key_PageDown, 0);
+        });
+        schedule(3450, [&window, state, check]() {
+          check("hold-advances",
+                window.CurrentFrameForTest() >= state->hold_start_frame + 3);
+          check("hold-active", window.StepRepeatActiveForTest());
+          state->hold_auto_before = window.CurrentFrameForTest();
+          window.PressAutoRepeatKeyForTest(Qt::Key_PageDown, 0);
+          window.PressAutoRepeatKeyForTest(Qt::Key_PageDown, 0);
+          state->hold_auto_after = window.CurrentFrameForTest();
+          check("autorepeat-ignored",
+                state->hold_auto_after == state->hold_auto_before);
+          std::fprintf(stderr,
+                       "T6.2 key_hold start=%lld after=%lld autorepeat=%lld\n",
+                       static_cast<long long>(state->hold_start_frame),
+                       static_cast<long long>(state->hold_auto_after),
+                       static_cast<long long>(state->hold_auto_before));
+          std::fflush(stderr);
+        });
+        schedule(3550, [&window, state, check]() {
+          window.PressKeyUpForTest(Qt::Key_PageDown, 0);
+          state->hold_release_frame = window.CurrentFrameForTest();
+          check("hold-release-stops", !window.StepRepeatActiveForTest());
+        });
+        schedule(3900, [&window, state, check]() {
+          check("hold-stopped",
+                window.CurrentFrameForTest() == state->hold_release_frame);
+          const qint64 before = window.CurrentFrameForTest();
+          window.PressAutoRepeatKeyForTest(Qt::Key_PageDown, 0);
+          check("idle-autorepeat-ignored",
+                window.CurrentFrameForTest() == before);
+        });
+        // 焦点切换必须停掉连发：按住 PgDn 时把焦点移到音量滑块。
+        schedule(4000, [&window, state]() {
+          window.FocusVideoForTest();
+          window.GoToInputForTest(QStringLiteral("50"));
+          window.PressKeyDownForTest(Qt::Key_PageDown, 0);
+        });
+        schedule(4100, [&window, state, check]() {
+          check("focus-hold-active", window.StepRepeatActiveForTest());
+          check("focus-hold-slider", window.FocusVolumeSliderForTest());
+          state->focus_hold_frame = window.CurrentFrameForTest();
+          check("focus-hold-stopped", !window.StepRepeatActiveForTest());
+          window.PressKeyUpForTest(Qt::Key_PageDown, 0);
+        });
+        schedule(4300, [&window, state, check]() {
+          check("focus-hold-frozen",
+                window.CurrentFrameForTest() == state->focus_hold_frame);
+        });
+
+        // 文本让位：全屏 + 备注框聚焦时，所有全局键都不改变播放状态。
+        schedule(4500, [&window, state, check, log_state]() {
+          window.FocusVideoForTest();
+          window.PressKeyForTest(Qt::Key_F, 0);
+          check("editor-fullscreen", window.IsFullScreenForTest());
+          window.SetMarkNoteForTest(0, QStringLiteral("标签"),
+                                    QStringLiteral("备注"));
+          check("editor-focused", window.FocusNoteEditorForTest());
+          state->editor_before = window.KeyStateForTest();
+          state->snapshots_before_editor =
+              window.SnapshotSavedPathsForTest().size();
+          const int keys[] = {Qt::Key_Space, Qt::Key_PageDown, Qt::Key_PageUp,
+                              Qt::Key_Left,  Qt::Key_Right,    Qt::Key_Home,
+                              Qt::Key_End,   Qt::Key_I,        Qt::Key_O,
+                              Qt::Key_L,     Qt::Key_W,        Qt::Key_M,
+                              Qt::Key_S,     Qt::Key_F,        Qt::Key_BracketLeft,
+                              Qt::Key_BracketRight};
+          for (int key : keys) {
+            window.PressKeyForTest(key, 0);
+          }
+          window.PressKeyForTest(Qt::Key_L, Qt::ShiftModifier);
+          window.PressKeyForTest(Qt::Key_M, Qt::ControlModifier);
+          window.PressKeyForTest(Qt::Key_G, Qt::ControlModifier);
+          window.PressKeyForTest(Qt::Key_Escape, 0);
+          check("editor-state-unchanged",
+                window.KeyStateForTest() == state->editor_before);
+          check("editor-no-snapshot",
+                window.SnapshotSavedPathsForTest().size() ==
+                    state->snapshots_before_editor);
+          check("editor-fullscreen-kept", window.IsFullScreenForTest());
+          check("editor-focus-kept", window.IsTextInputFocusedForTest());
+          window.ClearFocusForTest();
+          window.PressKeyForTest(Qt::Key_Escape, 0);
+          check("editor-esc-after-blur", !window.IsFullScreenForTest());
+          log_state("editor-done");
+        });
+
+        // 模态让位：删除确认框打开时，步进键不应改变画面。
+        schedule(5000, [&window, state, check, log_state]() {
+          window.GoToInputForTest(QStringLiteral("80"));
+          state->modal_frame_before = window.CurrentFrameForTest();
+          state->marks_before_modal = window.MarkCountForTest();
+          QTimer::singleShot(100, &window, [&window, state]() {
+            QMessageBox* box =
+                qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            state->modal_seen = box != nullptr;
+            state->modal_frame_after = window.CurrentFrameForTest();
+            window.PressKeyForTest(Qt::Key_PageDown, 0);
+            state->modal_frame_after = window.CurrentFrameForTest();
+            if (box != nullptr) {
+              QAbstractButton* no = box->button(QMessageBox::No);
+              if (no != nullptr) {
+                no->click();
+              } else {
+                box->reject();
+              }
+            }
+          });
+          window.DeleteMarkWithConfirmForTest(0);
+          check("modal-seen", state->modal_seen);
+          check("modal-frame-unchanged",
+                state->modal_frame_after == state->modal_frame_before);
+          check("modal-mark-kept",
+                window.MarkCountForTest() == state->marks_before_modal);
+          log_state("modal-done");
+        });
+
+        // T2.5 回归：长按 2s 应 ≥20 帧（70ms 连发），松手后停。
+        schedule(5600, [&window, state]() {
+          window.FocusVideoForTest();
+          window.GoToInputForTest(QStringLiteral("50"));
+          state->long_hold_start = window.CurrentFrameForTest();
+          window.PressKeyDownForTest(Qt::Key_PageDown, 0);
+        });
+        schedule(7700, [&window, state, check]() {
+          state->long_hold_steps =
+              window.CurrentFrameForTest() - state->long_hold_start;
+          check("hold-2s-20frames", state->long_hold_steps >= 20);
+          std::fprintf(stderr, "T6.2 key_hold_2s steps=%lld\n",
+                       static_cast<long long>(state->long_hold_steps));
+          std::fflush(stderr);
+          window.PressKeyUpForTest(Qt::Key_PageDown, 0);
+        });
+        schedule(8000, [&window, check]() {
+          check("hold-2s-stopped", !window.StepRepeatActiveForTest());
+        });
+
+        schedule(8500, [&window, failures, check, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("final");
+          const QByteArray mapping = window.ShortcutMapForTest().toUtf8();
+          std::fprintf(stderr, "T6.2 key_shortcuts %s\n", mapping.constData());
           std::fflush(stderr);
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });

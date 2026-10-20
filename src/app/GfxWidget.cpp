@@ -1,13 +1,11 @@
 #include "app/GfxWidget.h"
 
 #include <QDebug>
-#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
-#include <QTimer>
 
 #include <cmath>
 #include <string>
@@ -32,19 +30,6 @@ GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
   setAutoFillBackground(false);
   setMinimumSize(480, 270);
   setFocusPolicy(Qt::StrongFocus);
-
-  step_timer_ = new QTimer(this);
-  step_timer_->setTimerType(Qt::PreciseTimer);
-  connect(step_timer_, &QTimer::timeout, this, [this]() {
-    if (step_direction_ == 0) {
-      return;
-    }
-    if (!step_repeat_started_) {
-      step_repeat_started_ = true;
-      step_timer_->setInterval(70);
-    }
-    emit stepRequested(step_direction_);
-  });
 }
 
 GfxWidget::~GfxWidget() = default;
@@ -216,42 +201,9 @@ void GfxWidget::keyPressEvent(QKeyEvent* event) {
     event->accept();
     return;
   }
-  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left ||
-      event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
-    if (event->isAutoRepeat()) {
-      event->accept();  // 忽略 OS 重复，连发由自己的定时器控制
-      return;
-    }
-    step_direction_ =
-        (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left) ? -1 : 1;
-    step_repeat_started_ = false;
-    emit stepRequested(step_direction_);  // 首次立即
-    step_timer_->start(300);              // 300ms 后开始 ≥12Hz 连发
-    event->accept();
-    return;
-  }
+  // 步进/首末帧已由 MainWindow 的窗口级事件过滤器统一处理（T6.2），
+  // 这样焦点在时间轴/侧栏/状态栏时同样可用，并只有一个连发源。
   QWidget::keyPressEvent(event);
-}
-
-void GfxWidget::keyReleaseEvent(QKeyEvent* event) {
-  if (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_Left ||
-      event->key() == Qt::Key_PageDown || event->key() == Qt::Key_Right) {
-    if (!event->isAutoRepeat()) {
-      step_timer_->stop();
-      step_direction_ = 0;
-      step_repeat_started_ = false;
-    }
-    event->accept();
-    return;
-  }
-  QWidget::keyReleaseEvent(event);
-}
-
-void GfxWidget::focusOutEvent(QFocusEvent* event) {
-  step_timer_->stop();
-  step_direction_ = 0;
-  step_repeat_started_ = false;
-  QWidget::focusOutEvent(event);
 }
 
 void GfxWidget::mouseDoubleClickEvent(QMouseEvent* event) {

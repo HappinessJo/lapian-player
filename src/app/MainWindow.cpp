@@ -9,9 +9,11 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -170,14 +172,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   addAction(goto_action_);
 
   zoom_in_action_ = new QAction(QStringLiteral("放大时间轴"), this);
-  zoom_in_action_->setShortcut(QKeySequence(QStringLiteral("+")));
+  // T6.2：'+'/'-' 由窗口级事件过滤器统一处理（见 HandleGlobalKey），
+  // 不再注册 QAction 快捷键，避免不同键盘布局/Qt 组合产生双触发。
   zoom_in_action_->setShortcutContext(Qt::WindowShortcut);
   zoom_in_action_->setEnabled(false);
   connect(zoom_in_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineIn);
   addAction(zoom_in_action_);
 
   zoom_out_action_ = new QAction(QStringLiteral("缩小时间轴"), this);
-  zoom_out_action_->setShortcut(QKeySequence(QStringLiteral("-")));
+  // 同 zoom_in：'-' 由 HandleGlobalKey 处理。
   zoom_out_action_->setShortcutContext(Qt::WindowShortcut);
   zoom_out_action_->setEnabled(false);
   connect(zoom_out_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineOut);
@@ -386,15 +389,40 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(gfx_, &GfxWidget::deviceReady, this, &MainWindow::OnDeviceReady);
   connect(gfx_, &GfxWidget::deviceError, this, &MainWindow::OnDeviceError, Qt::QueuedConnection);
   connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
-  connect(gfx_, &GfxWidget::stepRequested, this, [this](int delta) {
-    GoToFrame(current_frame_ + delta);
-  });
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
   connect(gfx_, &GfxWidget::fullScreenToggleRequested, this, &MainWindow::ToggleFullScreen);
   // Esc 的可用性跟随“全屏 + 是否在文本框内”：编辑备注时 Esc 仍交给文本框，
   // 不在备注框里退出全屏（T5.3 的焦点让位语义）。
   connect(qApp, &QApplication::focusChanged, this,
           [this](QWidget*, QWidget*) { UpdateFullScreenActionState(); });
+
+  // T6.2：步进/首末帧提升为窗口级快捷键。一个连发源（300ms 后 70ms），
+  // 忽略 OS 自动重复；焦点切走、窗口失活、松开按键都停。
+  step_repeat_timer_ = new QTimer(this);
+  step_repeat_timer_->setTimerType(Qt::PreciseTimer);
+  connect(step_repeat_timer_, &QTimer::timeout, this, [this]() {
+    if (step_direction_ == 0) {
+      return;
+    }
+    if (step_repeat_timer_->interval() != 70) {
+      step_repeat_timer_->setInterval(70);
+    }
+    const std::int64_t before = current_frame_;
+    GoToFrame(before + step_direction_);
+    if (current_frame_ == before) {
+      StopStepRepeat();  // 到边界：不再重复 seek 同一帧
+    }
+  });
+  connect(qApp, &QApplication::focusChanged, this,
+          [this](QWidget*, QWidget*) { StopStepRepeat(); });
+  connect(qApp, &QGuiApplication::applicationStateChanged, this,
+          [this](Qt::ApplicationState state) {
+            if (state != Qt::ApplicationActive) {
+              StopStepRepeat();
+            }
+          });
+  qApp->installEventFilter(this);
+
   connect(timeline_, &TimelineWidget::scrubStarted, this, &MainWindow::OnScrubStarted);
   connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
           &MainWindow::OnScrubTargetChanged);
@@ -402,7 +430,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
-  // 先等工作线程结束，再释放它可能引用的解码器/帧资源。
+  // 先停掉可能还在跑的步进连发并摘掉应用级过滤器。
+  StopStepRepeat();
+  if (QCoreApplication::instance() != nullptr) {
+    QCoreApplication::instance()->removeEventFilter(this);
+  }
+  // 再等工作线程结束，最后释放它可能引用的解码器/帧资源。
   if (snapshots_ != nullptr) {
     snapshots_->Drain();
   }
@@ -1426,6 +1459,118 @@ void MainWindow::RestoreFocusIfNeeded(QWidget* expected) {
   expected->setFocus(Qt::OtherFocusReason);
 }
 
+bool MainWindow::CanStepFrames() const {
+  return session_ != nullptr && session_->IsOpen() && session_->index().IsReady() &&
+         !session_->index().empty();
+}
+
+bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
+  if (event == nullptr) {
+    return false;
+  }
+  const int key = event->key();
+  const Qt::KeyboardModifiers key_modifiers = event->modifiers();
+  const bool is_step = key == Qt::Key_PageUp || key == Qt::Key_PageDown ||
+                       key == Qt::Key_Left || key == Qt::Key_Right;
+  const bool is_nav = key == Qt::Key_Home || key == Qt::Key_End;
+  // US 布局的 Shift+= 在 Qt 里通常已是 Key_Plus；少数布局/输入法会保留
+  // Key_Equal + Shift，这里一并接住，避免 '+' 在某些键盘上失效。
+  const bool is_zoom_in = key == Qt::Key_Plus ||
+                          (key == Qt::Key_Equal &&
+                           key_modifiers.testFlag(Qt::ShiftModifier));
+  const bool is_zoom = is_zoom_in || key == Qt::Key_Minus;
+  if (!is_step && !is_nav && !is_zoom) {
+    return false;
+  }
+  if (event->type() == QEvent::KeyRelease) {
+    // 只吞掉“正在连发”的松开；文本框里的松开仍交给文本框。
+    if (is_step && step_direction_ != 0) {
+      StopStepRepeat();
+      return true;
+    }
+    return false;
+  }
+  if (event->type() != QEvent::KeyPress) {
+    return false;
+  }
+  const Qt::KeyboardModifiers modifiers = key_modifiers;
+  if (modifiers.testFlag(Qt::ControlModifier) || modifiers.testFlag(Qt::AltModifier) ||
+      modifiers.testFlag(Qt::MetaModifier)) {
+    return false;  // AltGr = Ctrl+Alt；不要把它当步进
+  }
+  if (QApplication::activeModalWidget() != nullptr ||
+      QApplication::activePopupWidget() != nullptr) {
+    return false;
+  }
+  if (IsTextInputFocused()) {
+    return false;  // spec §3.7：文本框内方向键/Home/End 归文本
+  }
+  if (is_zoom) {
+    if (event->isAutoRepeat()) {
+      return true;
+    }
+    QAction* action = is_zoom_in ? zoom_in_action_ : zoom_out_action_;
+    if (action == nullptr || !action->isEnabled()) {
+      return false;
+    }
+    if (is_zoom_in) {
+      ZoomTimelineIn();
+    } else {
+      ZoomTimelineOut();
+    }
+    return true;
+  }
+  if (!CanStepFrames()) {
+    return false;
+  }
+  if (event->isAutoRepeat()) {
+    return true;  // OS 自动重复不额外走帧；连发由 step_repeat_timer_ 控制
+  }
+  if (is_nav) {
+    const std::int64_t last =
+        static_cast<std::int64_t>(session_->index().size()) - 1;
+    GoToFrame(key == Qt::Key_Home ? 0 : last);
+    return true;
+  }
+  StartStepRepeat((key == Qt::Key_PageUp || key == Qt::Key_Left) ? -1 : 1);
+  return true;
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if (event != nullptr) {
+    if (event->type() == QEvent::WindowDeactivate) {
+      StopStepRepeat();
+    } else if (event->type() == QEvent::KeyPress ||
+               event->type() == QEvent::KeyRelease) {
+      if (HandleGlobalKey(static_cast<QKeyEvent*>(event))) {
+        return true;
+      }
+    }
+  }
+  return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::StartStepRepeat(int delta) {
+  if (step_repeat_timer_ == nullptr) {
+    return;
+  }
+  step_direction_ = delta;
+  const std::int64_t before = current_frame_;
+  GoToFrame(before + delta);
+  if (current_frame_ == before) {
+    StopStepRepeat();  // 已在边界：不启动连发
+    return;
+  }
+  step_repeat_timer_->start(300);
+}
+
+void MainWindow::StopStepRepeat() {
+  step_direction_ = 0;
+  if (step_repeat_timer_ != nullptr) {
+    step_repeat_timer_->stop();
+  }
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* event) {
   // QAction 的 Esc 快捷键被禁用（例如文本框聚焦）时，按键会沿父链传到这里；
   // 这里再做一次“编辑框内不退全屏”的兜底。
@@ -1438,15 +1583,46 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
   QMainWindow::keyPressEvent(event);
 }
 
-void MainWindow::SendKeyForTest(int key) {
+void MainWindow::SendKeyPressForTest(int key, int modifiers, bool auto_repeat) {
   QWidget* target = QApplication::focusWidget();
   if (target == nullptr) {
     target = this;
   }
-  QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+  QKeyEvent press(QEvent::KeyPress, key, Qt::KeyboardModifiers(modifiers),
+                  QString(), auto_repeat);
   QApplication::sendEvent(target, &press);
-  QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier);
+}
+
+void MainWindow::SendKeyReleaseForTest(int key, int modifiers) {
+  QWidget* target = QApplication::focusWidget();
+  if (target == nullptr) {
+    target = this;
+  }
+  QKeyEvent release(QEvent::KeyRelease, key, Qt::KeyboardModifiers(modifiers));
   QApplication::sendEvent(target, &release);
+}
+
+void MainWindow::SendKeyForTest(int key, int modifiers, bool auto_repeat) {
+  SendKeyPressForTest(key, modifiers, auto_repeat);
+  if (!auto_repeat) {
+    SendKeyReleaseForTest(key, modifiers);
+  }
+}
+
+void MainWindow::PressKeyForTest(int key, int modifiers) {
+  SendKeyForTest(key, modifiers);
+}
+
+void MainWindow::PressKeyDownForTest(int key, int modifiers) {
+  SendKeyPressForTest(key, modifiers, false);
+}
+
+void MainWindow::PressKeyUpForTest(int key, int modifiers) {
+  SendKeyReleaseForTest(key, modifiers);
+}
+
+void MainWindow::PressAutoRepeatKeyForTest(int key, int modifiers) {
+  SendKeyPressForTest(key, modifiers, true);
 }
 
 void MainWindow::ToggleFullScreenForTest() { ToggleFullScreen(); }
@@ -1570,6 +1746,104 @@ qint64 MainWindow::CurrentFrameForTest() const {
 
 qint64 MainWindow::LastFullScreenToggleMsForTest() const {
   return fullscreen_last_toggle_ms_;
+}
+
+QString MainWindow::KeyStateForTest() const {
+  QStringList parts;
+  parts << QStringLiteral("frame=%1").arg(static_cast<qlonglong>(current_frame_));
+  parts << QStringLiteral("last=%1").arg(LastFrameIndexForTest());
+  parts << QStringLiteral("playing=%1").arg(IsPlayingForTest() ? 1 : 0);
+  parts << QStringLiteral("fullscreen=%1").arg(isFullScreen() ? 1 : 0);
+  parts << QStringLiteral("speed=%1").arg(rate_);
+  parts << QStringLiteral("muted=%1").arg(muted_ ? 1 : 0);
+  parts << QStringLiteral("volume=%1").arg(volume_);
+  parts << QStringLiteral("loop=%1").arg(loop_.enabled() ? 1 : 0);
+  parts << QStringLiteral("a=%1").arg(static_cast<qlonglong>(loop_.in()));
+  parts << QStringLiteral("b=%1").arg(static_cast<qlonglong>(loop_.out()));
+  parts << QStringLiteral("waveform=%1").arg(waveform_visible_ ? 1 : 0);
+  parts << QStringLiteral("zoom_in_on=%1").arg(
+      zoom_in_action_ != nullptr && zoom_in_action_->isEnabled() ? 1 : 0);
+  parts << QStringLiteral("zoom_out_on=%1").arg(
+      zoom_out_action_ != nullptr && zoom_out_action_->isEnabled() ? 1 : 0);
+  parts << QStringLiteral("marks=%1").arg(MarkCountForTest());
+  parts << QStringLiteral("snapshots=%1").arg(snapshot_saved_paths_.size());
+  parts << QStringLiteral("focus=%1").arg(FocusWidgetNameForTest());
+  parts << QStringLiteral("text_focus=%1").arg(IsTextInputFocused() ? 1 : 0);
+  parts << QStringLiteral("repeat=%1").arg(StepRepeatActiveForTest() ? 1 : 0);
+  return parts.join(QLatin1Char(' '));
+}
+
+QString MainWindow::ShortcutMapForTest() const {
+  QStringList parts;
+  auto add = [&parts](const char* name, QAction* action) {
+    if (action != nullptr) {
+      parts << QStringLiteral("%1=%2")
+                   .arg(QString::fromLatin1(name), action->shortcut().toString());
+    }
+  };
+  add("open", open_action_);
+  add("play", play_action_);
+  add("goto", goto_action_);
+  // T6.2：'+'/'-' 由窗口级事件过滤器处理，不经过 QAction 快捷键。
+  parts << QStringLiteral("zoom_in=+");
+  parts << QStringLiteral("zoom_out=-");
+  add("wave", waveform_action_);
+  add("slower", slower_action_);
+  add("faster", faster_action_);
+  add("in", loop_in_action_);
+  add("out", loop_out_action_);
+  add("loop", loop_toggle_action_);
+  add("clear", loop_clear_action_);
+  add("mark", mark_action_);
+  add("snap", snapshot_action_);
+  add("full", fullscreen_action_);
+  add("esc", exit_fullscreen_action_);
+  add("mute", mute_action_);
+  return parts.join(QLatin1Char(' '));
+}
+
+bool MainWindow::FocusMarkTreeForTest() {
+  if (mark_panel_ == nullptr) {
+    return false;
+  }
+  QWidget* tree = mark_panel_->findChild<QWidget*>(QStringLiteral("markTree"));
+  if (tree == nullptr || !tree->isVisible()) {
+    return false;
+  }
+  tree->setFocus(Qt::OtherFocusReason);
+  return tree->hasFocus();
+}
+
+bool MainWindow::FocusVolumeSliderForTest() {
+  if (volume_slider_ == nullptr || !volume_slider_->isVisible()) {
+    return false;
+  }
+  volume_slider_->setFocus(Qt::OtherFocusReason);
+  return volume_slider_->hasFocus();
+}
+
+bool MainWindow::StepRepeatActiveForTest() const {
+  return step_direction_ != 0 && step_repeat_timer_ != nullptr &&
+         step_repeat_timer_->isActive();
+}
+
+double MainWindow::SpeedForTest() const { return rate_; }
+
+bool MainWindow::WaveformVisibleForTest() const { return waveform_visible_; }
+
+bool MainWindow::MutedForTest() const { return muted_; }
+
+int MainWindow::VolumeForTest() const { return volume_; }
+
+qint64 MainWindow::LastFrameIndexForTest() const {
+  if (!CanStepFrames()) {
+    return -1;
+  }
+  return static_cast<qint64>(session_->index().size()) - 1;
+}
+
+double MainWindow::TimelinePixelsPerFrameForTest() const {
+  return timeline_ == nullptr ? 0.0 : timeline_->pixels_per_frame();
 }
 
 void MainWindow::StepBackward() {

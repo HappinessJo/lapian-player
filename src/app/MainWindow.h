@@ -20,6 +20,7 @@ class QAction;
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
+class QEvent;
 class QKeyEvent;
 class QLabel;
 class QSlider;
@@ -139,12 +140,30 @@ class MainWindow : public QMainWindow {
   bool InfoBarVisibleForTest() const;
   qint64 CurrentFrameForTest() const;
   qint64 LastFullScreenToggleMsForTest() const;
+  // T6.2 键位/焦点矩阵：真实 QKeyEvent（可带修饰键/OS 重复）发到当前焦点控件；
+  // Home/End/PgUp/PgDn/←/→ 由窗口级事件过滤器统一处理。
+  void PressKeyForTest(int key, int modifiers = 0);
+  void PressKeyDownForTest(int key, int modifiers = 0);
+  void PressKeyUpForTest(int key, int modifiers = 0);
+  void PressAutoRepeatKeyForTest(int key, int modifiers = 0);
+  bool FocusMarkTreeForTest();
+  bool FocusVolumeSliderForTest();
+  QString KeyStateForTest() const;
+  QString ShortcutMapForTest() const;
+  bool StepRepeatActiveForTest() const;
+  double SpeedForTest() const;
+  bool WaveformVisibleForTest() const;
+  bool MutedForTest() const;
+  int VolumeForTest() const;
+  qint64 LastFrameIndexForTest() const;
+  double TimelinePixelsPerFrameForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
   void closeEvent(QCloseEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private slots:
   void OpenDialog();
@@ -213,8 +232,16 @@ class MainWindow : public QMainWindow {
   void ExitFullScreen();
   void ToggleFullScreen();
   void UpdateFullScreenActionState();
-  void SendKeyForTest(int key);
+  void SendKeyForTest(int key, int modifiers = 0, bool auto_repeat = false);
   void RestoreFocusIfNeeded(QWidget* expected);
+  // T6.2：全局步进/首末帧。步进是第一等交互，焦点在时间轴/侧栏/状态栏时也应可用；
+  // 文本框与模态对话框让位，OS 自动重复只吞掉、不额外走帧。
+  bool CanStepFrames() const;
+  bool HandleGlobalKey(QKeyEvent* event);
+  void StartStepRepeat(int delta);
+  void StopStepRepeat();
+  void SendKeyPressForTest(int key, int modifiers, bool auto_repeat);
+  void SendKeyReleaseForTest(int key, int modifiers);
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
@@ -257,6 +284,8 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<SnapshotService> snapshots_;
   lapian::core::LoopRange loop_;
   QTimer* preview_timer_ = nullptr;
+  QTimer* step_repeat_timer_ = nullptr;
+  int step_direction_ = 0;
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::int64_t displayed_frame_index_ = -1;
