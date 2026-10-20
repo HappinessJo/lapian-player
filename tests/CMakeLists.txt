@@ -34,6 +34,15 @@ add_test(NAME lapian_mark_store_test COMMAND lapian_mark_store_test)
 set_tests_properties(lapian_mark_store_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T6.3 设置持久化：默认值、写读、非法值/损坏/未知键、Unicode 路径、
+# 原子覆盖写、不可读/不可写回退。只依赖 Qt Core。
+add_executable(lapian_app_settings_test app_settings_test.cpp)
+lapian_apply_common_options(lapian_app_settings_test)
+target_link_libraries(lapian_app_settings_test PRIVATE lapian_settings)
+add_test(NAME lapian_app_settings_test COMMAND lapian_app_settings_test)
+set_tests_properties(lapian_app_settings_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

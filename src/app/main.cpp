@@ -6,6 +6,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
@@ -16,6 +19,7 @@
 #include <QStringList>
 #include <QTimer>
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <cmath>
@@ -23,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <windows.h>
 #include <psapi.h>
@@ -51,6 +56,11 @@ int main(int argc, char* argv[]) {
   bool snapshot_test = false;
   bool fullscreen_test = false;
   bool key_test = false;
+  bool settings_test = false;
+  bool settings_expect = false;
+  QString settings_path_arg;
+  int settings_expect_volume = -1;
+  bool settings_expect_waveform = false;
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
@@ -83,6 +93,16 @@ int main(int argc, char* argv[]) {
       fullscreen_test = true;
     } else if (arguments[i] == QStringLiteral("--key-test")) {
       key_test = true;
+    } else if (arguments[i] == QStringLiteral("--settings-test")) {
+      settings_test = true;
+    } else if (arguments[i] == QStringLiteral("--settings-expect") &&
+               i + 2 < arguments.size()) {
+      settings_expect = true;
+      settings_expect_volume = arguments[++i].toInt();
+      settings_expect_waveform = arguments[++i].toInt() != 0;
+    } else if (arguments[i] == QStringLiteral("--settings-path") &&
+               i + 1 < arguments.size()) {
+      settings_path_arg = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--snapshot-pictures") &&
                i + 1 < arguments.size()) {
       snapshot_pictures_arg = arguments[++i];
@@ -100,6 +120,25 @@ int main(int argc, char* argv[]) {
   if (note_test) {
     qputenv("LAPIAN_MARK_LOG", "1");
   }
+  // T6.3：--settings-test 用独立根，默认 build/t6.3-settings，避免碰用户配置；
+  // --settings-path 可指向 %APPDATA%\拉片软件 做真实默认路径验证。
+  QString settings_root = settings_path_arg;
+  if ((settings_test || settings_expect) && settings_root.isEmpty()) {
+    settings_root = QDir::currentPath() + QStringLiteral("/build/t6.3-settings");
+  }
+  if (settings_test || settings_expect) {
+    qputenv("LAPIAN_SETTINGS_LOG", "1");
+  }
+  if (settings_test) {
+    QDir().mkpath(settings_root);
+    const QString settings_file =
+        QDir(settings_root).filePath(QStringLiteral("settings.json"));
+    if (QFileInfo(settings_file).isDir()) {
+      QDir(settings_file).removeRecursively();
+    } else {
+      QFile::remove(settings_file);
+    }
+  }
   QString snapshot_pictures_root;
   if (snapshot_test || fullscreen_test) {
     qputenv("LAPIAN_SNAPSHOT_LOG", "1");
@@ -115,7 +154,7 @@ int main(int argc, char* argv[]) {
   }
 
   const auto process_start = std::chrono::steady_clock::now();
-  MainWindow window;
+  MainWindow window(nullptr, settings_root);
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
     window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
@@ -124,7 +163,9 @@ int main(int argc, char* argv[]) {
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
-                                    snapshot_test, fullscreen_test, key_test,
+                                    snapshot_test, fullscreen_test, key_test, settings_test,
+                                    settings_expect, settings_expect_volume,
+                                    settings_expect_waveform, settings_root,
                                     snapshot_pictures_root, playback_rate,
                                     has_playback_rate, process_start]() {
       window.OpenFile(file_path);
@@ -1435,6 +1476,239 @@ int main(int argc, char* argv[]) {
           log_state("final");
           const QByteArray mapping = window.ShortcutMapForTest().toUtf8();
           std::fprintf(stderr, "T6.2 key_shortcuts %s\n", mapping.constData());
+          std::fflush(stderr);
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (settings_test) {
+        // T6.3 F8-A1：默认值 → 改音量/关波形 → 原子落盘 → 损坏/非法/未知键/未来
+        // schema → 目录占用回退 → 关窗保存。只持久化 volume/waveform。
+        auto failures = std::make_shared<int>(0);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.3 settings_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray state = window.SettingsStateForTest().toUtf8();
+          std::fprintf(stderr, "T6.3 settings_state %s %s\n", step, state.constData());
+          std::fflush(stderr);
+        };
+        QTimer::singleShot(500, &window,
+                           [&window, failures, check, log_state, settings_root]() {
+          auto write_file = [](const QString& path, const QByteArray& bytes) {
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+              return false;
+            }
+            const bool ok = file.write(bytes) == bytes.size();
+            file.close();
+            return ok;
+          };
+          auto read_object = [](const QString& path, QJsonObject* object) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) {
+              return false;
+            }
+            QJsonParseError error{};
+            const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
+            if (error.error != QJsonParseError::NoError || !document.isObject()) {
+              return false;
+            }
+            *object = document.object();
+            return true;
+          };
+
+          const QString path = window.SettingsPathForTest();
+          const QString injected_root = QFileInfo(settings_root).absoluteFilePath();
+          check("status-missing",
+                window.SettingsLoadStatusForTest() == QStringLiteral("missing"));
+          check("default-volume", window.VolumeForTest() == 100);
+          check("default-waveform", window.WaveformVisibleForTest());
+          check("no-file-at-start", !QFileInfo::exists(path));
+          check("path-root", QFileInfo(path).absolutePath() == injected_root);
+          const QString default_root =
+              QDir::fromNativeSeparators(window.DefaultSettingsRootForTest());
+          const bool default_in_appdata =
+              default_root.contains(QStringLiteral("appdata/roaming"),
+                                    Qt::CaseInsensitive);
+          const bool default_matches_injected =
+              QFileInfo(default_root).absoluteFilePath() == injected_root;
+          check("default-root", default_in_appdata || default_matches_injected);
+          check("default-root-name", default_root.endsWith(QStringLiteral("拉片软件")));
+          std::fprintf(stderr, "T6.3 settings_default_root path=%s\n",
+                       QDir::toNativeSeparators(window.DefaultSettingsRootForTest())
+                           .toUtf8()
+                           .constData());
+          std::fflush(stderr);
+          log_state("defaults");
+
+          window.SetVolumeForTest(37);
+          window.SetWaveformVisibleForTest(false);
+          check("dirty-after-change",
+                window.SettingsStateForTest().contains(QStringLiteral("dirty=1")));
+          check("flush-ok", window.FlushSettingsForTest());
+          check("file-exists", QFileInfo::exists(path));
+          QJsonObject object;
+          check("file-json", read_object(path, &object));
+          check("file-schema", object.value(QStringLiteral("schema")).toInt() == 1);
+          check("file-volume", object.value(QStringLiteral("volume")).toInt() == 37);
+          check("file-waveform",
+                !object.value(QStringLiteral("waveform")).toBool(true));
+          check("dirty-cleared",
+                window.SettingsStateForTest().contains(QStringLiteral("dirty=0")));
+          log_state("saved");
+
+          // 关窗路径：不再显式 Flush，CloseForTest 发送真实 QCloseEvent。
+          window.SetVolumeForTest(55);
+          check("close-accepted", window.CloseForTest());
+          check("close-saved-volume",
+                read_object(path, &object) &&
+                    object.value(QStringLiteral("volume")).toInt() == 55);
+          check("close-saved-waveform",
+                read_object(path, &object) &&
+                    !object.value(QStringLiteral("waveform")).toBool(true));
+
+          // 损坏：回退默认，不崩溃、不改写原文件（下一次保存才覆盖）。
+          check("write-corrupt", write_file(path, QByteArrayLiteral("{not json")));
+          window.ReloadSettingsForTest();
+          check("corrupt-status",
+                window.SettingsLoadStatusForTest() == QStringLiteral("corrupt"));
+          check("corrupt-volume", window.VolumeForTest() == 100);
+          check("corrupt-waveform", window.WaveformVisibleForTest());
+          check("corrupt-not-dirty",
+                window.SettingsStateForTest().contains(QStringLiteral("dirty=0")));
+
+          // 非法字段：逐项回退/clamp；未知键忽略。
+          check("write-invalid",
+                write_file(path,
+                           QByteArrayLiteral("{\"schema\":1,\"volume\":999,"
+                                             "\"waveform\":\"no\",\"extra\":42}")));
+          window.ReloadSettingsForTest();
+          check("invalid-status",
+                window.SettingsLoadStatusForTest() == QStringLiteral("loaded"));
+          check("invalid-volume-clamp", window.VolumeForTest() == 100);
+          check("invalid-waveform-default", window.WaveformVisibleForTest());
+
+          check("write-unknown",
+                write_file(path,
+                           QByteArrayLiteral("{\"schema\":1,\"volume\":33,"
+                                             "\"waveform\":false,\"unknown\":\"x\","
+                                             "\"future\":{\"nested\":[1,2]}}")));
+          window.ReloadSettingsForTest();
+          check("unknown-status",
+                window.SettingsLoadStatusForTest() == QStringLiteral("loaded"));
+          check("unknown-volume", window.VolumeForTest() == 33);
+          check("unknown-waveform", !window.WaveformVisibleForTest());
+          check("unknown-not-dirty",
+                window.SettingsStateForTest().contains(QStringLiteral("dirty=0")));
+
+          // 未来 schema：整份回退默认，不猜测字段语义。
+          check("write-future",
+                write_file(path,
+                           QByteArrayLiteral("{\"schema\":2,\"volume\":10,"
+                                             "\"waveform\":false}")));
+          window.ReloadSettingsForTest();
+          check("future-status",
+                window.SettingsLoadStatusForTest() ==
+                    QStringLiteral("unsupported_schema"));
+          check("future-defaults", window.VolumeForTest() == 100 &&
+                                       window.WaveformVisibleForTest());
+
+          // 路径被目录占用：读回退默认，写失败但不崩溃；dirty 保留供下次重试。
+          check("remove-file", QFile::remove(path));
+          check("make-dir-at-file", QDir().mkpath(path));
+          window.ReloadSettingsForTest();
+          check("dir-status",
+                window.SettingsLoadStatusForTest() == QStringLiteral("unreadable"));
+          check("dir-defaults", window.VolumeForTest() == 100 &&
+                                    window.WaveformVisibleForTest());
+          window.SetVolumeForTest(80);
+          check("dir-save-fails", !window.FlushSettingsForTest());
+          check("dir-save-keeps-dirty",
+                window.SettingsStateForTest().contains(QStringLiteral("dirty=1")));
+          check("remove-dir", QDir().rmdir(path));
+
+          // 循环/速度只本次会话：写入配置前后都不应进入 settings.json。
+          window.SetSpeedForTest(1.5);
+          window.GoToInputForTest(QStringLiteral("50"));
+          window.SetLoopInForTest();
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          check("loop-for-session",
+                window.LoopStateForTest().contains(QStringLiteral("loop=1")));
+
+          // 20 次保存延迟（开发机探针，不作为验收指标）。
+          std::vector<double> samples;
+          for (int i = 0; i < 20; ++i) {
+            window.SetVolumeForTest(40 + i % 10);
+            if (!window.FlushSettingsForTest()) {
+              check("perf-save", false);
+              break;
+            }
+            samples.push_back(window.LastSettingsSaveMsForTest());
+          }
+          std::sort(samples.begin(), samples.end());
+          if (!samples.empty()) {
+            const double p50 = samples[samples.size() / 2];
+            const std::size_t p95_index = std::min(
+                samples.size() - 1,
+                static_cast<std::size_t>(static_cast<double>(samples.size()) * 0.95));
+            std::fprintf(stderr,
+                         "T6.3 settings_save_perf n=%zu p50=%.3fms p95=%.3fms "
+                         "max=%.3fms load_ms=%.3f\n",
+                         samples.size(), p50, samples[p95_index], samples.back(),
+                         window.LastSettingsLoadMsForTest());
+            std::fflush(stderr);
+          }
+
+          // 给第二个进程（--settings-expect 55 0）留一份确定状态。
+          window.SetVolumeForTest(55);
+          window.SetWaveformVisibleForTest(false);
+          check("final-flush", window.FlushSettingsForTest());
+          check("final-file", read_object(path, &object) &&
+                                  object.value(QStringLiteral("volume")).toInt() == 55 &&
+                                  !object.value(QStringLiteral("waveform")).toBool(true));
+          // 从磁盘重载，确认落盘内容可被下一次启动直接使用。
+          window.ReloadSettingsForTest();
+          check("final-reload-status",
+                window.SettingsLoadStatusForTest() == QStringLiteral("loaded"));
+          check("final-reload-values", window.VolumeForTest() == 55 &&
+                                           !window.WaveformVisibleForTest());
+          log_state("final");
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (settings_expect) {
+        // T6.3 第二次进程：验证 F8-A1 状态恢复；循环/速度不跨会话。
+        auto failures = std::make_shared<int>(0);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.3 settings_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        QTimer::singleShot(500, &window,
+                           [&window, failures, check, settings_expect_volume,
+                            settings_expect_waveform]() {
+          check("status-loaded",
+                window.SettingsLoadStatusForTest() == QStringLiteral("loaded"));
+          check("volume-restored", window.VolumeForTest() == settings_expect_volume);
+          check("waveform-restored",
+                window.WaveformVisibleForTest() == settings_expect_waveform);
+          check("loop-session-only",
+                window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+          check("rate-session-only", std::abs(window.SpeedForTest() - 1.0) < 1.0e-9);
+          std::fprintf(stderr,
+                       "T6.3 settings_expect status=%s volume=%d waveform=%d "
+                       "expected_volume=%d expected_waveform=%d\n",
+                       window.SettingsLoadStatusForTest().toUtf8().constData(),
+                       window.VolumeForTest(), window.WaveformVisibleForTest() ? 1 : 0,
+                       settings_expect_volume, settings_expect_waveform ? 1 : 0);
           std::fflush(stderr);
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });

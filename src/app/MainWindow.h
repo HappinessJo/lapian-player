@@ -32,6 +32,11 @@ class PlaybackController;
 class SnapshotService;
 class TimelineWidget;
 
+namespace lapian::core {
+struct AppSettings;
+class SettingsStore;
+}  // namespace lapian::core
+
 namespace lapian::media {
 class MediaSession;
 class PreviewDecoder;
@@ -48,7 +53,8 @@ class MainWindow : public QMainWindow {
   Q_OBJECT
 
  public:
-  explicit MainWindow(QWidget* parent = nullptr);
+  explicit MainWindow(QWidget* parent = nullptr,
+                      const QString& settings_root = QString());
   ~MainWindow() override;
 
   // 打开本地文件；成功才替换当前会话，失败保留旧画面。
@@ -157,6 +163,17 @@ class MainWindow : public QMainWindow {
   int VolumeForTest() const;
   qint64 LastFrameIndexForTest() const;
   double TimelinePixelsPerFrameForTest() const;
+  // T6.3 设置持久化：与滑块/W 开关走同一组控件；Flush 等价于关窗保存。
+  void SetVolumeForTest(int volume);
+  void SetWaveformVisibleForTest(bool visible);
+  bool FlushSettingsForTest();
+  void ReloadSettingsForTest();
+  QString SettingsPathForTest() const;
+  QString SettingsStateForTest() const;
+  QString SettingsLoadStatusForTest() const;
+  QString DefaultSettingsRootForTest() const;
+  double LastSettingsSaveMsForTest() const;
+  double LastSettingsLoadMsForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -242,6 +259,12 @@ class MainWindow : public QMainWindow {
   void StopStepRepeat();
   void SendKeyPressForTest(int key, int modifiers, bool auto_repeat);
   void SendKeyReleaseForTest(int key, int modifiers);
+  // T6.3：加载/应用/保存设置。只在 UI 构造完成后、首次打开文件前应用；
+  // 读取失败静默回退默认，保存失败不阻塞关窗。
+  void LoadSettingsIntoUi();
+  void ApplySettings(const lapian::core::AppSettings& settings);
+  void ScheduleSettingsSave();
+  bool FlushSettings();
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
@@ -281,10 +304,12 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
   std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
   std::unique_ptr<lapian::core::MarkStore> marks_;
+  std::unique_ptr<lapian::core::SettingsStore> settings_store_;
   std::unique_ptr<SnapshotService> snapshots_;
   lapian::core::LoopRange loop_;
   QTimer* preview_timer_ = nullptr;
   QTimer* step_repeat_timer_ = nullptr;
+  QTimer* settings_save_timer_ = nullptr;
   int step_direction_ = 0;
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
@@ -317,4 +342,11 @@ class MainWindow : public QMainWindow {
   bool audio_error_shown_ = false;
   bool error_shown_ = false;
   bool marks_dirty_ = false;
+  // T6.3 设置持久化：只写 volume/waveform；loop/rate/mute 不落盘。
+  bool settings_dirty_ = false;
+  bool applying_settings_ = false;
+  bool settings_log_ = false;
+  QString settings_load_status_;
+  double settings_last_save_ms_ = 0.0;
+  double settings_last_load_ms_ = 0.0;
 };

@@ -58,6 +58,7 @@ extern "C" {
 #include "app/TimelineWidget.h"
 #include "audio/AudioEngine.h"
 #include "audio/WaveformGenerator.h"
+#include "core/AppSettings.h"
 #include "core/FrameMath.h"
 #include "core/MediaClock.h"
 #include "media/MediaProbe.h"
@@ -113,7 +114,13 @@ QString EscapeForLog(QString text) {
 
 }  // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
+    : QMainWindow(parent) {
+  settings_log_ = qEnvironmentVariableIsSet("LAPIAN_SETTINGS_LOG");
+  // T6.3：构造期间只建立 store；文件读取放在 UI 建好之后、首次打开文件之前，
+  // 失败/损坏静默回退默认值。
+  settings_store_ =
+      std::make_unique<lapian::core::SettingsStore>(settings_root);
   setWindowTitle(QStringLiteral("拉片软件"));
   resize(1280, 720);
   setAcceptDrops(true);
@@ -384,6 +391,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
   base_info_ = QStringLiteral("Qt %1 · FFmpeg %2").arg(QString::fromLatin1(qVersion()),
                                                        QString::fromLatin1(av_version_info()));
+
+  // T6.3：音量/波形跨会话。变更去抖 250ms 落盘；关窗/析构再 flush 一次。
+  // 关窗保存不进入 SnapshotService::Drain 的等待链。
+  settings_save_timer_ = new QTimer(this);
+  settings_save_timer_->setSingleShot(true);
+  settings_save_timer_->setInterval(250);
+  connect(settings_save_timer_, &QTimer::timeout, this, [this]() { FlushSettings(); });
+  LoadSettingsIntoUi();
+
   ShowEmptyState();
 
   connect(gfx_, &GfxWidget::deviceReady, this, &MainWindow::OnDeviceReady);
@@ -430,7 +446,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
-  // 先停掉可能还在跑的步进连发并摘掉应用级过滤器。
+  // 先落盘设置（不等待截图/标记），再停掉可能还在跑的步进连发并摘掉应用级过滤器。
+  FlushSettings();
   StopStepRepeat();
   if (QCoreApplication::instance() != nullptr) {
     QCoreApplication::instance()->removeEventFilter(this);
@@ -440,6 +457,91 @@ MainWindow::~MainWindow() {
     snapshots_->Drain();
   }
   av_frame_free(&displayed_frame_);
+}
+
+void MainWindow::LoadSettingsIntoUi() {
+  if (settings_store_ == nullptr) {
+    return;
+  }
+  QElapsedTimer timer;
+  timer.start();
+  const lapian::core::SettingsLoadResult result = settings_store_->Load();
+  settings_last_load_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+  settings_load_status_ = lapian::core::SettingsLoadStatusName(result.status);
+  ApplySettings(result.settings);
+  if (settings_log_) {
+    const QByteArray path = settings_store_->file_path().toUtf8();
+    std::fprintf(stderr,
+                 "T6.3 settings_load path=%s status=%s volume=%d waveform=%d "
+                 "load_ms=%.3f\n",
+                 path.constData(), settings_load_status_.toUtf8().constData(),
+                 result.settings.volume, result.settings.waveform_visible ? 1 : 0,
+                 settings_last_load_ms_);
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::ApplySettings(const lapian::core::AppSettings& settings) {
+  const bool previous = applying_settings_;
+  applying_settings_ = true;
+  const int volume = std::clamp(settings.volume, 0, 100);
+  if (volume_slider_ != nullptr) {
+    // 走真实 valueChanged 路径，同步 volume_/tooltip/音频引擎（此时通常还没有音频）。
+    volume_slider_->setValue(volume);
+  } else {
+    volume_ = volume;
+  }
+  if (waveform_action_ != nullptr) {
+    // 走真实 toggled 路径，同步 waveform_visible_ 与时间轴波形带。
+    waveform_action_->setChecked(settings.waveform_visible);
+  } else {
+    waveform_visible_ = settings.waveform_visible;
+    if (timeline_ != nullptr) {
+      timeline_->SetWaveformVisible(settings.waveform_visible);
+    }
+  }
+  applying_settings_ = previous;
+  settings_dirty_ = false;
+}
+
+void MainWindow::ScheduleSettingsSave() {
+  if (applying_settings_) {
+    return;
+  }
+  settings_dirty_ = true;
+  if (settings_save_timer_ != nullptr) {
+    settings_save_timer_->start();
+  }
+}
+
+bool MainWindow::FlushSettings() {
+  if (settings_save_timer_ != nullptr) {
+    settings_save_timer_->stop();
+  }
+  if (settings_store_ == nullptr) {
+    return false;
+  }
+  if (!settings_dirty_) {
+    return true;
+  }
+  QElapsedTimer timer;
+  timer.start();
+  const bool ok = settings_store_->Save(
+      lapian::core::AppSettings{volume_, waveform_visible_});
+  settings_last_save_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+  if (ok) {
+    settings_dirty_ = false;
+  }
+  if (settings_log_) {
+    const QByteArray path = settings_store_->file_path().toUtf8();
+    std::fprintf(stderr,
+                 "T6.3 settings_save path=%s ok=%d volume=%d waveform=%d "
+                 "save_ms=%.3f\n",
+                 path.constData(), ok ? 1 : 0, volume_, waveform_visible_ ? 1 : 0,
+                 settings_last_save_ms_);
+    std::fflush(stderr);
+  }
+  return ok;
 }
 
 void MainWindow::ShowEmptyState() {
@@ -935,6 +1037,7 @@ void MainWindow::ToggleWaveform(bool visible) {
   if (timeline_ != nullptr) {
     timeline_->SetWaveformVisible(visible);
   }
+  ScheduleSettingsSave();
 }
 
 void MainWindow::ApplySpeed(double rate) {
@@ -1846,6 +1949,60 @@ double MainWindow::TimelinePixelsPerFrameForTest() const {
   return timeline_ == nullptr ? 0.0 : timeline_->pixels_per_frame();
 }
 
+void MainWindow::SetVolumeForTest(int volume) {
+  const int clamped = std::clamp(volume, 0, 100);
+  if (volume_slider_ != nullptr) {
+    volume_slider_->setValue(clamped);
+    return;
+  }
+  volume_ = clamped;
+  ScheduleSettingsSave();
+}
+
+void MainWindow::SetWaveformVisibleForTest(bool visible) {
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setChecked(visible);
+    return;
+  }
+  waveform_visible_ = visible;
+  if (timeline_ != nullptr) {
+    timeline_->SetWaveformVisible(visible);
+  }
+  ScheduleSettingsSave();
+}
+
+bool MainWindow::FlushSettingsForTest() { return FlushSettings(); }
+
+void MainWindow::ReloadSettingsForTest() { LoadSettingsIntoUi(); }
+
+QString MainWindow::SettingsPathForTest() const {
+  return settings_store_ == nullptr ? QString() : settings_store_->file_path();
+}
+
+QString MainWindow::SettingsStateForTest() const {
+  QString text = QStringLiteral("path=%1 status=%2 volume=%3 waveform=%4 dirty=%5");
+  text = text.arg(QDir::toNativeSeparators(SettingsPathForTest()))
+             .arg(settings_load_status_)
+             .arg(volume_)
+             .arg(waveform_visible_ ? 1 : 0)
+             .arg(settings_dirty_ ? 1 : 0);
+  return text;
+}
+
+QString MainWindow::SettingsLoadStatusForTest() const { return settings_load_status_; }
+
+QString MainWindow::DefaultSettingsRootForTest() const {
+  return lapian::core::SettingsStore::DefaultRootDir();
+}
+
+double MainWindow::LastSettingsSaveMsForTest() const {
+  return settings_last_save_ms_;
+}
+
+double MainWindow::LastSettingsLoadMsForTest() const {
+  return settings_last_load_ms_;
+}
+
 void MainWindow::StepBackward() {
   if (session_ != nullptr && session_->IsOpen()) {
     CancelPendingMarkJump();
@@ -1943,6 +2100,8 @@ void MainWindow::ShowOpenError(const QString& message) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+  // T6.3：先把音量/波形落盘；它独立于截图/标记的等待链，失败也不阻止关窗。
+  FlushSettings();
   CancelPendingMarkJump();
   // 关窗前把已按下的截图任务写完，避免用户以为存了却丢文件。
   if (snapshots_ != nullptr) {
@@ -2647,6 +2806,7 @@ void MainWindow::OnVolumeChanged(int value) {
   if (audio_) {
     audio_->SetVolume(value);
   }
+  ScheduleSettingsSave();
 }
 
 void MainWindow::ToggleMute(bool muted) {
