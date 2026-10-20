@@ -18,6 +18,9 @@ namespace {
 
 constexpr auto kAudioClockStartTimeout = std::chrono::milliseconds(300);
 constexpr double kDropLateThresholdSeconds = 0.100;
+// T7.2.1：B 已解码但音频时钟在 B 之前停住时，按“一帧的墙钟时长 + 余量”
+// 兜底回 A；不能用一个固定短超时，否则 0.25x 会在 B 真正到点前提前跳走。
+constexpr int kMaxLoopJumpFailures = 3;
 
 }  // namespace
 
@@ -45,6 +48,10 @@ void PlaybackController::SetSession(lapian::media::MediaSession* session) {
   loop_enabled_ = false;
   loop_in_ = 0;
   loop_out_ = 0;
+  loop_out_reached_ = false;
+  loop_out_wait_active_ = false;
+  loop_jump_count_ = 0;
+  loop_jump_failures_ = 0;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
@@ -86,6 +93,9 @@ void PlaybackController::SetPosition(std::int64_t frame, std::int64_t pts_us) {
   start_pending_ = false;
   rate_pending_ = false;
   frozen_ = false;
+  loop_out_reached_ = LoopActive() && frame >= loop_out_;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
@@ -111,6 +121,10 @@ void PlaybackController::SetLoopRange(bool enabled, std::int64_t in,
   loop_enabled_ = enabled;
   loop_in_ = in;
   loop_out_ = out;
+  // 区间/开关变了，旧的 B 到达状态不能沿用。
+  loop_out_reached_ = false;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
 
   if (!playing_) {
     frozen_ = false;
@@ -177,6 +191,10 @@ void PlaybackController::Play() {
   if (end_ && !LoopActive()) {
     return;
   }
+  // 从 B/末尾再起播时，B 已经“到达”，下一次 Tick 应直接回 A。
+  loop_out_reached_ = LoopActive() && current_frame_ >= loop_out_;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
   // T7.2：上一步进可能命中帧缓存，解码器没有停在当前帧之后；起播前补一次定位。
   std::string position_error;
   if (!session_->EnsureSequentialPosition(current_frame_, &position_error)) {
@@ -209,6 +227,7 @@ void PlaybackController::Pause() {
   start_pending_ = false;
   audio_clock_active_ = false;
   rate_pending_ = false;
+  loop_out_wait_active_ = false;
   emit stateChanged(false);
 }
 
@@ -250,6 +269,9 @@ bool PlaybackController::SeekToFrameInternal(std::int64_t frame) {
   pending_pts_seconds_ = 0.0;
   pending_info_ = lapian::media::DecodedFrameInfo{};
   end_ = false;
+  loop_out_reached_ = LoopActive() && frame >= loop_out_;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
 
   const int rotation = session_->info().rotation.counterclockwise_degrees;
   AVFrame* clone = av_frame_clone(info.av_frame);
@@ -265,6 +287,13 @@ bool PlaybackController::JumpToLoopStart(std::int64_t trigger_frame) {
   const auto jump_start = std::chrono::steady_clock::now();
   const int pending_before = pending_frame_;
   if (!SeekToFrameInternal(loop_in_)) {
+    ++loop_jump_failures_;
+    if (loop_log_) {
+      std::fprintf(stderr, "T4.2 loop_jump_failed from=%lld to=%lld failures=%d\n",
+                   static_cast<long long>(trigger_frame),
+                   static_cast<long long>(loop_in_), loop_jump_failures_);
+      std::fflush(stderr);
+    }
     return false;
   }
   const double seek_ms =
@@ -278,6 +307,10 @@ bool PlaybackController::JumpToLoopStart(std::int64_t trigger_frame) {
   rate_pending_ = false;
   start_pending_since_ = std::chrono::steady_clock::now();
   end_ = false;
+  loop_out_reached_ = false;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
+  ++loop_jump_count_;
 
   if (loop_log_) {
     std::fprintf(stderr,
@@ -322,6 +355,10 @@ double PlaybackController::TargetSeconds() {
 void PlaybackController::Tick() {
   if (!playing_ || session_ == nullptr || frozen_) {
     return;
+  }
+  if (!LoopActive()) {
+    loop_out_reached_ = false;
+    loop_out_wait_active_ = false;
   }
 
   if (start_pending_) {
@@ -370,18 +407,35 @@ void PlaybackController::Tick() {
     }
     av_frame_free(&best_frame);
   };
+  // B 已解码但 target 还没越过它时，先把 B 放进 best_frame，超时兜底时能呈现 B。
+  auto present_pending_if_needed = [&]() {
+    if (best_frame == nullptr && has_pending_ && pending_info_.av_frame != nullptr) {
+      best_frame = av_frame_clone(pending_info_.av_frame);
+      if (best_frame != nullptr) {
+        best_index = pending_frame_;
+        best_seconds = pending_pts_seconds_;
+      }
+    }
+  };
 
   for (int guard = 0; guard < 32; ++guard) {
     if (!has_pending_) {
       lapian::media::DecodedFrameInfo info;
       std::string error;
       if (!session_->decoder().DecodeNextFrame(&info, &error)) {
-        // 到文件尾：如果已经播到 B，先回 A 继续循环，而不是结束播放。
-        if (LoopActive() && current_frame_ >= loop_out_) {
+        // 到文件尾：B 是末帧时没有 B+1，不能只依赖 current_frame_ 正好等于 B；
+        // 只要已经解码到 B（或 B 之前最后一帧已呈现），且循环开启，就回 A。
+        if (LoopActive() &&
+            (loop_out_reached_ || current_frame_ >= loop_out_ ||
+             last_decoded_frame_ >= loop_out_)) {
           emit_best();
           if (JumpToLoopStart(current_frame_)) {
             return;
           }
+          if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
+            Finish();
+          }
+          return;
         }
         emit_best();
         end_ = true;
@@ -393,25 +447,73 @@ void PlaybackController::Tick() {
       pending_frame_ = last_decoded_frame_ + 1;
       last_decoded_frame_ = pending_frame_;
       pending_pts_seconds_ = PtsToSeconds(info.pts);
+      if (LoopActive() && pending_frame_ >= loop_out_) {
+        loop_out_reached_ = true;
+        if (!loop_out_wait_active_) {
+          loop_out_wait_active_ = true;
+          loop_out_wait_since_ = std::chrono::steady_clock::now();
+        }
+      } else if (pending_frame_ < loop_out_) {
+        loop_out_wait_active_ = false;
+      }
     }
 
     if (pending_pts_seconds_ > target + 0.0005) {
+      // T7.2.1：B 已解码但音频时钟在 B 之前停住（音频先 EOF/设备时钟不推进）时，
+      // 不能无限等 target 越过 B；超过“一帧墙钟 + 余量”就按 B 已到达回 A。
+      const double media_frame_ms =
+          pending_info_.duration_us > 0
+              ? static_cast<double>(pending_info_.duration_us) / 1000.0
+              : 41.7;
+      const double hold_ms =
+          std::max(100.0, media_frame_ms / std::max(0.25, rate_) * 1.25 + 30.0);
+      if (LoopActive() && has_pending_ && pending_frame_ >= loop_out_ &&
+          loop_out_wait_active_ &&
+          std::chrono::steady_clock::now() - loop_out_wait_since_ >=
+              std::chrono::milliseconds(static_cast<int>(hold_ms))) {
+        present_pending_if_needed();
+        if (loop_log_) {
+          std::fprintf(stderr,
+                       "T4.2 loop_end_hold frame=%d pts=%.4f target=%.4f "
+                       "audio_clock=%d\n",
+                       pending_frame_, pending_pts_seconds_, target,
+                       audio_clock_active_ ? 1 : 0);
+          std::fflush(stderr);
+        }
+        emit_best();
+        if (JumpToLoopStart(pending_frame_)) {
+          return;
+        }
+        if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
+          Finish();
+        }
+        return;
+      }
       emit_best();
       return;
     }
 
     // B+1 已到呈现时间：丢弃它并回 A。B 已在上一 tick 呈现，B+1 不会被 emit。
     if (LoopActive() && pending_frame_ > loop_out_) {
+      loop_out_reached_ = true;
       emit_best();
       if (JumpToLoopStart(current_frame_)) {
         return;
       }
+      if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
+        Finish();
+      }
+      // 跳转失败时不要把 B+1 当普通帧呈现；下一 tick 重试。
+      return;
     }
 
     const double late = target - pending_pts_seconds_;
     const int frame_index = pending_frame_;
     const double frame_seconds = pending_pts_seconds_;
     has_pending_ = false;
+    if (LoopActive() && frame_index >= loop_out_) {
+      loop_out_reached_ = true;
+    }
 
     if (late > kDropLateThresholdSeconds) {
       continue;  // 丢弃过期帧，继续解到接近目标时间
@@ -437,6 +539,8 @@ void PlaybackController::Finish() {
   start_pending_ = false;
   audio_clock_active_ = false;
   rate_pending_ = false;
+  loop_out_reached_ = false;
+  loop_out_wait_active_ = false;
   emit stateChanged(false);
   emit reachedEnd();
 }

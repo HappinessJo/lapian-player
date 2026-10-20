@@ -83,6 +83,8 @@ class MainWindow : public QMainWindow {
   // T4.2 自动化验证入口：Space 语义与定帧/循环状态。
   void TogglePlaybackForTest();
   QString LoopPlaybackStateForTest() const;
+  // T7.2.1：B→A 成功跳转次数，用于“B 在末帧”回归。
+  int LoopJumpCountForTest() const;
   // T5.2 自动化验证入口：与 Ctrl+M / 侧栏点击 / 删除确认后的路径一致；
   // 删除入口跳过确认对话框，确认逻辑仍由 UI 路径覆盖。
   void AddMarkForTest();

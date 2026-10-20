@@ -27,6 +27,7 @@ extern "C" {
 #pragma warning(pop)
 #endif
 
+#include "media/FrameCache.h"
 #include "media/VideoDecoder.h"
 #include "platform/gfx/D3D11Device.h"
 #include "platform/gfx/VideoRenderer.h"
@@ -190,6 +191,48 @@ void TestFrame(const std::string& path, bool prefer_hardware, const std::string&
     Check(false, label + " SetFrame 失败: " + error);
     return;
   }
+  // T7.2.1：硬解纹理可能是 1920x1088 的编码尺寸，但 fit 必须用 1920x1080
+  // 的显示尺寸；否则 PgUp 命中缓存软件帧时会看到画幅轻微跳变。
+  Check(renderer.video_width() == frame.av_frame->width &&
+            renderer.video_height() == frame.av_frame->height,
+        label + " 渲染尺寸等于显示尺寸（不是纹理分配尺寸）");
+  UINT texture_width = 0;
+  UINT texture_height = 0;
+  if (frame.hardware && frame.av_frame->data[0] != nullptr) {
+    auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame.av_frame->data[0]);
+    D3D11_TEXTURE2D_DESC texture_desc{};
+    texture->GetDesc(&texture_desc);
+    texture_width = texture_desc.Width;
+    texture_height = texture_desc.Height;
+  }
+  std::printf("       %s frame=%dx%d texture=%ux%u renderer=%dx%d\n", label.c_str(),
+              frame.width, frame.height, texture_width, texture_height,
+              renderer.video_width(), renderer.video_height());
+
+  // T7.2.1：模拟 PgUp 命中帧缓存后的软件帧上传；渲染尺寸必须和硬解帧一致，
+  // 否则 1080p 从 1920x1088 切到 1920x1080 会出现画幅轻微跳变。
+  const int hardware_width = renderer.video_width();
+  const int hardware_height = renderer.video_height();
+  lapian::media::FrameCache cache;
+  cache.SetLimits(128u * 1024u * 1024u, 8);
+  if (cache.Put(frame.av_frame, 0, frame.pts, frame.pts_us, frame.duration_us,
+                frame.key_frame)) {
+    AVFrame* cached = nullptr;
+    if (cache.Get(0, &cached, nullptr)) {
+      if (renderer.SetFrame(cached, 0, &error)) {
+        Check(renderer.video_width() == hardware_width &&
+                  renderer.video_height() == hardware_height,
+              label + " 缓存回拷前后渲染尺寸一致");
+      } else {
+        Check(false, label + " 缓存帧 SetFrame 失败: " + error);
+      }
+      av_frame_free(&cached);
+    } else {
+      Check(false, label + " 缓存帧命中失败");
+    }
+  } else {
+    Check(false, label + " 缓存帧写入失败");
+  }
 
   RenderTarget target;
   if (!CreateRenderTarget(device.device(), 640, 360, &target, &error)) {
@@ -236,6 +279,7 @@ int main() {
   TestFrame("media/proxy/proxy-V1.mp4", false, "proxy-V1 软解");
   TestFrame("media/proxy/proxy-V3.mp4", false, "proxy-V3 软解");
   TestFrame("media/proxy/proxy-V1.mp4", true, "proxy-V1 硬解");
+  TestFrame("media/测试.mp4", true, "1080p 硬解");
   TestFrame("media/proxy/proxy-V4.mp4", true, "proxy-V4 4K 硬解");
   TestFrame("build/test-media/10bit.mp4", false, "10-bit 软解");
 

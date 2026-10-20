@@ -59,6 +59,8 @@ int main(int argc, char* argv[]) {
   bool step_test = false;
   bool ab_test = false;
   bool loop_test = false;
+  // T7.2.1：B=末帧回归（A=last-20，B=last），确认不会停在 B。
+  bool loop_end_test = false;
   bool mark_test = false;
   bool note_test = false;
   bool snapshot_test = false;
@@ -110,6 +112,8 @@ int main(int argc, char* argv[]) {
       ab_test = true;
     } else if (arguments[i] == QStringLiteral("--loop-test")) {
       loop_test = true;
+    } else if (arguments[i] == QStringLiteral("--loop-end-test")) {
+      loop_end_test = true;
     } else if (arguments[i] == QStringLiteral("--mark-test")) {
       mark_test = true;
     } else if (arguments[i] == QStringLiteral("--note-test")) {
@@ -275,7 +279,8 @@ int main(int argc, char* argv[]) {
   // T7.1：旧 GUI 回归在 OpenFile 后立即导航；保持同步索引语义。
   // 产品路径与 --startup-test 走异步索引（首帧先出，后台扫描）。
   const bool legacy_gui_test =
-      step_test || ab_test || loop_test || mark_test || note_test || snapshot_test ||
+      step_test || ab_test || loop_test || loop_end_test || mark_test || note_test ||
+      snapshot_test ||
       fullscreen_test || key_test || settings_test || settings_expect || dpi_test ||
       banner_test;
   if (legacy_gui_test) {
@@ -338,7 +343,8 @@ int main(int argc, char* argv[]) {
 
   if (!file_path.isEmpty() && !memory_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
-                                    step_test, ab_test, loop_test, mark_test, note_test,
+                                    step_test, ab_test, loop_test, loop_end_test,
+                                    mark_test, note_test,
                                     snapshot_test, fullscreen_test, key_test, settings_test,
                                     settings_expect, settings_expect_volume,
                                     settings_expect_waveform, settings_root, dpi_test,
@@ -597,6 +603,56 @@ int main(int argc, char* argv[]) {
           log_state("paused");
         });
         QTimer::singleShot(20500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
+      }
+      if (loop_end_test) {
+        // T7.2.1：A=last-20、B=last，B 是文件末帧；必须持续回 A，不能停在 B。
+        auto failures = std::make_shared<int>(0);
+        auto last_frame = std::make_shared<qint64>(-1);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T7.2.1 loop_end_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        schedule(300, [&window, last_frame, check]() {
+          const qint64 last = window.LastFrameIndexForTest();
+          const qint64 a = std::max<qint64>(0, last - 20);
+          *last_frame = last;
+          window.GoToInputForTest(QString::number(a));
+          window.SetLoopInForTest();
+          window.GoToInputForTest(QString::number(last));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          const QString loop_state = window.LoopStateForTest();
+          std::fprintf(stderr, "T7.2.1 loop_end_ready %s\n",
+                       loop_state.toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-ready", loop_state.contains(QStringLiteral("loop=1")) &&
+                                  loop_state.contains(QStringLiteral("b=") +
+                                                      QString::number(last)));
+          window.GoToInputForTest(QString::number(a));
+          window.StartPlaybackForTest();
+        });
+        schedule(5000, [&window, failures, last_frame, check]() {
+          const int jumps = window.LoopJumpCountForTest();
+          const qint64 frame = window.CurrentFrameForTest();
+          const qint64 last = *last_frame;
+          const QString state = window.LoopPlaybackStateForTest();
+          std::fprintf(stderr,
+                       "T7.2.1 loop_end_result jumps=%d frame=%lld last=%lld state=%s\n",
+                       jumps, static_cast<long long>(frame),
+                       static_cast<long long>(last), state.toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-jumps-at-least-3", jumps >= 3);
+          check("still-playing", state.contains(QStringLiteral("playing=1")));
+          check("loop-still-on", state.contains(QStringLiteral("loop=1")));
+          check("frame-in-range", frame >= 0 && frame <= last);
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
       }
       if (mark_test) {
         // T5.2：101 个标记（0–100）、重开、点击跳转、100 标记操作与性能、

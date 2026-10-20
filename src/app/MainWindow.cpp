@@ -1907,6 +1907,10 @@ QString MainWindow::LoopStateForTest() const {
 
 void MainWindow::TogglePlaybackForTest() { TogglePlayback(); }
 
+int MainWindow::LoopJumpCountForTest() const {
+  return playback_ == nullptr ? 0 : playback_->LoopJumpCountForTest();
+}
+
 QString MainWindow::LoopPlaybackStateForTest() const {
   bool audio_clock = false;
   double audio_clock_seconds = 0.0;

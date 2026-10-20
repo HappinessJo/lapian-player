@@ -218,6 +218,41 @@ int main() {
     std::printf("[SKIP] media/proxy/proxy-V4.mp4 不存在\n");
   }
 
+  // 1080p 的 D3D11VA 纹理常见 1920x1088 分配、1920x1080 显示；回拷缓存必须
+  // 保留显示尺寸，否则缓存命中后 fit 会跳变（T7.2.1）。
+  if (std::filesystem::exists("media/测试.mp4")) {
+    lapian::media::VideoDecoder decoder;
+    std::string error;
+    if (decoder.Open("media/测试.mp4", 0, true, &error)) {
+      lapian::media::DecodedFrameInfo decoded;
+      if (decoder.DecodeFirstFrame(&decoded, &error)) {
+        FrameCache hd_cache;
+        hd_cache.SetLimits(64 * kMiB, 24);
+        const bool stored =
+            hd_cache.Put(decoded.av_frame, 0, decoded.pts, decoded.pts_us,
+                         decoded.duration_us, decoded.key_frame);
+        Check(stored, "1080p 硬件帧回拷缓存成功");
+        AVFrame* hit = nullptr;
+        Check(hd_cache.Get(0, &hit, nullptr), "1080p 回拷帧可命中");
+        Check(hit != nullptr && hit->width == decoded.width &&
+                  hit->height == decoded.height,
+              "1080p 缓存帧保留显示尺寸（不是 1088 编码尺寸）");
+        if (hit != nullptr) {
+          std::printf("       1080p hw=%d frame=%dx%d hit=%dx%d\n",
+                      decoded.hardware ? 1 : 0, decoded.width, decoded.height,
+                      hit->width, hit->height);
+          av_frame_free(&hit);
+        }
+      } else {
+        std::printf("[SKIP] 1080p 首帧解码失败：%s\n", error.c_str());
+      }
+    } else {
+      std::printf("[SKIP] 1080p 解码器打开失败：%s\n", error.c_str());
+    }
+  } else {
+    std::printf("[SKIP] media/测试.mp4 不存在\n");
+  }
+
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);
     return 1;

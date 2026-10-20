@@ -42,6 +42,8 @@ class PlaybackController : public QObject {
 
   bool IsPlaying() const { return playing_; }
   int CurrentFrame() const { return current_frame_; }
+  // T7.2.1：B→A 成功跳转次数；用于“B 在末帧”回归，确认不是停在 B。
+  int LoopJumpCountForTest() const { return loop_jump_count_; }
   double rate() const { return rate_; }
   // A=B 且循环开启时为 true：时间不推进、音频不输出。
   bool frozen() const { return frozen_; }
@@ -86,6 +88,13 @@ class PlaybackController : public QObject {
   bool loop_enabled_ = false;
   std::int64_t loop_in_ = 0;
   std::int64_t loop_out_ = 0;
+  // T7.2.1：B 在末帧时没有 B+1 可等；显式记录“B 已解到”，并用墙钟兜底
+  // 处理音频时钟在 B 之前停住（音频 EOF/设备时钟不推进）。
+  bool loop_out_reached_ = false;
+  bool loop_out_wait_active_ = false;
+  std::chrono::steady_clock::time_point loop_out_wait_since_;
+  int loop_jump_count_ = 0;
+  int loop_jump_failures_ = 0;
   std::chrono::steady_clock::time_point start_pending_since_;
   bool timing_log_ = false;
   bool loop_log_ = false;

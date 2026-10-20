@@ -30,6 +30,10 @@ class VideoRenderer {
   void ClearFrame();
   bool HasFrame() const { return has_frame_; }
 
+  // 当前用于 fit 的显示尺寸（不是 D3D11 纹理分配尺寸）；回归用。
+  int video_width() const { return video_width_; }
+  int video_height() const { return video_height_; }
+
   // 清屏 + 画当前帧；rtv 来自 SwapChain。
   void Render(ID3D11RenderTargetView* render_target, UINT viewport_width, UINT viewport_height);
 

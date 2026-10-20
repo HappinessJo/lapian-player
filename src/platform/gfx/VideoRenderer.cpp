@@ -460,14 +460,37 @@ bool VideoRenderer::UploadHardwareFrame(const AVFrame* frame, std::string* error
     }
     return false;
   }
-  if (!CreateTexture(source_desc.Width, source_desc.Height, source_desc.Format, error)) {
+
+  // T7.2.1：D3D11VA 纹理可能按编码尺寸分配（1080p 常见 1920x1088），
+  // 而 AVFrame 的 width/height 是显示尺寸（1920x1080）。fit 和纹理都只取
+  // 有效显示区域，避免硬解帧与缓存软件帧的画幅不一致。
+  const UINT display_width =
+      frame->width > 0 ? static_cast<UINT>(frame->width) : source_desc.Width;
+  const UINT display_height =
+      frame->height > 0 ? static_cast<UINT>(frame->height) : source_desc.Height;
+  const UINT active_width = std::min(display_width, source_desc.Width);
+  const UINT active_height = std::min(display_height, source_desc.Height);
+  if (active_width == 0 || active_height == 0) {
+    if (error != nullptr) {
+      *error = "硬件帧显示尺寸无效";
+    }
+    return false;
+  }
+  if (!CreateTexture(active_width, active_height, source_desc.Format, error)) {
     return false;
   }
 
+  D3D11_BOX active_box{};
+  active_box.left = 0;
+  active_box.top = 0;
+  active_box.front = 0;
+  active_box.right = active_width;
+  active_box.bottom = active_height;
+  active_box.back = 1;
   context_->CopySubresourceRegion(video_texture_.Get(), 0, 0, 0, 0, source, subresource,
-                                  nullptr);
-  video_width_ = static_cast<int>(source_desc.Width);
-  video_height_ = static_cast<int>(source_desc.Height);
+                                  &active_box);
+  video_width_ = static_cast<int>(active_width);
+  video_height_ = static_cast<int>(active_height);
   bit_depth_ = source_desc.Format == DXGI_FORMAT_P010 ? 10 : 8;
   return true;
 }
