@@ -56,6 +56,7 @@ void AudioLog(const char* format, ...) {
 struct AudioEngine::Impl {
   std::string path;
   int stream_index = -1;
+  double av_offset = 0.0;
 
   std::thread thread;
   std::mutex mutex;
@@ -402,7 +403,7 @@ struct AudioEngine::Impl {
       Publish(AudioState::kError, error);
       return false;
     }
-    if (!decoder.SeekTo(target, &error)) {
+    if (!decoder.SeekTo(std::max(0.0, target + av_offset), &error)) {
       want_play.store(false);
       Publish(AudioState::kError, error);
       return false;
@@ -665,7 +666,8 @@ AudioEngine::AudioEngine() : impl_(std::make_unique<Impl>()) {}
 
 AudioEngine::~AudioEngine() { Close(); }
 
-bool AudioEngine::Open(const std::string& utf8_path, int stream_index) {
+bool AudioEngine::Open(const std::string& utf8_path, int stream_index,
+                       double av_offset_seconds) {
   Close();
   {
     std::lock_guard<std::mutex> lock(impl_->status_mutex);
@@ -680,6 +682,7 @@ bool AudioEngine::Open(const std::string& utf8_path, int stream_index) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->path = utf8_path;
     impl_->stream_index = stream_index;
+    impl_->av_offset = std::isfinite(av_offset_seconds) ? av_offset_seconds : 0.0;
     impl_->quit = false;
     impl_->open_requested = true;
     impl_->want_play.store(false);

@@ -138,6 +138,10 @@ bool DecodeV9(lapian::audio::AudioDecoder* decoder) {
   bool have_first = false;
   bool finite = true;
   bool stereo_equal = true;
+  double click_peak_time = 0.0;
+  int click_peak = 0;
+  const double click_start = 100.0 / 24.0 - 1.0 / 24.0;
+  const double click_end = 100.0 / 24.0 + 1.0 / 24.0;
   for (int guard = 0; guard < 10000; ++guard) {
     lapian::audio::AudioChunk chunk;
     const lapian::audio::AudioDecodeResult result =
@@ -166,6 +170,16 @@ bool DecodeV9(lapian::audio::AudioDecoder* decoder) {
       if (std::fabs(chunk.samples[frame] - chunk.samples[frame + 1]) > 1e-6f) {
         stereo_equal = false;
       }
+      const double sample_time =
+          chunk.pts_seconds + static_cast<double>(frame / 2) / 48000.0;
+      if (sample_time >= click_start && sample_time <= click_end) {
+        const int magnitude = static_cast<int>(
+            std::fabs(chunk.samples[frame]) * 32768.0f);
+        if (magnitude > click_peak) {
+          click_peak = magnitude;
+          click_peak_time = sample_time;
+        }
+      }
     }
   }
 
@@ -176,6 +190,9 @@ bool DecodeV9(lapian::audio::AudioDecoder* decoder) {
   if (have_first) {
     Check(first_pts > -0.1 && first_pts < 0.1, "V9 首块 PTS 接近 0");
   }
+  Check(click_peak > 500, "V9 第 100 帧附近有 click 峰值");
+  CheckNear(click_peak_time, 100.0 / 24.0, 1.0 / 24.0,
+            "V9 click 峰值在视频第 100 帧 ±1 帧内");
 
   if (!decoder->SeekTo(2.0, &error)) {
     Check(false, "V9 音频 seek 2.0s 失败: " + error);

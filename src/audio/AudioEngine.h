@@ -36,8 +36,10 @@ class AudioEngine {
   AudioEngine(const AudioEngine&) = delete;
   AudioEngine& operator=(const AudioEngine&) = delete;
 
-  // stream_index < 0 时选第一条音频流。返回 false 只表示线程启动失败。
-  bool Open(const std::string& utf8_path, int stream_index);
+  // stream_index < 0 时选第一条音频流。av_offset_seconds 是音频首包相对视频
+  // 首帧的全局偏移（T3.4）；返回 false 只表示线程启动失败。
+  bool Open(const std::string& utf8_path, int stream_index,
+            double av_offset_seconds = 0.0);
   void Close();
 
   // 从媒体秒开始播放；音频时钟/精确同步留 T3.2。

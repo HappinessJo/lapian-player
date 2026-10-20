@@ -74,6 +74,10 @@ struct MediaInfo {
   VideoStreamInfo video;
   bool has_audio = false;
   AudioStreamInfo audio;
+  // T3.4：第一条音轨首包 PTS（含 priming）相对首帧视频 PTS 的全局偏移。
+  // 正值表示音频时间轴晚于视频；波形映射与音频起播共用这个值。
+  std::int64_t av_offset_us = 0;
+  bool av_offset_estimated = false;
   DisplayRotation rotation;
   VfrInfo vfr;
 };

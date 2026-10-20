@@ -22,6 +22,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/display.h>
 #include <libavutil/error.h>
+#include <libavutil/intreadwrite.h>
 #include <libavutil/pixdesc.h>
 }
 #if defined(_MSC_VER)
@@ -96,7 +97,17 @@ double ElapsedMs(std::chrono::steady_clock::time_point started) {
 }
 
 // 只采样有限数量的视频帧；不读全片，避免把 T1.1 的打开耗时拖进 P2 预算。
-VfrInfo DetectVfr(AVFormatContext* format, int video_index, AVRational time_base) {
+// T3.4：顺带记录第一条视频/音频包的首个 PTS 与音频 skip_samples。
+struct FirstPacketPts {
+  bool video_seen = false;
+  bool audio_seen = false;
+  std::int64_t video_pts = 0;
+  std::int64_t audio_pts = 0;
+  int audio_skip_samples = 0;
+};
+
+VfrInfo DetectVfr(AVFormatContext* format, int video_index, int audio_index,
+                  AVRational video_time_base, FirstPacketPts* first) {
   VfrInfo info;
   PacketPtr packet(av_packet_alloc());
   if (!packet) {
@@ -111,7 +122,21 @@ VfrInfo DetectVfr(AVFormatContext* format, int video_index, AVRational time_base
 
   while (av_read_frame(format, packet.get()) >= 0) {
     if (packet->stream_index == video_index && packet->pts != AV_NOPTS_VALUE) {
+      if (!first->video_seen) {
+        first->video_seen = true;
+        first->video_pts = packet->pts;
+      }
       pts_values.push_back(packet->pts);
+    } else if (audio_index >= 0 && packet->stream_index == audio_index &&
+               packet->pts != AV_NOPTS_VALUE && !first->audio_seen) {
+      first->audio_seen = true;
+      first->audio_pts = packet->pts;
+      size_t side_size = 0;
+      const std::uint8_t* skip = av_packet_get_side_data(
+          packet.get(), AV_PKT_DATA_SKIP_SAMPLES, &side_size);
+      if (skip != nullptr && side_size >= sizeof(std::uint32_t)) {
+        first->audio_skip_samples = static_cast<int>(AV_RL32(skip));
+      }
     }
     av_packet_unref(packet.get());
 
@@ -126,7 +151,7 @@ VfrInfo DetectVfr(AVFormatContext* format, int video_index, AVRational time_base
 
   std::vector<double> intervals;
   intervals.reserve(pts_values.size() > 0 ? pts_values.size() - 1 : 0);
-  const double seconds_per_tick = av_q2d(time_base);
+  const double seconds_per_tick = av_q2d(video_time_base);
   for (std::size_t i = 1; i < pts_values.size(); ++i) {
     const double interval =
         static_cast<double>(pts_values[i] - pts_values[i - 1]) * seconds_per_tick;
@@ -323,7 +348,23 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
   }
 
   ReadRotation(video_parameters, &result.info.rotation);
-  result.info.vfr = DetectVfr(format.get(), video_index, video_stream->time_base);
+  FirstPacketPts first;
+  result.info.vfr = DetectVfr(format.get(), video_index, audio_index,
+                              video_stream->time_base, &first);
+  if (audio_index >= 0 && first.video_seen && first.audio_seen) {
+    const AVStream* audio_stream = format->streams[audio_index];
+    const std::int64_t video_us =
+        av_rescale_q(first.video_pts, video_stream->time_base, AV_TIME_BASE_Q);
+    const std::int64_t audio_us =
+        av_rescale_q(first.audio_pts, audio_stream->time_base, AV_TIME_BASE_Q);
+    const int sample_rate = result.info.audio.sample_rate;
+    const std::int64_t priming_us =
+        sample_rate > 0
+            ? av_rescale(first.audio_skip_samples, 1'000'000, sample_rate)
+            : 0;
+    result.info.av_offset_us = audio_us + priming_us - video_us;
+    result.info.av_offset_estimated = true;
+  }
   result.probe_ms = ElapsedMs(started);
   return result;
 }

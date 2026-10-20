@@ -401,7 +401,8 @@ void MainWindow::OpenFile(const QString& path) {
     audio->SetVolume(volume_);
     audio->SetMute(muted_);
     audio->SetRate(rate_);
-    if (!audio->Open(path_utf8, info.audio.stream_index)) {
+    if (!audio->Open(path_utf8, info.audio.stream_index,
+                     static_cast<double>(info.av_offset_us) / 1.0e6)) {
       audio_label_->setText(QStringLiteral("音频不可用"));
       statusBar()->showMessage(QStringLiteral("音频线程启动失败，视频继续静音播放"), 5000);
     } else {

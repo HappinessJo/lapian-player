@@ -186,6 +186,9 @@ void TestV9() {
   CheckNear(result.info.video.frame_rate.ToDouble(), 24.0, 0.01, "V9 帧率 24");
   Check(result.info.has_audio, "V9 有音轨");
   Check(result.info.audio.sample_rate == 48000, "V9 音频 48kHz");
+  Check(result.info.av_offset_estimated, "V9 估出 A/V 偏移");
+  Check(std::abs(result.info.av_offset_us) <= 42000,
+        "V9 首包 PTS+priming 与视频对齐（≤1 帧）");
   Check(result.info.rotation.counterclockwise_degrees == 0, "V9 无旋转");
   Check(!result.info.vfr.suspect, "V9 不误报 VFR");
   Check(result.info.duration_us >= 4000000 && result.info.duration_us <= 6000000,

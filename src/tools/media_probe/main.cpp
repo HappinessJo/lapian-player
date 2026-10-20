@@ -112,6 +112,8 @@ void PrintResult(const MediaProbeResult& result) {
     std::printf("AUDIO_CODEC=%s\n", info.audio.codec.c_str());
     std::printf("AUDIO_RATE=%d\n", info.audio.sample_rate);
     std::printf("AUDIO_CHANNELS=%d\n", info.audio.channels);
+    std::printf("AV_OFFSET_US=%lld\n", static_cast<long long>(info.av_offset_us));
+    std::printf("AV_OFFSET_ESTIMATED=%d\n", info.av_offset_estimated ? 1 : 0);
   }
 }
 
