@@ -1,6 +1,6 @@
 # 给下个 agent 的新会话提示词（可直接复制）
 
-- **版本**：v15（2026-10-20；T7.2 内存预算/有界缓存完成；下一步 T7.3 2h 稳定性）
+- **版本**：v16（2026-10-20；T7.2.1 B=末帧循环/PgUp 画幅热修完成；下一步 T7.3 2h 稳定性）
 
 ```text
 你是「拉片软件」项目的 coding agent。项目是 Windows 桌面端的帧级参考片审阅器
@@ -8,7 +8,8 @@
 
 请先读：
 - E:\拉片软件开发\AGENTS.md
-- docs\handoff-2026-10-20-t7.2.md（当前交接：内存预算/帧缓存/切文件释放）
+- docs\handoff-2026-10-20-t7.2.1.md（当前交接：B=末帧循环/PgUp 画幅热修）
+- docs\handoff-2026-10-20-t7.2.md（内存预算/帧缓存/切文件释放）
 - docs\handoff-2026-10-20-t7.1.md（冷启动埋点/后台索引/P1/P2）
 - docs\handoff-2026-10-20-t6.5.md（状态横幅/优先级/状态栏）
 - docs\handoff-2026-10-20-t6.4.md（DPI/布局）
@@ -17,24 +18,25 @@
 - docs\handoff-2026-10-20-t2.9.1.md（反向拖动预览补丁）
 - spec.md（重点 §3.1 F1-A4/A5、§3.2 F2-A7、§3.8、§4.1 P1/P2/P10/P11/P14、§4.2、§4.4）
 - plan.md、tasks.md（M7 T7.1–T7.8）、docs\adr\ADR-001 到 ADR-006
-- docs\perf\T7.2-memory.md、docs\perf\T7.1-cold-start.md、docs\perf\T6.5-banners.md、
-  docs\perf\T6.4-dpi.md、docs\perf\T6.3-settings.md
+- docs\perf\T7.2.1-loop-renderer.md、docs\perf\T7.2-memory.md、docs\perf\T7.1-cold-start.md、
+  docs\perf\T6.5-banners.md、docs\perf\T6.4-dpi.md、docs\perf\T6.3-settings.md
 
 第一步核对，不要相信旧对话的转述：
 1. git status --short；git log --oneline -8
-2. 读 tasks.md 的 M7（T7.1–T7.8）与 T7.2 的完成说明
+2. 读 tasks.md 的 M7（T7.1–T7.8）与 T7.2/T7.2.1 的完成说明
 3. 跑 ctest（命令见下），确认 20/20
 
 当前基线（以 git log 为准）：
-- 代码提交 `55f5c5d` 或更新；本提示词/交接的文档提交在其后；工作区应 clean。
-- M0–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5（含 T6.2.1）、T7.1、T7.2 代码完成；
-  ctest 20/20（约 13.94s）；dist 32.48MB / 25 文件。
+- 代码提交 `fe01648` 或更新；本提示词/交接的文档提交在其后；工作区应 clean。
+- M0–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5（含 T6.2.1）、T7.1、T7.2、T7.2.1 代码完成；
+  ctest 20/20（约 14.93s）；dist 32.49MB / 25 文件。
 - 已有：打开/播放/逐帧/seek/长按/帧号/时间码、时间轴缩放滚动/点击拖动/拖动预览、
   WASAPI、IAudioClock+QPC、0.25–2x 变速、A/V offset、200/s 波形、A/B 循环/定帧、
   sidecar 标记/备注、S 截图、F/双击全屏、T6.2 全局键位、T6.3 设置、T6.4 100–200% DPI、
   T6.5 状态横幅（错误/VFR/10-bit/超出保证/扫描中/无音频，唯一横幅 + 其余进状态栏）、
   T2.9.1 反向拖动、T6.2.1 自动重复 KeyRelease 修复、T7.1 启动埋点/后台索引、
-  T7.2 有界帧缓存（1080p 64MiB/24、4K 96MiB/8）、--memory-test。
+  T7.2 有界帧缓存（1080p 64MiB/24、4K 96MiB/8）、--memory-test、
+  T7.2.1 B=末帧循环/PgUp 显示尺寸热修（--loop-end-test）。
 - 未完成：T7.3–T7.8；正式 V1–V10、基线机/冷缓存 P1/P2、4K 真素材、2h soak、
   设备恢复、波形/听感/截图/输入法真人验收。
 - 已知缺口：长 GOP 循环 B→A 148–157ms 未达 F4-A2；F6-A8 只有 V9 短 GOP 数字；
@@ -45,8 +47,11 @@
   T6.5 的 VFR/10-bit 是 320×240 合成素材，没有真实 4K VFR/HDR 颜色验收；
   T7.1 的 P1/P2 是开发机暖文件缓存，没有清 OS 缓存、没有基线机/正式 V1；
   T7.2 的 P10/P11 是开发机暖缓存、152s 1080p 代理、4K 450 帧代理，不是 V1/V4；
-  4K 步进 p95 ~228ms 未达 P7 150ms；连续步进高水位 1080p 333.7MB / 4K 593.7MB。
-  不要把用户手测写成正式 P3/P4/P8、F2-A7/F1-A4、P1/P2 或基线机通过。
+  4K 步进 p95 ~228ms 未达 P7 150ms；连续步进高水位 1080p 333.7MB / 4K 593.7MB；
+  T7.2.1 的 B=末帧循环和渲染尺寸已自动化（V9/1080p/4K 5/6/6 次 B→A，
+  1080p 纹理 1920×1088/渲染 1920×1080），但 PgUp 画幅人眼观感、0.25x 长跑
+  和真实 V1/V10 仍未复测。
+  不要把用户手测写成正式 P3/P4/P8、F2-A7/F1-A4、P1/P2、F4-A1/A2 或基线机通过。
 
 ## 已交付、直接复用（不要重写）
 
@@ -69,6 +74,14 @@
   - `lapian_frame_cache_test`（约 50 断言）；`FrameIndexEntry==16B` 静态断言。
   - **不要改** P10 的“打开并暂停 60s”口径、不要拿步进高水位当 P10/P11、
     不要宣称 4K P7 通过；T7.4 再处理 4K 步进。
+- T7.2.1 B=末帧循环/PgUp 画幅热修：
+  - B=末帧没有 B+1：`loop_out_reached_` + EOF 用 `last_decoded/current` + 一帧墙钟
+    hold（按 `frame_duration/rate` 缩放）兜底；跳转失败最多重试 3 次。
+  - `--loop-end-test`：A=last-20、B=last，5s 后要求 jumps≥3、playing=1、loop=1。
+  - 1080p D3D11VA 纹理是 1920×1088、显示 1920×1080；`UploadHardwareFrame`
+    按显示尺寸建纹理并只拷有效区域，缓存回拷前后渲染尺寸必须一致。
+  - **不要改回**用 `D3D11_TEXTURE2D_DESC` 尺寸做 fit；不要把 hold 改成固定短超时
+    （0.25x 会提前跳）。用户物理画幅复测仍未做，别写成正式验收。
 - T7.1 冷启动/索引后置：
   - main 的 `--startup-test`：阶段日志 `app_created/window_created/window_shown/
     ui_ready/open_begin/open_returned/first_present`；无文件在 ui_ready 后退出，
@@ -102,10 +115,12 @@
   `--settings-test` / `--settings-expect`。
 - `--banner-test`（74 项）、`--dpi-test`（9 项/档）、`--key-test`（77 项）、
   `--fullscreen-test`（+4K 48 项）、`--snapshot-test`（41 项）、`--note-test`（18 项）、
-  `--mark-test`（101 标记）、`--ab-test`、`--loop-test`、`--index-test` 都是回归。
+  `--mark-test`（101 标记）、`--ab-test`、`--loop-test`、`--loop-end-test`、
+  `--index-test` 都是回归。
 - 不改 sidecar schema、MarkStore、MarkPanel 编辑/焦点语义、D3D11 锁、全屏语义、
   设置文件格式、T6.4 断点/侧栏宽度、T2.9.1 目标帧/缓存口径、T6.2.1 release 语义、
-  T6.5 的 StatusNotice 优先级与状态栏分工、T7.1 的扫描中/就绪语义、T7.2 的缓存策略。
+  T6.5 的 StatusNotice 优先级与状态栏分工、T7.1 的扫描中/就绪语义、T7.2 的缓存策略、
+  T7.2.1 的 B 到达/渲染显示尺寸语义。
 
 ## 下一步：T7.3 2 小时稳定性
 
@@ -150,6 +165,15 @@ $p = Start-Process -FilePath (Join-Path $PWD 'dist\lapian.exe') -ArgumentList @(
   -Wait -PassThru -RedirectStandardError (Join-Path $PWD 'build\t7.3-key.log')
 Write-Host "key exit=$($p.ExitCode)"
 
+# T7.2.1 B=末帧循环回归（5s；期望 jumps>=3、playing=1）
+foreach ($f in @('media\V9.mp4','media\测试.mp4','media\proxy\proxy-V4.mp4')) {
+  $p = Start-Process -FilePath (Join-Path $PWD 'dist\lapian.exe') -ArgumentList @(
+    '--file',(Join-Path $PWD $f),'--loop-end-test',
+    '--settings-path',(Join-Path $PWD 'build\t7.3-loop-settings')) `
+    -Wait -PassThru -RedirectStandardError (Join-Path $PWD 'build\t7.3-loop-end.log')
+  Write-Host "loop-end $f exit=$($p.ExitCode)"
+}
+
 # T6.5/T6.4/T6.1/T5.4/T6.3：见 T7.2 交接 §3.5；
 # T7.1 冷启动：scripts\startup-bench.ps1，20 次看 19/20。
 
@@ -185,6 +209,10 @@ Write-Host "key exit=$($p.ExitCode)"
   `index_test scan_too_fast` 并跳过扫描断言，不要把它当失败，但要在报告里说明。
 - 4K proxy 只有 450 帧（约 15s）；`--memory-mode play` 20s/60s 样本是播完保持末帧，
   不是持续播放 60s；要看播放中数字用 5s/10s。
+- `--loop-end-test` 用 A=last-20、B=last，5s 后要求 `jumps>=3`；1080p 约 6 次。
+  它不替代 `--loop-test`（B=160），也不替代用户物理画幅复测。
+- 1080p D3D11VA 纹理常为 1920×1088、显示 1920×1080；`lapian_video_renderer_test`
+  会打印 texture/frame/renderer 三个尺寸，渲染尺寸必须等于显示尺寸。
 - 1080p 连续 200 步进后 WS 333.7MB > P10 250MB，但 P10 口径是“打开并暂停 60s”
   （89.3MB）；不要把步进高水位写成 P10 失败/通过。
 - 4K 步进 p95 ~228ms 未达 P7 150ms；T7.4 处理，不要写成 4K P7 通过。
@@ -193,7 +221,7 @@ Write-Host "key exit=$($p.ExitCode)"
 - 计划内任务不用逐项确认；只有计划外、不可逆、规格歧义、权限/硬件限制才问。
 - 一个任务 = 一次可审查变更；先提交代码，再提交文档（交接 + perf 证据）。
 - 每个任务保持 build-release.ps1、ctest、dist 通过；性能任务补 docs/perf/ 数字。
-- 只做 F1–F8/P1–P14；spec v0.3 冻结；不重做 T1–T7.2；
+- 只做 F1–F8/P1–P14；spec v0.3 冻结；不重做 T1–T7.2.1；
   不提前宣称 IME/AltGr、F1-A6 真人、F6/F8、F8-A1 真实 %APPDATA%、
   4K/VFR/正式 P3/P4/P8、T6.2.1 硬件级自动化、T6.4 真实显示缩放/多显示器、
   T6.5 真实 VFR/10-bit/HDR、T7.1 冷缓存/基线机/正式 V1 P1/P2、
@@ -207,7 +235,8 @@ Write-Host "key exit=$($p.ExitCode)"
 
 - 这段提示词自包含；新 agent 仍应先读文件、跑 `ctest`，不要只信这段摘要。
 - 若 HEAD 已前进（交接/提示词提交），以 `git log` 和当前 `tasks.md` 为准。
-- T7.2 已完成；下一步 T7.3 2h 稳定、T7.4 4K、T7.5 鲁棒性、T7.6 打包/关联、
+- T7.2.1 已完成；下一步 T7.3 2h 稳定、T7.4 4K、T7.5 鲁棒性、T7.6 打包/关联、
   T7.7 全量验收、T7.8 基线脚本。
 - T7.1 的 `--startup-test`/`--index-test`/同步测试开关、T7.2 的 `FrameCache`/
-  `--memory-test`/缓存策略不要重写；T7.3 只在其上做监测/生命周期增量。
+  `--memory-test`/缓存策略、T7.2.1 的 B 到达/显示尺寸不要重写；T7.3 只在其上做
+  监测/生命周期增量。
