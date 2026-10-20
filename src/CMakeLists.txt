@@ -44,6 +44,14 @@ add_library(lapian_framemath STATIC
 lapian_apply_common_options(lapian_framemath)
 target_include_directories(lapian_framemath PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# T5.1 标记 sidecar：Qt Core JSON + 原子写 + AppData 回退，不依赖 UI/FFmpeg。
+add_library(lapian_marks STATIC
+  core/MarkStore.cpp
+  core/MarkStore.h)
+lapian_apply_common_options(lapian_marks)
+target_include_directories(lapian_marks PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_marks PUBLIC Qt6::Core)
+
 # T2.7 时间轴：纯 C++ 几何模型 + Qt Widgets 控件，产品与测试共用。
 add_library(lapian_timeline STATIC
   core/TimelineModel.cpp

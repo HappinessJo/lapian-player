@@ -25,6 +25,15 @@ lapian_apply_common_options(lapian_loop_range_test)
 target_link_libraries(lapian_loop_range_test PRIVATE lapian_framemath)
 add_test(NAME lapian_loop_range_test COMMAND lapian_loop_range_test)
 
+# T5.1 标记 sidecar：路径规范化/哈希、roundtrip、合并、损坏备份、空文件、
+# AppData 回退/迁回、frame+pts 校正、原子写失败保护。只依赖 Qt Core。
+add_executable(lapian_mark_store_test mark_store_test.cpp)
+lapian_apply_common_options(lapian_mark_store_test)
+target_link_libraries(lapian_mark_store_test PRIVATE lapian_marks)
+add_test(NAME lapian_mark_store_test COMMAND lapian_mark_store_test)
+set_tests_properties(lapian_mark_store_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)
