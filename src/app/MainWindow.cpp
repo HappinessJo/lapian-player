@@ -602,6 +602,8 @@ void MainWindow::StartPlaybackForTest() {
   }
 }
 
+void MainWindow::StepForwardForTest() { StepForward(); }
+
 bool MainWindow::IsTextInputFocused() const {
   QWidget* focus = QApplication::focusWidget();
   return qobject_cast<QLineEdit*>(focus) != nullptr ||

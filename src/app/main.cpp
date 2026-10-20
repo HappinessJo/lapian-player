@@ -19,6 +19,7 @@ int main(int argc, char* argv[]) {
   QString file_path;
   QString goto_text;
   bool auto_play = false;
+  bool step_test = false;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
@@ -32,6 +33,8 @@ int main(int argc, char* argv[]) {
       has_playback_rate = true;
     } else if (arguments[i] == QStringLiteral("--play")) {
       auto_play = true;
+    } else if (arguments[i] == QStringLiteral("--step-test")) {
+      step_test = true;
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -40,8 +43,8 @@ int main(int argc, char* argv[]) {
   MainWindow window;
   window.show();
   if (!file_path.isEmpty()) {
-    QTimer::singleShot(0, &window, [&window, file_path, goto_text, auto_play, playback_rate,
-                                    has_playback_rate]() {
+    QTimer::singleShot(0, &window, [&window, file_path, goto_text, auto_play, step_test,
+                                    playback_rate, has_playback_rate]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -51,6 +54,10 @@ int main(int argc, char* argv[]) {
       }
       if (auto_play) {
         window.StartPlaybackForTest();
+      }
+      if (step_test) {
+        QTimer::singleShot(1200, &window, [&window]() { window.StepForwardForTest(); });
+        QTimer::singleShot(1800, &window, [&window]() { window.StartPlaybackForTest(); });
       }
     });
   }

@@ -44,6 +44,7 @@ class MainWindow : public QMainWindow {
   void GoToFrame(std::int64_t frame);
   // T1.5 自动化验证入口，等价于按一次 Space；不改变默认“打开不播放”。
   void StartPlaybackForTest();
+  void StepForwardForTest();
   // T2.6 自动化验证入口：与 Ctrl+G 输入框使用同一套解析。
   void GoToInputForTest(const QString& text);
   // T3.3 自动化验证入口：直接设置 0.25–2x 速度。
