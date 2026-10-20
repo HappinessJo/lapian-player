@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QColor>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QMouseEvent>
@@ -215,6 +216,51 @@ void TestPointerInteraction() {
   Check(widget.current_frame() == 20, "松手后播放头仍在第 20 帧");
 }
 
+void TestWaveformRender() {
+  TimelineWidget widget;
+  widget.resize(960, 72);
+  widget.SetFrameCount(120);
+  widget.SetPixelsPerFrame(8.0);
+  widget.show();
+  QApplication::processEvents();
+
+  widget.SetWaveformSource(
+      []() { return static_cast<std::size_t>(1000); },
+      [](std::size_t begin, std::size_t end) {
+        if (begin <= 833 && end > 833) {
+          return TimelineWidget::WaveformBucketView{30000, -30000};
+        }
+        return TimelineWidget::WaveformBucketView{0, 0};
+      },
+      0.0, 1.0 / 24.0,
+      [](std::int64_t frame) { return frame * 41667; });
+  Check(widget.height() == 128, "波形显示时时间轴增高 56px");
+
+  QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::black);
+  {
+    QPainter painter(&image);
+    widget.render(&painter);
+  }
+
+  int waveform_pixels = 0;
+  for (int y = 58; y < 114; ++y) {
+    for (int x = 800; x < 808; ++x) {
+      const QColor color = image.pixelColor(x, y);
+      if (color.blue() > 150 && color.blue() > color.red() + 40) {
+        ++waveform_pixels;
+      }
+    }
+  }
+  Check(waveform_pixels > 0, "frame100 的 click 桶画在对应像素列");
+
+  widget.SetWaveformVisible(false);
+  Check(widget.height() == 72, "W 关闭后波形区高度归零");
+  widget.SetWaveformVisible(true);
+  widget.ClearWaveform();
+  Check(widget.height() == 72, "清空波形后恢复基础高度");
+}
+
 void TestPaintBenchmark() {
   TimelineWidget widget;
   widget.resize(1920, 72);
@@ -258,6 +304,19 @@ void TestPaintBenchmark() {
 
   widget.SetPixelsPerFrame(8.0);
   measure("8px/frame + scroll", true);
+
+  widget.SetWaveformSource(
+      []() { return static_cast<std::size_t>(1440000); },
+      [](std::size_t begin, std::size_t end) {
+        const std::int16_t value =
+            (begin + end) % 2 == 0 ? static_cast<std::int16_t>(12000)
+                                   : static_cast<std::int16_t>(-12000);
+        return TimelineWidget::WaveformBucketView{value, value};
+      },
+      0.0, 1.0 / 60.0,
+      [](std::int64_t frame) { return frame * 16667; });
+  widget.FitToWindow();
+  measure("fit 432k + 2h waveform", false);
 }
 
 }  // namespace
@@ -271,6 +330,7 @@ int main(int argc, char** argv) {
   TestModel();
   TestWidgetViewState();
   TestPointerInteraction();
+  TestWaveformRender();
   TestPaintBenchmark();
 
   if (g_failures > 0) {

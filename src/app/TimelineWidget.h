@@ -3,11 +3,13 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <functional>
 
 #include "core/TimelineModel.h"
 
 class QMouseEvent;
 class QPaintEvent;
+class QPainter;
 class QPointF;
 class QResizeEvent;
 class QScrollBar;
@@ -41,6 +43,26 @@ class TimelineWidget : public QWidget {
   // T2.8 的鼠标事件与 T2.9/T2.10 的拖动路径共用这一入口。
   std::int64_t FrameAtPosition(const QPointF& position) const;
 
+  // T3.6 波形：bucket 时间轴是音频时间，显示时减 offset 再映射到帧格。
+  // data 可能仍在增长（后台生成），count/bucket 每次 paint 重新取。
+  struct WaveformBucketView {
+    std::int16_t min = 0;
+    std::int16_t max = 0;
+  };
+  using WaveformCountFn = std::function<std::size_t()>;
+  using WaveformRangeFn =
+      std::function<WaveformBucketView(std::size_t, std::size_t)>;
+  using FramePtsFn = std::function<std::int64_t(std::int64_t)>;
+
+  void SetWaveformSource(WaveformCountFn count, WaveformRangeFn range,
+                         double offset_seconds, double fallback_frame_seconds,
+                         FramePtsFn frame_pts);
+  void SetWaveformMessage(const QString& message);
+  void ClearWaveform();
+  void SetWaveformVisible(bool visible);
+  bool waveform_visible() const { return waveform_visible_; }
+  bool waveform_active() const { return waveform_active_; }
+
  signals:
   // 按下时发一次；拖动中目标帧变化时发；松开时发最终目标帧。
   void scrubStarted(qint64 frame);
@@ -59,6 +81,10 @@ class TimelineWidget : public QWidget {
   static constexpr int kScrollBarHeight = 14;
 
   int RulerHeight() const;
+  int WaveformHeight() const;
+  void UpdateHeight();
+  void DrawWaveform(QPainter& painter, const QRectF& rect);
+  double FramePtsSeconds(std::int64_t frame) const;
   void SyncScrollBar();
   void ApplyZoom(double factor, double anchor_x);
 
@@ -70,4 +96,12 @@ class TimelineWidget : public QWidget {
   bool follow_playhead_ = true;
   bool follow_before_scrub_ = true;
   bool scrubbing_ = false;
+  WaveformCountFn waveform_count_;
+  WaveformRangeFn waveform_range_;
+  FramePtsFn frame_pts_;
+  QString waveform_message_;
+  double waveform_offset_seconds_ = 0.0;
+  double fallback_frame_seconds_ = 1.0 / 30.0;
+  bool waveform_active_ = false;
+  bool waveform_visible_ = true;
 };

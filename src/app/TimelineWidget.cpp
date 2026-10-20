@@ -17,17 +17,20 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 
-constexpr int kTimelineHeight = 72;
+constexpr int kTimelineBaseHeight = 72;
+constexpr int kRulerHeight = 58;
+constexpr int kWaveformHeight = 56;
 constexpr double kPlayheadMarginPx = 8.0;
 
 }  // namespace
 
 TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
   setObjectName(QStringLiteral("timeline"));
-  setFixedHeight(kTimelineHeight);
+  setFixedHeight(kTimelineBaseHeight);
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   // 不抢走视频区的键盘焦点；滚轮缩放不需要焦点。
   setFocusPolicy(Qt::NoFocus);
@@ -52,7 +55,10 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
   });
 }
 
-void TimelineWidget::Clear() { SetFrameCount(0); }
+void TimelineWidget::Clear() {
+  ClearWaveform();
+  SetFrameCount(0);
+}
 
 void TimelineWidget::SetFrameCount(std::int64_t count) {
   if (scrubbing_) {
@@ -180,7 +186,152 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 int TimelineWidget::RulerHeight() const {
-  return std::max(0, height() - kScrollBarHeight);
+  return std::max(0, height() - kScrollBarHeight - WaveformHeight());
+}
+
+int TimelineWidget::WaveformHeight() const {
+  return waveform_active_ && waveform_visible_ ? kWaveformHeight : 0;
+}
+
+void TimelineWidget::UpdateHeight() {
+  setFixedHeight(kTimelineBaseHeight + WaveformHeight());
+  updateGeometry();
+  update();
+}
+
+void TimelineWidget::SetWaveformSource(WaveformCountFn count,
+                                       WaveformRangeFn range,
+                                       double offset_seconds,
+                                       double fallback_frame_seconds,
+                                       FramePtsFn frame_pts) {
+  waveform_count_ = std::move(count);
+  waveform_range_ = std::move(range);
+  frame_pts_ = std::move(frame_pts);
+  waveform_offset_seconds_ = offset_seconds;
+  fallback_frame_seconds_ =
+      fallback_frame_seconds > 1e-6 ? fallback_frame_seconds : 1.0 / 30.0;
+  waveform_message_.clear();
+  waveform_active_ = true;
+  UpdateHeight();
+}
+
+void TimelineWidget::SetWaveformMessage(const QString& message) {
+  waveform_count_ = nullptr;
+  waveform_range_ = nullptr;
+  frame_pts_ = nullptr;
+  waveform_message_ = message;
+  waveform_active_ = true;
+  UpdateHeight();
+}
+
+void TimelineWidget::ClearWaveform() {
+  waveform_count_ = nullptr;
+  waveform_range_ = nullptr;
+  frame_pts_ = nullptr;
+  waveform_message_.clear();
+  waveform_active_ = false;
+  UpdateHeight();
+}
+
+void TimelineWidget::SetWaveformVisible(bool visible) {
+  if (waveform_visible_ == visible) {
+    return;
+  }
+  waveform_visible_ = visible;
+  UpdateHeight();
+}
+
+double TimelineWidget::FramePtsSeconds(std::int64_t frame) const {
+  if (frame_pts_) {
+    const std::int64_t pts_us = frame_pts_(frame);
+    if (pts_us > 0) {
+      return static_cast<double>(pts_us) / 1.0e6;
+    }
+  }
+  return static_cast<double>(frame) * fallback_frame_seconds_;
+}
+
+void TimelineWidget::DrawWaveform(QPainter& painter, const QRectF& rect) {
+  painter.fillRect(rect, QColor(QStringLiteral("#141417")));
+  painter.setPen(QColor(QStringLiteral("#2b2b31")));
+  painter.drawLine(QPointF(rect.left(), rect.top()),
+                   QPointF(rect.right(), rect.top()));
+
+  QFont hint_font = painter.font();
+  hint_font.setPointSizeF(8.5);
+  painter.setFont(hint_font);
+
+  if (!waveform_message_.isEmpty()) {
+    painter.setPen(QColor(QStringLiteral("#777781")));
+    painter.drawText(rect, Qt::AlignCenter, waveform_message_);
+    return;
+  }
+  if (!waveform_count_ || !waveform_range_ || model_.frame_count() <= 0) {
+    return;
+  }
+
+  const std::size_t bucket_count = waveform_count_();
+  if (bucket_count == 0) {
+    painter.setPen(QColor(QStringLiteral("#777781")));
+    painter.drawText(rect, Qt::AlignCenter, QStringLiteral("波形生成中…"));
+    return;
+  }
+
+  const std::int64_t frame_count = model_.frame_count();
+  const double center = rect.center().y();
+  const double amplitude = std::max(1.0, rect.height() / 2.0 - 4.0);
+  const int first_x = std::max(0, static_cast<int>(std::floor(rect.left())));
+  const int last_x =
+      std::min(width(), static_cast<int>(std::ceil(rect.right())));
+
+  painter.setPen(QColor(QStringLiteral("#7aa2f7")));
+  for (int x = first_x; x < last_x; ++x) {
+    const std::int64_t frame0 = model_.FrameAtX(static_cast<double>(x) + 0.5);
+    const double start_seconds = FramePtsSeconds(frame0);
+    std::int64_t frame1 = model_.FrameAtX(static_cast<double>(x + 1) + 0.5);
+    double end_seconds =
+        frame1 >= frame_count ? start_seconds + fallback_frame_seconds_
+                              : FramePtsSeconds(frame1);
+    if (frame1 <= frame0) {
+      frame1 = frame0 + 1;
+      end_seconds = frame1 >= frame_count
+                        ? start_seconds + fallback_frame_seconds_
+                        : FramePtsSeconds(frame1);
+    }
+    if (end_seconds <= start_seconds) {
+      end_seconds = start_seconds + fallback_frame_seconds_;
+    }
+
+    const double audio_start = start_seconds + waveform_offset_seconds_;
+    const double audio_end = end_seconds + waveform_offset_seconds_;
+    const std::int64_t raw_begin =
+        static_cast<std::int64_t>(std::floor(audio_start * 200.0));
+    const std::int64_t raw_end =
+        static_cast<std::int64_t>(std::ceil(audio_end * 200.0));
+    const std::size_t begin = static_cast<std::size_t>(
+        std::clamp<std::int64_t>(raw_begin, 0,
+                                 static_cast<std::int64_t>(bucket_count)));
+    const std::size_t end = static_cast<std::size_t>(
+        std::clamp<std::int64_t>(raw_end, 0,
+                                 static_cast<std::int64_t>(bucket_count)));
+    if (end <= begin) {
+      continue;
+    }
+
+    const WaveformBucketView aggregate = waveform_range_(begin, end);
+    const double high = static_cast<double>(aggregate.max) / 32768.0;
+    const double low = static_cast<double>(aggregate.min) / 32768.0;
+    double y_top = center - high * amplitude;
+    double y_bottom = center - low * amplitude;
+    if (y_top > y_bottom) {
+      std::swap(y_top, y_bottom);
+    }
+    if (y_bottom - y_top < 1.0) {
+      y_bottom = y_top + 1.0;
+    }
+    painter.drawLine(QPointF(static_cast<double>(x) + 0.5, y_top),
+                     QPointF(static_cast<double>(x) + 0.5, y_bottom));
+  }
 }
 
 void TimelineWidget::ApplyZoom(double factor, double anchor_x) {
@@ -265,16 +416,23 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
                      QString::number(static_cast<qlonglong>(tick.frame)));
   }
 
+  if (WaveformHeight() > 0) {
+    DrawWaveform(painter,
+                 QRectF(0.0, static_cast<double>(RulerHeight()),
+                        static_cast<double>(width()),
+                        static_cast<double>(WaveformHeight())));
+  }
+
   const double playhead_x = model_.FrameToX(current_frame_);
+  const double playhead_bottom =
+      static_cast<double>(height() - kScrollBarHeight);
   if (playhead_x >= -1.0 && playhead_x <= static_cast<double>(width()) + 1.0) {
     const double cell_width = std::max(1.0, model_.pixels_per_frame());
-    painter.fillRect(QRectF(playhead_x, 0.0, cell_width,
-                            static_cast<double>(RulerHeight())),
+    painter.fillRect(QRectF(playhead_x, 0.0, cell_width, playhead_bottom),
                      QColor(255, 180, 84, 28));
     painter.setPen(QPen(QColor(QStringLiteral("#ffb454")), 1.0));
     painter.drawLine(QPointF(playhead_x + 0.5, 0.0),
-                     QPointF(playhead_x + 0.5,
-                             static_cast<double>(RulerHeight())));
+                     QPointF(playhead_x + 0.5, playhead_bottom));
 
     QPolygonF head;
     head << QPointF(playhead_x - 5.0, 0.0) << QPointF(playhead_x + 5.0, 0.0)

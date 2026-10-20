@@ -24,6 +24,7 @@ class WaveformData {
 
   std::size_t bucket_count() const;
   WaveformBucket BucketAt(std::size_t index) const;
+  WaveformBucket MinMaxRange(std::size_t begin, std::size_t end) const;
   void CopyRange(std::size_t begin, std::size_t end,
                  std::vector<WaveformBucket>* out) const;
 

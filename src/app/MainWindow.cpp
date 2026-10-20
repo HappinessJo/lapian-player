@@ -154,6 +154,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(zoom_out_action_, &QAction::triggered, this, &MainWindow::ZoomTimelineOut);
   addAction(zoom_out_action_);
 
+  waveform_action_ = new QAction(QStringLiteral("显示波形"), this);
+  waveform_action_->setShortcut(Qt::Key_W);
+  waveform_action_->setShortcutContext(Qt::WindowShortcut);
+  waveform_action_->setCheckable(true);
+  waveform_action_->setChecked(true);
+  waveform_action_->setEnabled(false);
+  connect(waveform_action_, &QAction::toggled, this, &MainWindow::ToggleWaveform);
+  addAction(waveform_action_);
+
   slower_action_ = new QAction(QStringLiteral("减速"), this);
   slower_action_->setShortcut(Qt::Key_BracketLeft);
   slower_action_->setShortcutContext(Qt::WindowShortcut);
@@ -244,6 +253,9 @@ MainWindow::~MainWindow() = default;
 void MainWindow::ShowEmptyState() {
   StopPreview();
   preview_.reset();
+  if (timeline_ != nullptr) {
+    timeline_->ClearWaveform();
+  }
   if (audio_) {
     audio_.reset();
   }
@@ -307,6 +319,9 @@ void MainWindow::ShowEmptyState() {
   if (zoom_out_action_ != nullptr) {
     zoom_out_action_->setEnabled(false);
   }
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setEnabled(false);
+  }
   if (slower_action_ != nullptr) {
     slower_action_->setEnabled(false);
   }
@@ -335,6 +350,10 @@ void MainWindow::OpenDialog() {
 void MainWindow::OpenFile(const QString& path) {
   if (path.isEmpty()) {
     return;
+  }
+  if (timeline_ != nullptr) {
+    // 先把旧波形的回调摘掉，避免 session 替换后绘制到悬空的 FrameIndex。
+    timeline_->ClearWaveform();
   }
   if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
@@ -382,6 +401,10 @@ void MainWindow::OpenFile(const QString& path) {
   timeline_->SetFrameCount(timeline_frames);
   zoom_in_action_->setEnabled(timeline_frames > 0);
   zoom_out_action_->setEnabled(timeline_frames > 0);
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setEnabled(timeline_frames > 0);
+    waveform_action_->setChecked(waveform_visible_);
+  }
   slower_action_->setEnabled(true);
   faster_action_->setEnabled(true);
   speed_label_->setText(FormatSpeed(rate_));
@@ -441,15 +464,39 @@ void MainWindow::OpenFile(const QString& path) {
   playback_->SetAudioEngine(audio_.get());
   playback_->SetRate(rate_);
 
-  // T3.5：波形在独立线程里生成，不占 UI/WASAPI；先显示进度，T3.6 再绘制。
+  // T3.5：波形在独立线程里生成；T3.6 把它接到时间轴。
+  if (waveform_action_ != nullptr) {
+    waveform_action_->setEnabled(true);
+    waveform_action_->setChecked(waveform_visible_);
+  }
   if (info.has_audio) {
     waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
     if (!waveform_->Start(path_utf8, info.audio.stream_index,
                           static_cast<double>(info.av_offset_us) / 1.0e6)) {
       waveform_label_->setText(QStringLiteral("波形：失败"));
+      timeline_->SetWaveformMessage(QStringLiteral("波形生成失败"));
+    } else if (const auto waveform_data = waveform_->data()) {
+      const double fps = info.video.frame_rate.ToDouble();
+      timeline_->SetWaveformSource(
+          [waveform_data]() { return waveform_data->bucket_count(); },
+          [waveform_data](std::size_t begin, std::size_t end) {
+            const auto range = waveform_data->MinMaxRange(begin, end);
+            return TimelineWidget::WaveformBucketView{range.min, range.max};
+          },
+          static_cast<double>(info.av_offset_us) / 1.0e6,
+          fps > 0.0 ? 1.0 / fps : 1.0 / 30.0,
+          [session = session_.get()](std::int64_t frame) -> std::int64_t {
+            if (session == nullptr || !session->index().IsReady()) {
+              return -1;
+            }
+            return session->index().PtsOfFrame(frame);
+          });
+      timeline_->SetWaveformVisible(waveform_visible_);
     }
   } else {
     waveform_label_->setText(QStringLiteral("波形：无音频"));
+    timeline_->SetWaveformMessage(QStringLiteral("无音频"));
+    timeline_->SetWaveformVisible(waveform_visible_);
   }
 
   // T2.9：预览解码器在后台预热；之后拖动时只发目标帧，不阻塞 UI。
@@ -577,6 +624,13 @@ void MainWindow::ZoomTimelineOut() {
   }
   if (timeline_ != nullptr) {
     timeline_->ZoomOut();
+  }
+}
+
+void MainWindow::ToggleWaveform(bool visible) {
+  waveform_visible_ = visible;
+  if (timeline_ != nullptr) {
+    timeline_->SetWaveformVisible(visible);
   }
 }
 
@@ -841,9 +895,11 @@ void MainWindow::PollWaveformStatus() {
       break;
     case WaveformState::kNoAudio:
       waveform_label_->setText(QStringLiteral("波形：无音频"));
+      timeline_->SetWaveformMessage(QStringLiteral("无音频"));
       break;
     case WaveformState::kFailed:
       waveform_label_->setText(QStringLiteral("波形：失败"));
+      timeline_->SetWaveformMessage(QStringLiteral("波形生成失败"));
       statusBar()->showMessage(QString::fromStdString(status.message), 5000);
       break;
     case WaveformState::kCancelled:

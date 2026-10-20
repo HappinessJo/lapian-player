@@ -37,6 +37,25 @@ WaveformBucket WaveformData::BucketAt(std::size_t index) const {
   return index < buckets_.size() ? buckets_[index] : WaveformBucket{};
 }
 
+WaveformBucket WaveformData::MinMaxRange(std::size_t begin,
+                                         std::size_t end) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  begin = std::min(begin, buckets_.size());
+  end = std::min(end, buckets_.size());
+  WaveformBucket result;
+  bool any = false;
+  for (std::size_t i = begin; i < end; ++i) {
+    if (!any) {
+      result = buckets_[i];
+      any = true;
+    } else {
+      result.min = std::min(result.min, buckets_[i].min);
+      result.max = std::max(result.max, buckets_[i].max);
+    }
+  }
+  return result;
+}
+
 void WaveformData::CopyRange(std::size_t begin, std::size_t end,
                              std::vector<WaveformBucket>* out) const {
   if (out == nullptr) {

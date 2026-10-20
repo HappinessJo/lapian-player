@@ -74,6 +74,7 @@ class MainWindow : public QMainWindow {
   void ToggleMute(bool muted);
   void PollAudioStatus();
   void PollWaveformStatus();
+  void ToggleWaveform(bool visible);
   void SpeedDown();
   void SpeedUp();
 
@@ -106,6 +107,7 @@ class MainWindow : public QMainWindow {
   QAction* goto_action_ = nullptr;
   QAction* zoom_in_action_ = nullptr;
   QAction* zoom_out_action_ = nullptr;
+  QAction* waveform_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
@@ -117,6 +119,7 @@ class MainWindow : public QMainWindow {
   std::int64_t current_frame_ = 0;
   std::uint64_t audio_status_revision_ = 0;
   std::uint64_t waveform_status_revision_ = 0;
+  bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;
   bool muted_ = false;
