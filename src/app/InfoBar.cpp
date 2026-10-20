@@ -3,11 +3,14 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFontDatabase>
-#include <QFrame>
-#include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
+#include <QResizeEvent>
+#include <QSizePolicy>
 #include <QString>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 
@@ -30,12 +33,18 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
   root->setContentsMargins(8, 4, 8, 4);
   root->setSpacing(2);
 
-  auto* row = new QHBoxLayout();
-  row->setSpacing(10);
+  grid_ = new QGridLayout();
+  grid_->setContentsMargins(0, 0, 0, 0);
+  grid_->setHorizontalSpacing(10);
+  grid_->setVerticalSpacing(2);
+
   file_label_ = new QLabel(this);
   file_label_->setObjectName(QStringLiteral("infoFile"));
-  file_label_->setMinimumWidth(180);
+  // 文件名可能很长：允许布局压缩，再用 elidedText 省略，避免推高窗口最小宽度。
+  file_label_->setMinimumWidth(0);
+  file_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   format_label_ = new QLabel(this);
+  format_label_->setObjectName(QStringLiteral("infoFormat"));
   frame_label_ = new QLabel(this);
   frame_label_->setObjectName(QStringLiteral("infoFrame"));
   QFont frame_font = frame_label_->font();
@@ -43,16 +52,12 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
   frame_font.setBold(true);
   frame_label_->setFont(frame_font);
   timecode_label_ = new QLabel(this);
+  timecode_label_->setObjectName(QStringLiteral("infoTimecode"));
   timecode_label_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   total_label_ = new QLabel(this);
+  total_label_->setObjectName(QStringLiteral("infoTotal"));
 
-  row->addWidget(file_label_, 1);
-  row->addWidget(format_label_);
-  row->addSpacing(12);
-  row->addWidget(frame_label_);
-  row->addWidget(timecode_label_);
-  row->addWidget(total_label_);
-  root->addLayout(row);
+  root->addLayout(grid_);
 
   banner_label_ = new QLabel(this);
   banner_label_->setObjectName(QStringLiteral("infoBanner"));
@@ -61,12 +66,73 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
   banner_label_->hide();
   root->addWidget(banner_label_);
 
+  UpdateLayoutMode();
   Clear();
+}
+
+void InfoBar::resizeEvent(QResizeEvent* event) {
+  QWidget::resizeEvent(event);
+  UpdateLayoutMode();
+  UpdateFileText();
+}
+
+void InfoBar::UpdateLayoutMode() {
+  // 1920×1080@150% 的逻辑宽度约 1280，@200% 约 960；侧栏占掉 240 后，
+  // 信息栏在 <760 逻辑像素时把格式/总帧移到第二行，避免裁切或强行撑宽窗口。
+  const bool narrow = width() < 760;
+  if (narrow == narrow_) {
+    return;
+  }
+  narrow_ = narrow;
+
+  for (QLabel* label : {file_label_, format_label_, frame_label_, timecode_label_,
+                        total_label_}) {
+    grid_->removeWidget(label);
+  }
+  for (int column = 0; column < 5; ++column) {
+    grid_->setColumnStretch(column, 0);
+  }
+
+  if (narrow_) {
+    grid_->addWidget(file_label_, 0, 0, 1, 2);
+    grid_->addWidget(frame_label_, 0, 2);
+    grid_->addWidget(timecode_label_, 0, 3);
+    grid_->addWidget(format_label_, 1, 0, 1, 2);
+    grid_->addWidget(total_label_, 1, 2, 1, 2);
+  } else {
+    grid_->addWidget(file_label_, 0, 0);
+    grid_->addWidget(format_label_, 0, 1);
+    grid_->addWidget(frame_label_, 0, 2);
+    grid_->addWidget(timecode_label_, 0, 3);
+    grid_->addWidget(total_label_, 0, 4);
+  }
+  grid_->setColumnStretch(0, 1);
+  grid_->invalidate();
+  updateGeometry();
+}
+
+void InfoBar::UpdateFileText() {
+  const QString full =
+      file_name_.isEmpty() ? QStringLiteral("未打开文件") : file_name_;
+  const int available = std::max(0, file_label_->contentsRect().width() - 2);
+  const QString shown =
+      file_label_->fontMetrics().elidedText(full, Qt::ElideMiddle, available);
+  if (file_label_->text() != shown) {
+    file_label_->setText(shown);
+  }
+  if (file_label_->toolTip() != full) {
+    file_label_->setToolTip(full);
+  }
+}
+
+QString InfoBar::FileLabelTextForTest() const {
+  return file_label_ == nullptr ? QString() : file_label_->text();
 }
 
 void InfoBar::Clear() {
   rate_ = lapian::core::FrameRate();
   vfr_ = false;
+  file_name_.clear();
   file_label_->setText(QStringLiteral("未打开文件"));
   format_label_->clear();
   frame_label_->setText(QStringLiteral("帧 —"));
@@ -74,6 +140,7 @@ void InfoBar::Clear() {
   total_label_->clear();
   banner_label_->clear();
   banner_label_->hide();
+  UpdateFileText();
 }
 
 void InfoBar::SetMedia(const lapian::media::MediaInfo& info, bool vfr) {
@@ -81,12 +148,13 @@ void InfoBar::SetMedia(const lapian::media::MediaInfo& info, bool vfr) {
   vfr_ = vfr;
 
   const QString path = QString::fromUtf8(info.path_utf8.c_str());
-  file_label_->setText(QFileInfo(path).fileName());
+  file_name_ = QFileInfo(path).fileName();
   format_label_->setText(QStringLiteral("%1×%2 · %3 · %4 fps")
                              .arg(info.video.width)
                              .arg(info.video.height)
                              .arg(QString::fromStdString(info.video.codec))
                              .arg(FormatFps(rate_)));
+  UpdateFileText();
 
   const std::int64_t known_frames =
       info.video.nb_frames_known ? info.video.nb_frames : 0;

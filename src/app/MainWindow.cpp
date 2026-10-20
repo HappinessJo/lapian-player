@@ -13,6 +13,7 @@
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -24,6 +25,8 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QResizeEvent>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardPaths>
@@ -122,7 +125,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   settings_store_ =
       std::make_unique<lapian::core::SettingsStore>(settings_root);
   setWindowTitle(QStringLiteral("拉片软件"));
-  resize(1280, 720);
+  ApplyInitialWindowSize();
   setAcceptDrops(true);
 
   auto* central = new QWidget(this);
@@ -130,20 +133,21 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   central_layout->setContentsMargins(0, 0, 0, 0);
   central_layout->setSpacing(0);
 
-  auto* stage = new QWidget(central);
-  auto* stage_layout = new QVBoxLayout(stage);
+  stage_ = new QWidget(central);
+  stage_->setObjectName(QStringLiteral("videoStage"));
+  auto* stage_layout = new QVBoxLayout(stage_);
   stage_layout->setContentsMargins(0, 0, 0, 0);
   stage_layout->setSpacing(0);
-  gfx_ = new GfxWidget(stage);
-  timeline_ = new TimelineWidget(stage);
-  info_bar_ = new InfoBar(stage);
+  gfx_ = new GfxWidget(stage_);
+  timeline_ = new TimelineWidget(stage_);
+  info_bar_ = new InfoBar(stage_);
   stage_layout->addWidget(gfx_, 1);
   stage_layout->addWidget(timeline_);
   stage_layout->addWidget(info_bar_);
 
   mark_panel_ = new MarkPanel(central);
   mark_panel_->setFixedWidth(300);
-  central_layout->addWidget(stage, 1);
+  central_layout->addWidget(stage_, 1);
   central_layout->addWidget(mark_panel_);
   setCentralWidget(central);
 
@@ -362,6 +366,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   statusBar()->addPermanentWidget(waveform_label_);
 
   volume_slider_ = new QSlider(Qt::Horizontal, this);
+  volume_slider_->setObjectName(QStringLiteral("volumeSlider"));
   volume_slider_->setRange(0, 100);
   volume_slider_->setValue(volume_);
   volume_slider_->setFixedWidth(110);
@@ -443,6 +448,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
           &MainWindow::OnScrubTargetChanged);
   connect(timeline_, &TimelineWidget::scrubFinished, this, &MainWindow::OnScrubFinished);
+
+  UpdateResponsiveLayout();
 }
 
 MainWindow::~MainWindow() {
@@ -542,6 +549,248 @@ bool MainWindow::FlushSettings() {
     std::fflush(stderr);
   }
   return ok;
+}
+
+void MainWindow::ApplyInitialWindowSize() {
+  QScreen* screen = QGuiApplication::primaryScreen();
+  if (screen == nullptr) {
+    resize(1280, 720);
+    return;
+  }
+  const QRect available = screen->availableGeometry();
+  // 1080p@200% 的逻辑可用区约 960×540：留出标题栏/任务栏余量，避免窗口超出屏幕。
+  const int target_width = std::min(1280, std::max(480, available.width() - 32));
+  const int target_height = std::min(720, std::max(360, available.height() - 64));
+  resize(target_width, target_height);
+  // 如果子控件最小尺寸把 resize 顶大，用实际尺寸重新居中，避免 frame 越界。
+  const QSize actual = size();
+  move(available.x() + (available.width() - actual.width()) / 2,
+       available.y() + (available.height() - actual.height()) / 2);
+}
+
+void MainWindow::UpdateResponsiveLayout() {
+  if (mark_panel_ != nullptr) {
+    // 100% 保持 300；高 DPI/窄窗口逐步让到 240，给画面与信息栏留空间。
+    const int target = std::clamp(static_cast<int>(width() * 0.26), 240, 300);
+    if (mark_panel_->width() != target) {
+      mark_panel_->setFixedWidth(target);
+    }
+  }
+  if (status_label_ != nullptr) {
+    // Qt/FFmpeg 版本是次要信息；窄窗口先让位，避免状态栏把最小宽度撑大。
+    status_label_->setVisible(width() >= 1000);
+  }
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+  QMainWindow::resizeEvent(event);
+  UpdateResponsiveLayout();
+}
+
+QSize MainWindow::AvailableScreenForTest() const {
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  return screen == nullptr ? QSize() : screen->availableGeometry().size();
+}
+
+QString MainWindow::InfoFileLabelForTest() const {
+  return info_bar_ == nullptr ? QString() : info_bar_->FileLabelTextForTest();
+}
+
+QString MainWindow::InfoFileNameForTest() const {
+  return info_bar_ == nullptr ? QString() : info_bar_->FileNameForTest();
+}
+
+bool MainWindow::InfoNarrowModeForTest() const {
+  return info_bar_ != nullptr && info_bar_->NarrowModeForTest();
+}
+
+QString MainWindow::LayoutStateForTest() const {
+  auto rect_text = [](const QRect& rect) {
+    return QStringLiteral("%1,%2 %3x%4")
+        .arg(rect.x())
+        .arg(rect.y())
+        .arg(rect.width())
+        .arg(rect.height());
+  };
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  const QRect available =
+      screen == nullptr ? QRect() : screen->availableGeometry();
+  const QSize min_hint = minimumSizeHint();
+  QStringList parts;
+  parts << QStringLiteral("dpr=%1").arg(devicePixelRatioF(), 0, 'f', 2);
+  parts << QStringLiteral("window=%1x%2").arg(width()).arg(height());
+  parts << QStringLiteral("frame=%1").arg(rect_text(frameGeometry()));
+  parts << QStringLiteral("available=%1").arg(rect_text(available));
+  parts << QStringLiteral("min=%1x%2").arg(min_hint.width()).arg(min_hint.height());
+  if (stage_ != nullptr) {
+    parts << QStringLiteral("stage=%1").arg(rect_text(stage_->geometry()));
+  }
+  if (mark_panel_ != nullptr) {
+    parts << QStringLiteral("panel=%1").arg(rect_text(mark_panel_->geometry()));
+  }
+  if (gfx_ != nullptr) {
+    parts << QStringLiteral("gfx=%1").arg(rect_text(gfx_->geometry()));
+  }
+  if (timeline_ != nullptr) {
+    parts << QStringLiteral("timeline=%1").arg(rect_text(timeline_->geometry()));
+  }
+  if (info_bar_ != nullptr) {
+    parts << QStringLiteral("info=%1").arg(rect_text(info_bar_->geometry()));
+    parts << QStringLiteral("info_narrow=%1")
+                 .arg(info_bar_->NarrowModeForTest() ? 1 : 0);
+    for (QLabel* label : info_bar_->findChildren<QLabel*>()) {
+      if (label->isVisible()) {
+        parts << QStringLiteral("info_%1=%2")
+                     .arg(label->objectName(), rect_text(label->geometry()));
+      }
+    }
+  }
+  if (statusBar() != nullptr) {
+    parts << QStringLiteral("status=%1").arg(rect_text(statusBar()->geometry()));
+    for (QWidget* widget : {static_cast<QWidget*>(audio_label_),
+                            static_cast<QWidget*>(speed_label_),
+                            static_cast<QWidget*>(loop_label_),
+                            static_cast<QWidget*>(waveform_label_),
+                            static_cast<QWidget*>(volume_slider_),
+                            static_cast<QWidget*>(status_label_)}) {
+      if (widget != nullptr && widget->isVisible()) {
+        parts << QStringLiteral("status_%1=%2")
+                     .arg(widget->objectName(), rect_text(widget->geometry()));
+      }
+    }
+  }
+  return parts.join(QLatin1Char(' '));
+}
+
+QStringList MainWindow::LayoutProblemsForTest() const {
+  QStringList problems;
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  const QRect available =
+      screen == nullptr ? QRect() : screen->availableGeometry();
+  const QRect screen_geometry =
+      screen == nullptr ? QRect() : screen->geometry();
+  if (isFullScreen()) {
+    if (!screen_geometry.isEmpty() && size() != screen_geometry.size()) {
+      problems << QStringLiteral("fullscreen-size");
+    }
+  } else if (!available.isEmpty()) {
+    if (!available.contains(frameGeometry())) {
+      problems << QStringLiteral("window-outside-screen");
+    }
+    const QSize min_hint = minimumSizeHint();
+    if (min_hint.width() > available.width()) {
+      problems << QStringLiteral("min-width-exceeds-screen");
+    }
+    if (min_hint.height() > available.height()) {
+      problems << QStringLiteral("min-height-exceeds-screen");
+    }
+  }
+  if (centralWidget() == nullptr || stage_ == nullptr || mark_panel_ == nullptr) {
+    problems << QStringLiteral("missing-widgets");
+    return problems;
+  }
+  if (!centralWidget()->rect().contains(stage_->geometry())) {
+    problems << QStringLiteral("stage-outside-central");
+  }
+  if (!centralWidget()->rect().contains(mark_panel_->geometry())) {
+    problems << QStringLiteral("panel-outside-central");
+  }
+  if (stage_->geometry().right() >= mark_panel_->geometry().left()) {
+    problems << QStringLiteral("stage-panel-overlap");
+  }
+  if (mark_panel_->width() < 240 || mark_panel_->width() > 300) {
+    problems << QStringLiteral("panel-width");
+  }
+  if (stage_->width() < 420) {
+    problems << QStringLiteral("stage-too-narrow");
+  }
+  if (gfx_ == nullptr || !gfx_->isVisible() || gfx_->width() < 320 ||
+      gfx_->height() < 120) {
+    problems << QStringLiteral("gfx-too-small");
+  }
+  if (timeline_ == nullptr || !timeline_->isVisible() ||
+      timeline_->height() < 72) {
+    problems << QStringLiteral("timeline-too-small");
+  }
+  if (info_bar_ == nullptr || !info_bar_->isVisible() ||
+      info_bar_->height() < 30) {
+    problems << QStringLiteral("info-bar-too-small");
+  }
+  if (statusBar() == nullptr || statusBar()->height() < 20) {
+    problems << QStringLiteral("status-bar-too-small");
+  }
+
+  const QList<QLabel*> info_labels =
+      info_bar_ == nullptr ? QList<QLabel*>() : info_bar_->findChildren<QLabel*>();
+  for (QLabel* label : info_labels) {
+    if (!label->isVisible()) {
+      continue;
+    }
+    if (!info_bar_->rect().contains(label->geometry())) {
+      problems << QStringLiteral("info-label-outside");
+    }
+    if (!label->text().isEmpty() && label->width() < 24) {
+      problems << QStringLiteral("info-label-narrow");
+    }
+  }
+  for (int i = 0; i < info_labels.size(); ++i) {
+    for (int j = i + 1; j < info_labels.size(); ++j) {
+      QLabel* first = info_labels[i];
+      QLabel* second = info_labels[j];
+      if (first->isVisible() && second->isVisible() &&
+          first->geometry().intersects(second->geometry())) {
+        problems << QStringLiteral("info-label-overlap");
+      }
+    }
+  }
+  QLabel* file_label = info_bar_ == nullptr
+                           ? nullptr
+                           : info_bar_->findChild<QLabel*>(QStringLiteral("infoFile"));
+  if (file_label != nullptr && file_label->isVisible() &&
+      !file_label->text().isEmpty() &&
+      file_label->fontMetrics().horizontalAdvance(file_label->text()) >
+          file_label->width() + 2) {
+    problems << QStringLiteral("file-label-clipped");
+  }
+
+  if (statusBar() != nullptr) {
+    const std::vector<QWidget*> status_widgets = {
+        audio_label_, speed_label_, loop_label_, waveform_label_, volume_slider_,
+        status_label_};
+    for (QWidget* widget : status_widgets) {
+      if (widget == nullptr || !widget->isVisible()) {
+        continue;
+      }
+      if (!statusBar()->rect().contains(widget->geometry())) {
+        problems << QStringLiteral("status-widget-outside");
+      }
+      const int minimum_width = widget == volume_slider_ ? 80 : 10;
+      if (widget->width() < minimum_width) {
+        problems << QStringLiteral("status-widget-narrow");
+      }
+    }
+    for (std::size_t i = 0; i < status_widgets.size(); ++i) {
+      for (std::size_t j = i + 1; j < status_widgets.size(); ++j) {
+        QWidget* first = status_widgets[i];
+        QWidget* second = status_widgets[j];
+        if (first != nullptr && second != nullptr && first->isVisible() &&
+            second->isVisible() &&
+            first->geometry().intersects(second->geometry())) {
+          problems << QStringLiteral("status-widget-overlap");
+        }
+      }
+    }
+  }
+  return problems;
 }
 
 void MainWindow::ShowEmptyState() {

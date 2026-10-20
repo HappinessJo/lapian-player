@@ -23,6 +23,7 @@ class QDropEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
+class QResizeEvent;
 class QSlider;
 class QTimer;
 class GfxWidget;
@@ -174,12 +175,20 @@ class MainWindow : public QMainWindow {
   QString DefaultSettingsRootForTest() const;
   double LastSettingsSaveMsForTest() const;
   double LastSettingsLoadMsForTest() const;
+  // T6.4 DPI/布局：当前窗口/面板/信息栏/状态栏的几何问题清单；空表示无裁切/重叠。
+  QString LayoutStateForTest() const;
+  QStringList LayoutProblemsForTest() const;
+  QSize AvailableScreenForTest() const;
+  QString InfoFileLabelForTest() const;
+  QString InfoFileNameForTest() const;
+  bool InfoNarrowModeForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
   void closeEvent(QCloseEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
+  void resizeEvent(QResizeEvent* event) override;
   bool eventFilter(QObject* watched, QEvent* event) override;
 
  private slots:
@@ -265,8 +274,12 @@ class MainWindow : public QMainWindow {
   void ApplySettings(const lapian::core::AppSettings& settings);
   void ScheduleSettingsSave();
   bool FlushSettings();
+  // T6.4：初始窗口按屏幕可用区收缩；侧栏/次要状态在窄宽度下让位。
+  void ApplyInitialWindowSize();
+  void UpdateResponsiveLayout();
 
   GfxWidget* gfx_ = nullptr;
+  QWidget* stage_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   MarkPanel* mark_panel_ = nullptr;

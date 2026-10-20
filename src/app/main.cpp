@@ -58,9 +58,12 @@ int main(int argc, char* argv[]) {
   bool key_test = false;
   bool settings_test = false;
   bool settings_expect = false;
+  bool dpi_test = false;
   QString settings_path_arg;
+  QString dpi_tag;
   int settings_expect_volume = -1;
   bool settings_expect_waveform = false;
+  double dpi_expect_scale = -1.0;
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
@@ -103,6 +106,14 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--settings-path") &&
                i + 1 < arguments.size()) {
       settings_path_arg = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--dpi-test")) {
+      dpi_test = true;
+    } else if (arguments[i] == QStringLiteral("--dpi-expect-scale") &&
+               i + 1 < arguments.size()) {
+      dpi_expect_scale = arguments[++i].toDouble();
+    } else if (arguments[i] == QStringLiteral("--dpi-tag") &&
+               i + 1 < arguments.size()) {
+      dpi_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--snapshot-pictures") &&
                i + 1 < arguments.size()) {
       snapshot_pictures_arg = arguments[++i];
@@ -165,7 +176,8 @@ int main(int argc, char* argv[]) {
                                     step_test, ab_test, loop_test, mark_test, note_test,
                                     snapshot_test, fullscreen_test, key_test, settings_test,
                                     settings_expect, settings_expect_volume,
-                                    settings_expect_waveform, settings_root,
+                                    settings_expect_waveform, settings_root, dpi_test,
+                                    dpi_expect_scale, dpi_tag,
                                     snapshot_pictures_root, playback_rate,
                                     has_playback_rate, process_start]() {
       window.OpenFile(file_path);
@@ -1711,6 +1723,76 @@ int main(int argc, char* argv[]) {
                        settings_expect_volume, settings_expect_waveform ? 1 : 0);
           std::fflush(stderr);
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (dpi_test) {
+        // T6.4：正常窗口/全屏/窄窗口的布局不裁切、不重叠；由 QT_SCALE_FACTOR 驱动 DPI。
+        auto failures = std::make_shared<int>(0);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.4 dpi_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto verify = [&window, check, dpi_tag](const char* phase) {
+          const QStringList problems = window.LayoutProblemsForTest();
+          const QByteArray state = window.LayoutStateForTest().toUtf8();
+          std::fprintf(stderr, "T6.4 dpi_state %s %s\n", phase, state.constData());
+          std::fflush(stderr);
+          for (const QString& problem : problems) {
+            std::fprintf(stderr, "T6.4 dpi_problem %s %s\n", phase,
+                         problem.toUtf8().constData());
+          }
+          std::fflush(stderr);
+          check((std::string(phase) + "-layout").c_str(), problems.isEmpty());
+          const QString shot =
+              QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+              (dpi_tag.isEmpty() ? QStringLiteral("x") : dpi_tag) +
+              QStringLiteral("-") + QString::fromLatin1(phase) + QStringLiteral(".png");
+          const bool saved = window.grab().save(shot);
+          check((std::string(phase) + "-shot").c_str(), saved);
+          std::fprintf(stderr, "T6.4 dpi_shot %s path=%s ok=%d\n", phase,
+                       shot.toUtf8().constData(), saved ? 1 : 0);
+          std::fflush(stderr);
+        };
+        QTimer::singleShot(
+            600, &window,
+            [&window, failures, check, verify, dpi_expect_scale]() {
+          if (dpi_expect_scale > 0.0) {
+            check("dpr", std::abs(window.devicePixelRatioF() - dpi_expect_scale) < 0.01);
+          }
+          const QSize available = window.AvailableScreenForTest();
+          std::fprintf(stderr,
+                       "T6.4 dpi_env scale=%.2f available=%dx%d info_narrow=%d "
+                       "file=%s full_name=%s\n",
+                       window.devicePixelRatioF(), available.width(),
+                       available.height(), window.InfoNarrowModeForTest() ? 1 : 0,
+                       window.InfoFileLabelForTest().toUtf8().constData(),
+                       window.InfoFileNameForTest().toUtf8().constData());
+          std::fflush(stderr);
+          verify("normal");
+          window.PressFullScreenKeyForTest();
+          QTimer::singleShot(
+              350, &window,
+              [&window, check, verify, available, failures]() {
+            check("fullscreen", window.IsFullScreenForTest());
+            verify("fullscreen");
+            window.PressEscapeKeyForTest();
+            QTimer::singleShot(
+                250, &window,
+                [&window, check, verify, available, failures]() {
+              check("exit-fullscreen", !window.IsFullScreenForTest());
+              const int narrow_height =
+                  std::min(500, std::max(360, available.height() - 64));
+              window.resize(820, narrow_height);
+              QTimer::singleShot(250, &window,
+                                 [&window, verify, failures]() {
+                verify("narrow");
+                QCoreApplication::exit(*failures == 0 ? 0 : 1);
+              });
+            });
+          });
         });
       }
     });

@@ -28,7 +28,9 @@ GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
   setAttribute(Qt::WA_OpaquePaintEvent);
   setAttribute(Qt::WA_NoSystemBackground);
   setAutoFillBackground(false);
-  setMinimumSize(480, 270);
+  // T6.4：最小尺寸按逻辑像素；1080p@200% 的逻辑可用高度约 540，
+  // 原 480×270 会把窗口最小高度推到屏幕可用区之外。
+  setMinimumSize(320, 180);
   setFocusPolicy(Qt::StrongFocus);
 }
 
