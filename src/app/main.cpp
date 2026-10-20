@@ -5,9 +5,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -15,7 +17,11 @@
 #include <cstdio>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <utility>
+
+#include <windows.h>
+#include <psapi.h>
 
 #include "app/MainWindow.h"
 
@@ -38,6 +44,8 @@ int main(int argc, char* argv[]) {
   bool loop_test = false;
   bool mark_test = false;
   bool note_test = false;
+  bool snapshot_test = false;
+  QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
   const QStringList arguments = QCoreApplication::arguments();
@@ -63,6 +71,11 @@ int main(int argc, char* argv[]) {
       mark_test = true;
     } else if (arguments[i] == QStringLiteral("--note-test")) {
       note_test = true;
+    } else if (arguments[i] == QStringLiteral("--snapshot-test")) {
+      snapshot_test = true;
+    } else if (arguments[i] == QStringLiteral("--snapshot-pictures") &&
+               i + 1 < arguments.size()) {
+      snapshot_pictures_arg = arguments[++i];
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
@@ -77,14 +90,30 @@ int main(int argc, char* argv[]) {
   if (note_test) {
     qputenv("LAPIAN_MARK_LOG", "1");
   }
+  QString snapshot_pictures_root;
+  if (snapshot_test) {
+    qputenv("LAPIAN_SNAPSHOT_LOG", "1");
+    const QString default_root =
+        QDir::currentPath() + QStringLiteral("/build/t5.4-snapshot-pictures");
+    snapshot_pictures_root =
+        snapshot_pictures_arg.isEmpty() ? default_root : snapshot_pictures_arg;
+    snapshot_pictures_root = QFileInfo(snapshot_pictures_root).absoluteFilePath();
+    QDir(snapshot_pictures_root).removeRecursively();
+    QDir().mkpath(snapshot_pictures_root);
+  }
 
   const auto process_start = std::chrono::steady_clock::now();
   MainWindow window;
+  if (!snapshot_pictures_root.isEmpty()) {
+    // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
+    window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
+  }
   window.show();
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
-                                    playback_rate, has_playback_rate, process_start]() {
+                                    snapshot_test, snapshot_pictures_root, playback_rate,
+                                    has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -547,6 +576,233 @@ int main(int argc, char* argv[]) {
           check("f8a3-b-no-file", !QFileInfo::exists(sidecar_b));
         });
         QTimer::singleShot(4100, Qt::PreciseTimer, &app, [failures]() {
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (snapshot_test) {
+        // T5.4 F6-A3/A4/A5/A7：V9 帧 100 连按 3 次、播放中按键、目录回退、
+        // 旋转素材（--file-b）；断言 PNG 尺寸/文件名/不覆盖/播放不中断。
+        const QString shot_video_a = file_path;
+        const QString shot_video_b = file_b;
+        const QString shot_dir_a =
+            QFileInfo(shot_video_a).absolutePath() + QStringLiteral("/snapshots");
+        const QString pictures_root = snapshot_pictures_root;
+        auto failures = std::make_shared<int>(0);
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T5.4 snapshot_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray state = window.SnapshotStateForTest().toUtf8();
+          std::fprintf(stderr, "T5.4 snapshot_state %s %s\n", step, state.constData());
+          std::fflush(stderr);
+        };
+        auto check_png = [check](const QString& path, const QSize& expected,
+                                 const char* name) {
+          const QImage image(path);
+          check((std::string(name) + "-loads").c_str(), !image.isNull());
+          check((std::string(name) + "-size").c_str(), image.size() == expected);
+          check((std::string(name) + "-f100").c_str(),
+                QFileInfo(path).fileName().contains(QStringLiteral("f100")));
+          std::fprintf(stderr,
+                       "T5.4 snapshot_png %s path=%s actual=%dx%d expected=%dx%d\n", name,
+                       path.toUtf8().constData(), image.width(), image.height(),
+                       expected.width(), expected.height());
+          std::fflush(stderr);
+        };
+
+        schedule(500, [&window, shot_dir_a, log_state]() {
+          QDir(shot_dir_a).removeRecursively();
+          window.GoToInputForTest(QStringLiteral("100"));
+          const QSize display = window.SnapshotDisplaySizeForTest();
+          std::fprintf(stderr, "T5.4 snapshot_source size=%dx%d state=%s\n",
+                       display.width(), display.height(),
+                       window.SnapshotStateForTest().toUtf8().constData());
+          std::fflush(stderr);
+          log_state("before-3");
+          window.ResetSnapshotPerfSamplesForTest();
+          window.CaptureSnapshotForTest();
+          window.CaptureSnapshotForTest();
+          window.CaptureSnapshotForTest();
+          log_state("after-3-pressed");
+        });
+
+        schedule(7000, [&window, shot_dir_a, check, check_png, log_state]() {
+          window.DrainSnapshotsForTest();
+          const QStringList paths = window.SnapshotSavedPathsForTest();
+          const QStringList files = QDir(shot_dir_a).entryList(
+              QStringList{QStringLiteral("*.png")}, QDir::Files);
+          const QSize display = window.SnapshotDisplaySizeForTest();
+          check("three-saved", paths.size() == 3);
+          check("three-files", files.size() == 3);
+          if (paths.size() == 3) {
+            check("three-distinct",
+                  paths[0] != paths[1] && paths[1] != paths[2] && paths[0] != paths[2]);
+            check_png(paths[0], display, "shot1");
+            check_png(paths[1], display, "shot2");
+            check_png(paths[2], display, "shot3");
+          }
+          std::fprintf(stderr, "T5.4 snapshot_perf three %s\n",
+                       window.SnapshotPerfSummaryForTest().toUtf8().constData());
+          std::fflush(stderr);
+          log_state("after-3-saved");
+
+          // 真实 S 键：走 QAction 快捷键/Win 事件分发，而不是直接调函数。
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.PressSnapshotKeyForTest();
+          log_state("after-s-key");
+        });
+
+        schedule(7500, [&window, check, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("key-shot-check");
+          check("s-key-saved", window.SnapshotSavedPathsForTest().size() == 4);
+          check("s-key-frame", window.SnapshotLastSavedFrameForTest() == 100);
+          check("s-key-f100",
+                QFileInfo(window.SnapshotLastPathForTest())
+                    .fileName()
+                    .contains(QStringLiteral("f100")));
+
+          // spec §3.7：备注框聚焦时 S 是文本输入，不能触发截图。
+          window.AddMarkForTest();
+          const bool focused = window.FocusNoteEditorForTest();
+          const int before_focus_s = window.SnapshotSavedPathsForTest().size();
+          window.PressSnapshotKeyForTest();
+          window.DrainSnapshotsForTest();
+          const int after_focus_s = window.SnapshotSavedPathsForTest().size();
+          check("s-focus-blocked", focused && after_focus_s == before_focus_s);
+          window.ClearFocusForTest();
+
+          // F6-A4：从帧 20 播放，按键瞬间截一帧；帧 20 留出足够播放时间。
+          window.GoToInputForTest(QStringLiteral("20"));
+          window.StartPlaybackForTest();
+          log_state("play-start");
+          check("play-started",
+                window.SnapshotStateForTest().contains(QStringLiteral("playing=1")));
+        });
+
+        schedule(8000, [&window, check, log_state]() {
+          check("play-before-capture",
+                window.SnapshotStateForTest().contains(QStringLiteral("playing=1")));
+          window.CaptureSnapshotForTest();
+          log_state("play-captured");
+        });
+
+        schedule(10000, [&window, check, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("play-after-capture");
+          check("play-not-paused",
+                window.SnapshotStateForTest().contains(QStringLiteral("playing=1")));
+          check("play-shot-saved", !window.SnapshotLastPathForTest().isEmpty());
+          check("f6a4-saved-key-frame",
+                window.SnapshotLastSavedFrameForTest() ==
+                    window.SnapshotLastCaptureFrameForTest());
+          check("play-shot-exists", QFileInfo::exists(window.SnapshotLastPathForTest()));
+          window.TogglePlaybackForTest();
+          log_state("play-paused");
+        });
+
+        schedule(10300, [&window, shot_dir_a, check, log_state]() {
+          // F6-A7：snapshots 被同名文件占用 → 回退图片目录，并给出提示。
+          const QString backup = shot_dir_a + QStringLiteral("-normal");
+          QDir(backup).removeRecursively();
+          QDir dir;
+          check("fallback-rename", dir.rename(shot_dir_a, backup));
+          QFile blocker(shot_dir_a);
+          const bool opened = blocker.open(QIODevice::WriteOnly);
+          check("fallback-blocker", opened);
+          if (opened) {
+            blocker.write("x");
+            blocker.close();
+          }
+          // 焦点测试时已添加的标记用于验证 F6-A7“当前标记不丢”。
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.CaptureSnapshotForTest();
+          log_state("fallback-pressed");
+        });
+
+        schedule(12000, [&window, pictures_root, shot_dir_a, check, check_png,
+                         log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("fallback-saved");
+          const QString path = window.SnapshotLastPathForTest();
+          const QString fallback_dir =
+              QDir(pictures_root).filePath(QStringLiteral("拉片软件"));
+          check("fallback-flag", window.SnapshotLastFallbackForTest());
+          check("fallback-under-pictures",
+                QFileInfo(path).absolutePath() == QDir::cleanPath(fallback_dir));
+          check("fallback-exists", QFileInfo::exists(path));
+          check("fallback-status",
+                window.SnapshotStatusForTest().contains(QStringLiteral("图片目录")));
+          check("f6a7-mark-kept", window.MarkCountForTest() >= 1);
+          if (QFileInfo::exists(path)) {
+            check_png(path, window.SnapshotDisplaySizeForTest(), "fallback");
+          }
+
+          // 恢复 A 的 snapshots 目录，避免同名 blocker 影响随后打开的 B。
+          QFile::remove(shot_dir_a);
+          QDir dir;
+          check("fallback-restore",
+                dir.rename(shot_dir_a + QStringLiteral("-normal"), shot_dir_a));
+        });
+
+        if (!shot_video_b.isEmpty()) {
+          schedule(12300, [&window, shot_video_b, log_state]() {
+            window.OpenFile(shot_video_b);
+            window.GoToInputForTest(QStringLiteral("100"));
+            log_state("rotated-before");
+            window.CaptureSnapshotForTest();
+          });
+          schedule(14500, [&window, check, check_png, log_state]() {
+            window.DrainSnapshotsForTest();
+            log_state("rotated-saved");
+            const QString path = window.SnapshotLastPathForTest();
+            check("rotated-saved", !path.isEmpty());
+            check("rotated-size", window.SnapshotDisplaySizeForTest() == QSize(1080, 1920));
+            check("rotated-frame", window.SnapshotLastSavedFrameForTest() == 100);
+            if (!path.isEmpty()) {
+              check_png(path, window.SnapshotDisplaySizeForTest(), "rotated");
+            }
+          });
+        }
+
+        const int final_ms = shot_video_b.isEmpty() ? 14300 : 16500;
+        schedule(final_ms, [&window, failures, check, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("final");
+          std::fprintf(stderr, "T5.4 snapshot_perf final %s\n",
+                       window.SnapshotPerfSummaryForTest().toUtf8().constData());
+          std::fflush(stderr);
+
+          PROCESS_MEMORY_COUNTERS memory{};
+          const bool memory_ok =
+              GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory)) != FALSE;
+          const double working_mb =
+              memory_ok ? static_cast<double>(memory.WorkingSetSize) / (1024.0 * 1024.0) : 0.0;
+          const double peak_mb = memory_ok
+                                     ? static_cast<double>(memory.PeakWorkingSetSize) /
+                                           (1024.0 * 1024.0)
+                                     : 0.0;
+          if (memory_ok) {
+            std::fprintf(stderr,
+                         "T5.4 snapshot_mem working_set_mb=%.1f peak_working_set_mb=%.1f\n",
+                         working_mb, peak_mb);
+            std::fflush(stderr);
+          }
+          const QSize display = window.SnapshotDisplaySizeForTest();
+          const double limit_mb =
+              (display.width() >= 3840 || display.height() >= 3840) ? 1536.0 : 800.0;
+          if (memory_ok) {
+            check("p11-working-set", working_mb <= limit_mb);
+          }
+          check("no-last-error", window.SnapshotLastErrorForTest().isEmpty());
+
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });
       }

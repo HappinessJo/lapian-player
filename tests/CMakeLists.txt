@@ -43,6 +43,14 @@ set_tests_properties(lapian_mark_panel_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen" SKIP_RETURN_CODE 77)
 
+# T5.4 截图命名/非法字符/重名序号/目录回退/display matrix 旋转。
+add_executable(lapian_snapshot_naming_test snapshot_naming_test.cpp)
+lapian_apply_common_options(lapian_snapshot_naming_test)
+target_link_libraries(lapian_snapshot_naming_test PRIVATE lapian_snapshot)
+add_test(NAME lapian_snapshot_naming_test COMMAND lapian_snapshot_naming_test)
+set_tests_properties(lapian_snapshot_naming_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T1.1 媒体探测测试：零依赖断言；媒体素材缺失时返回 77，由 CTest 标记 SKIP。
 add_executable(lapian_media_probe_test media_probe_test.cpp)
 lapian_apply_common_options(lapian_media_probe_test)

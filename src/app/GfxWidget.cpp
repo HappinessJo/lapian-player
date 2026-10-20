@@ -11,6 +11,7 @@
 #include <cmath>
 #include <string>
 
+#include "platform/gfx/D3D11Context.h"
 #include "platform/gfx/D3D11Device.h"
 #include "platform/gfx/SwapChain.h"
 #include "platform/gfx/VideoRenderer.h"
@@ -99,8 +100,13 @@ void GfxWidget::UpdateSwapChainSize() {
   const UINT pixel_width = static_cast<UINT>(std::lround(this->width() * ratio));
   const UINT pixel_height = static_cast<UINT>(std::lround(this->height() * ratio));
   std::string error;
-  if (!swap_chain_->Resize(pixel_width, pixel_height, &error)) {
-    qWarning() << "调整交换链失败:" << QString::fromStdString(error);
+  {
+    // 交换链重建也走 D3D11 立即上下文；与截图硬解回读互斥。
+    const std::lock_guard<std::recursive_mutex> lock(
+        lapian::gfx::D3D11ContextMutex());
+    if (!swap_chain_->Resize(pixel_width, pixel_height, &error)) {
+      qWarning() << "调整交换链失败:" << QString::fromStdString(error);
+    }
   }
 }
 
@@ -108,6 +114,8 @@ void GfxWidget::PresentFrame() {
   if (!swap_chain_ || !swap_chain_->IsValid()) {
     return;
   }
+  // Render + Present 都使用立即上下文，整体与截图回读串行化。
+  const std::lock_guard<std::recursive_mutex> lock(lapian::gfx::D3D11ContextMutex());
   HRESULT hr = E_FAIL;
   if (video_renderer_ && video_renderer_->HasFrame()) {
     video_renderer_->Render(swap_chain_->render_target_view(), swap_chain_->width(),
@@ -135,7 +143,14 @@ void GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwis
     return;
   }
   std::string error;
-  if (!video_renderer_->SetFrame(frame, rotation_counterclockwise_degrees, &error)) {
+  bool uploaded = false;
+  {
+    // 硬件帧拷贝/软解上传/可能的回读都在这里发生，不能被截图线程打断。
+    const std::lock_guard<std::recursive_mutex> lock(
+        lapian::gfx::D3D11ContextMutex());
+    uploaded = video_renderer_->SetFrame(frame, rotation_counterclockwise_degrees, &error);
+  }
+  if (!uploaded) {
     qWarning() << "设置视频帧失败:" << QString::fromStdString(error);
     emit deviceError(QString::fromStdString(error));
     return;

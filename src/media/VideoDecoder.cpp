@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
+
+#include "platform/gfx/D3D11Context.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -409,6 +412,12 @@ bool VideoDecoder::Open(const std::string& utf8_path, int video_stream_index, bo
   if (error == nullptr) {
     return false;
   }
+  // 只有硬解路径使用 D3D11 设备；软件预览解码不抢这把锁。
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (prefer_hardware || impl_->hardware_active) {
+    device_lock.lock();
+  }
   error->clear();
   impl_->Close();
   impl_->path = utf8_path;
@@ -427,6 +436,11 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
   if (error == nullptr) {
     return false;
   }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (prefer_hardware || impl_->hardware_active) {
+    device_lock.lock();
+  }
   error->clear();
   if (prefer_hardware && d3d11_device == nullptr) {
     *error = "硬件解码需要与渲染器共用的 D3D11 设备";
@@ -443,11 +457,23 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
   return false;
 }
 
-void VideoDecoder::Close() { impl_->Close(); }
+void VideoDecoder::Close() {
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (impl_->hardware_active) {
+    device_lock.lock();
+  }
+  impl_->Close();
+}
 
 bool VideoDecoder::DecodeFirstFrame(DecodedFrameInfo* info, std::string* error) {
   if (error == nullptr) {
     return false;
+  }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (impl_->hardware_active) {
+    device_lock.lock();
   }
   error->clear();
   if (!impl_->IsOpen()) {
@@ -476,6 +502,11 @@ bool VideoDecoder::DecodeNextFrame(DecodedFrameInfo* info, std::string* error) {
   if (error == nullptr) {
     return false;
   }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (impl_->hardware_active) {
+    device_lock.lock();
+  }
   error->clear();
   return impl_->DecodeInternal(false, info, error);
 }
@@ -483,6 +514,11 @@ bool VideoDecoder::DecodeNextFrame(DecodedFrameInfo* info, std::string* error) {
 bool VideoDecoder::SeekToPts(std::int64_t pts_us, std::string* error) {
   if (error == nullptr) {
     return false;
+  }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (impl_->hardware_active) {
+    device_lock.lock();
   }
   error->clear();
   return impl_->SeekToPts(pts_us, error);

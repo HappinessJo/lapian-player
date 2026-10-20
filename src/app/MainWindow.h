@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QSize>
 #include <QString>
+#include <QStringList>
 
 #include <cstdint>
 #include <memory>
@@ -23,6 +25,7 @@ class GfxWidget;
 class InfoBar;
 class MarkPanel;
 class PlaybackController;
+class SnapshotService;
 class TimelineWidget;
 
 namespace lapian::media {
@@ -89,6 +92,27 @@ class MainWindow : public QMainWindow {
   bool CloseForTest();
   void ResetNotePerfSamplesForTest();
   QString NotePerfSummaryForTest() const;
+  // T5.4 自动化验证入口：注入图片目录回退根（须在 OpenFile/截图之前调用）。
+  void SetSnapshotPicturesRootForTest(const QString& root);
+  // T5.4 自动化验证入口：与 S 键走同一个 CaptureSnapshot；状态/路径/尺寸供断言。
+  void CaptureSnapshotForTest();
+  // 发送真实 S 键事件，验证 QAction 快捷键与焦点隔离，不只测内部函数。
+  void PressSnapshotKeyForTest();
+  // 等待截图队列清空并派发保存信号；自动化用它替代固定 sleep，避免 4K 编码竞态。
+  bool DrainSnapshotsForTest();
+  // 清除编辑框焦点，便于自动化继续走非文本路径。
+  void ClearFocusForTest();
+  QString SnapshotStateForTest() const;
+  QStringList SnapshotSavedPathsForTest() const;
+  QSize SnapshotDisplaySizeForTest() const;
+  QString SnapshotLastPathForTest() const;
+  bool SnapshotLastFallbackForTest() const;
+  qint64 SnapshotLastCaptureFrameForTest() const;
+  qint64 SnapshotLastSavedFrameForTest() const;
+  QString SnapshotLastErrorForTest() const;
+  QString SnapshotStatusForTest() const;
+  void ResetSnapshotPerfSamplesForTest();
+  QString SnapshotPerfSummaryForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -124,6 +148,7 @@ class MainWindow : public QMainWindow {
   void SetLoopOut();
   void ToggleLoop();
   void ClearLoop();
+  void CaptureSnapshot();
 
  private:
   void ShowEmptyState();
@@ -153,6 +178,8 @@ class MainWindow : public QMainWindow {
   void ShowMarkSaveFailure(const lapian::core::SaveResult& result);
   void ShowMarkWarnings();
   void CancelPendingMarkJump();
+  void RememberDisplayedFrame(const AVFrame* frame, int rotation,
+                              std::int64_t frame_index);
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
@@ -181,6 +208,7 @@ class MainWindow : public QMainWindow {
   QAction* loop_toggle_action_ = nullptr;
   QAction* loop_clear_action_ = nullptr;
   QAction* mark_action_ = nullptr;
+  QAction* snapshot_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
@@ -189,15 +217,28 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
   std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
   std::unique_ptr<lapian::core::MarkStore> marks_;
+  std::unique_ptr<SnapshotService> snapshots_;
   lapian::core::LoopRange loop_;
   QTimer* preview_timer_ = nullptr;
+  AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
+  std::int64_t displayed_frame_index_ = -1;
+  int displayed_rotation_ = 0;
   std::uint64_t audio_status_revision_ = 0;
   std::uint64_t waveform_status_revision_ = 0;
   std::uint64_t navigation_generation_ = 0;
   std::vector<double> mark_ui_samples_;
   std::vector<double> mark_exact_samples_;
   std::vector<double> note_save_samples_;
+  std::vector<double> snapshot_capture_samples_;
+  std::vector<double> snapshot_save_samples_;
+  QStringList snapshot_saved_paths_;
+  QString snapshot_last_path_;
+  QString snapshot_last_error_;
+  std::int64_t snapshot_last_capture_frame_ = -1;
+  std::int64_t snapshot_last_saved_frame_ = -1;
+  bool snapshot_last_fallback_ = false;
+  bool snapshot_log_ = false;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;

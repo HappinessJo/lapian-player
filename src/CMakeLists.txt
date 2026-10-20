@@ -60,6 +60,16 @@ lapian_apply_common_options(lapian_mark_ui)
 target_include_directories(lapian_mark_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_mark_ui PUBLIC Qt6::Widgets lapian_marks)
 
+# T5.4 截图命名/目录回退 + display matrix 旋转；纯函数，产品与单测共用。
+add_library(lapian_snapshot STATIC
+  media/SnapshotNaming.cpp
+  media/SnapshotNaming.h
+  app/SnapshotImage.cpp
+  app/SnapshotImage.h)
+lapian_apply_common_options(lapian_snapshot)
+target_include_directories(lapian_snapshot PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_snapshot PUBLIC Qt6::Gui lapian_framemath)
+
 # T2.7 时间轴：纯 C++ 几何模型 + Qt Widgets 控件，产品与测试共用。
 add_library(lapian_timeline STATIC
   core/TimelineModel.cpp
@@ -117,13 +127,16 @@ qt_add_executable(lapian WIN32
   app/InfoBar.cpp
   app/InfoBar.h
   app/PlaybackController.cpp
-  app/PlaybackController.h)
+  app/PlaybackController.h
+  app/SnapshotService.cpp
+  app/SnapshotService.h)
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
                                      lapian_timeline lapian_audio lapian_marks
-                                     lapian_mark_ui lapian::ffmpeg Qt6::Widgets)
+                                     lapian_mark_ui lapian_snapshot lapian::ffmpeg
+                                     Qt6::Widgets windowscodecs ole32 psapi)
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 

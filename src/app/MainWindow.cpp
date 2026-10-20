@@ -9,10 +9,12 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
@@ -48,6 +50,8 @@ extern "C" {
 #include "app/InfoBar.h"
 #include "app/MarkPanel.h"
 #include "app/PlaybackController.h"
+#include "app/SnapshotImage.h"
+#include "app/SnapshotService.h"
 #include "app/TimelineWidget.h"
 #include "audio/AudioEngine.h"
 #include "audio/WaveformGenerator.h"
@@ -238,6 +242,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(mark_action_, &QAction::triggered, this, &MainWindow::AddMarkAtCurrentFrame);
   addAction(mark_action_);
 
+  // T5.4 截图：S 在按键瞬间引用当前已显示帧，编码/写盘在 SnapshotService 工作线程。
+  snapshot_action_ = new QAction(QStringLiteral("截图"), this);
+  snapshot_action_->setShortcut(Qt::Key_S);
+  snapshot_action_->setShortcutContext(Qt::WindowShortcut);
+  snapshot_action_->setEnabled(false);
+  connect(snapshot_action_, &QAction::triggered, this, &MainWindow::CaptureSnapshot);
+  addAction(snapshot_action_);
+
   connect(mark_panel_, &MarkPanel::markActivated, this,
           [this](const QString& id, qint64 frame) {
             ActivateMark(id, static_cast<std::int64_t>(frame));
@@ -246,6 +258,50 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
           [this](const QString& id) { ApplyDeleteMark(id, true); });
   connect(mark_panel_, &MarkPanel::markTextEdited, this,
           &MainWindow::ApplyMarkTextEdited);
+
+  snapshot_log_ = qEnvironmentVariableIsSet("LAPIAN_SNAPSHOT_LOG");
+  snapshots_ = std::make_unique<SnapshotService>(
+      qEnvironmentVariable("LAPIAN_SNAPSHOT_PICTURES_DIR"));
+  connect(snapshots_.get(), &SnapshotService::snapshotSaved, this,
+          [this](const QString& path, bool used_fallback, qint64 frame_index,
+                 qint64 encode_ms) {
+            snapshot_saved_paths_.push_back(path);
+            snapshot_last_path_ = path;
+            snapshot_last_error_.clear();
+            snapshot_last_fallback_ = used_fallback;
+            snapshot_last_saved_frame_ = frame_index;
+            snapshot_save_samples_.push_back(static_cast<double>(encode_ms));
+            const QString native = QDir::toNativeSeparators(path);
+            if (used_fallback) {
+              statusBar()->showMessage(
+                  QStringLiteral("视频目录不可写，截图已保存到图片目录：%1").arg(native),
+                  8000);
+            } else {
+              statusBar()->showMessage(QStringLiteral("截图已保存：%1").arg(native), 5000);
+            }
+            if (snapshot_log_) {
+              std::fprintf(stderr,
+                           "T5.4 snapshot_saved path=%s frame=%lld fallback=%d "
+                           "encode_ms=%lld\n",
+                           path.toUtf8().constData(),
+                           static_cast<long long>(frame_index),
+                           used_fallback ? 1 : 0,
+                           static_cast<long long>(encode_ms));
+              std::fflush(stderr);
+            }
+          });
+  connect(snapshots_.get(), &SnapshotService::snapshotFailed, this,
+          [this](const QString& error) {
+            snapshot_last_error_ = error;
+            statusBar()->showMessage(QStringLiteral("截图失败：%1").arg(error), 8000);
+            qWarning() << "截图失败:" << error;
+            if (snapshot_log_) {
+              std::fprintf(stderr, "T5.4 snapshot_failed error=%s\n",
+                           error.toUtf8().constData());
+              std::fflush(stderr);
+            }
+          });
+  displayed_frame_ = av_frame_alloc();
 
   playback_ = std::make_unique<PlaybackController>(this);
   connect(playback_.get(), &PlaybackController::frameReady, this, &MainWindow::OnFrameReady);
@@ -325,10 +381,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(timeline_, &TimelineWidget::scrubFinished, this, &MainWindow::OnScrubFinished);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+  // 先等工作线程结束，再释放它可能引用的解码器/帧资源。
+  if (snapshots_ != nullptr) {
+    snapshots_->Drain();
+  }
+  av_frame_free(&displayed_frame_);
+}
 
 void MainWindow::ShowEmptyState() {
   CancelPendingMarkJump();
+  if (displayed_frame_ != nullptr) {
+    av_frame_unref(displayed_frame_);
+  }
+  displayed_frame_index_ = -1;
+  displayed_rotation_ = 0;
   StopPreview();
   preview_.reset();
   marks_.reset();
@@ -431,6 +498,9 @@ void MainWindow::ShowEmptyState() {
   if (mark_action_ != nullptr) {
     mark_action_->setEnabled(false);
   }
+  if (snapshot_action_ != nullptr) {
+    snapshot_action_->setEnabled(false);
+  }
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
@@ -466,6 +536,10 @@ void MainWindow::OpenFile(const QString& path) {
 
   if (playback_ != nullptr) {
     playback_->Pause();
+  }
+  // 旧文件的截图任务先完成，避免工作线程在会话替换后继续引用旧帧。
+  if (snapshots_ != nullptr) {
+    snapshots_->Drain();
   }
 
   const QByteArray utf8 = path.toUtf8();
@@ -525,6 +599,14 @@ void MainWindow::OpenFile(const QString& path) {
   marks_dirty_ = false;
   playback_->SetSession(session_.get());
   current_frame_ = 0;
+  snapshot_saved_paths_.clear();
+  snapshot_last_path_.clear();
+  snapshot_last_error_.clear();
+  snapshot_last_capture_frame_ = -1;
+  snapshot_last_saved_frame_ = -1;
+  snapshot_last_fallback_ = false;
+  snapshot_capture_samples_.clear();
+  snapshot_save_samples_.clear();
   play_action_->setEnabled(true);
   const bool can_seek = session_->index().IsReady() && !session_->index().empty();
   prev_action_->setEnabled(can_seek);
@@ -532,6 +614,9 @@ void MainWindow::OpenFile(const QString& path) {
   goto_action_->setEnabled(can_seek);
   if (mark_action_ != nullptr) {
     mark_action_->setEnabled(can_seek);
+  }
+  if (snapshot_action_ != nullptr) {
+    snapshot_action_->setEnabled(true);
   }
 
   // T2.7：时间轴先用当前索引的帧数；索引为空时不画假刻度。
@@ -553,6 +638,7 @@ void MainWindow::OpenFile(const QString& path) {
   const lapian::media::MediaInfo& info = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
   gfx_->SetVideoFrame(frame.av_frame, info.rotation.counterclockwise_degrees);
+  RememberDisplayedFrame(frame.av_frame, info.rotation.counterclockwise_degrees, 0);
 
   const QFileInfo file_info(path);
   setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
@@ -1147,6 +1233,7 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
   }
   if (gfx_ != nullptr && frame != nullptr) {
     gfx_->SetVideoFrame(frame, rotation);
+    RememberDisplayedFrame(frame, rotation, frame_index);
   }
   if (info_bar_ != nullptr) {
     info_bar_->SetFrame(frame_index);
@@ -1155,6 +1242,79 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
     timeline_->SetCurrentFrame(frame_index);
   }
   current_frame_ = frame_index;
+}
+
+void MainWindow::RememberDisplayedFrame(const AVFrame* frame, int rotation,
+                                        std::int64_t frame_index) {
+  if (frame == nullptr) {
+    return;
+  }
+  if (displayed_frame_ == nullptr) {
+    displayed_frame_ = av_frame_alloc();
+  }
+  if (displayed_frame_ == nullptr) {
+    displayed_frame_index_ = -1;
+    return;
+  }
+  av_frame_unref(displayed_frame_);
+  if (av_frame_ref(displayed_frame_, frame) < 0) {
+    displayed_frame_index_ = -1;
+    return;
+  }
+  displayed_frame_index_ = frame_index;
+  displayed_rotation_ = rotation;
+}
+
+void MainWindow::CaptureSnapshot() {
+  // 备注/帧号输入框里的 S 是文本输入，不是截图快捷键（spec §3.7）。
+  if (IsTextInputFocused()) {
+    return;
+  }
+  if (session_ == nullptr || !session_->IsOpen() || displayed_frame_ == nullptr ||
+      displayed_frame_index_ < 0) {
+    statusBar()->showMessage(QStringLiteral("当前没有可截图的画面"), 3000);
+    return;
+  }
+  // 拖动中的画面是降采样预览，不是源分辨率；不把预览帧当正式截图。
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    statusBar()->showMessage(QStringLiteral("拖动预览中，松开后再截图"), 3000);
+    return;
+  }
+  if (snapshots_ == nullptr) {
+    return;
+  }
+
+  SnapshotService::Request request;
+  request.video_path = QString::fromStdString(session_->path_utf8());
+  request.frame = displayed_frame_index_;
+  request.rotation_counterclockwise_degrees = displayed_rotation_;
+  request.fps_num = session_->info().video.frame_rate.num;
+  request.fps_den = session_->info().video.frame_rate.den;
+
+  // 按键路径只做 av_frame_ref（O(1)）；回读/转换/编码/写盘全在工作线程。
+  QElapsedTimer timer;
+  timer.start();
+  const bool queued = snapshots_->Capture(displayed_frame_, request);
+  const double capture_ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+  snapshot_capture_samples_.push_back(capture_ms);
+  if (!queued) {
+    statusBar()->showMessage(QStringLiteral("截图队列已满或当前帧不可引用"), 4000);
+    return;
+  }
+
+  snapshot_last_capture_frame_ = displayed_frame_index_;
+  if (snapshot_log_) {
+    std::fprintf(stderr,
+                 "T5.4 snapshot_capture frame=%lld rotation=%d capture_ms=%.2f "
+                 "pending=%d\n",
+                 static_cast<long long>(displayed_frame_index_), displayed_rotation_,
+                 capture_ms, snapshots_->PendingCount());
+    std::fflush(stderr);
+  }
+  statusBar()->showMessage(
+      QStringLiteral("正在保存截图（帧 %1）…")
+          .arg(static_cast<qlonglong>(displayed_frame_index_)),
+      3000);
 }
 
 void MainWindow::StepBackward() {
@@ -1196,6 +1356,8 @@ void MainWindow::GoToFrame(std::int64_t frame) {
   }
 
   gfx_->SetVideoFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees);
+  RememberDisplayedFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees,
+                         target);
   info_bar_->SetFrame(static_cast<int>(target));
   timeline_->SetCurrentFrame(target);
   playback_->SetPosition(target, info.pts_us);
@@ -1253,6 +1415,10 @@ void MainWindow::ShowOpenError(const QString& message) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
   CancelPendingMarkJump();
+  // 关窗前把已按下的截图任务写完，避免用户以为存了却丢文件。
+  if (snapshots_ != nullptr) {
+    snapshots_->Drain();
+  }
   if (!FlushMarksOnClose()) {
     event->ignore();
     return;
@@ -1757,6 +1923,115 @@ QString MainWindow::NotePerfSummaryForTest() const {
       .arg(p50, 0, 'f', 2)
       .arg(samples[p95_index], 0, 'f', 2)
       .arg(samples.back(), 0, 'f', 2);
+}
+
+void MainWindow::CaptureSnapshotForTest() { CaptureSnapshot(); }
+
+void MainWindow::PressSnapshotKeyForTest() {
+  QWidget* target = QApplication::focusWidget();
+  if (target == nullptr) {
+    target = this;
+  }
+  QKeyEvent press(QEvent::KeyPress, Qt::Key_S, Qt::NoModifier);
+  QApplication::sendEvent(target, &press);
+  QKeyEvent release(QEvent::KeyRelease, Qt::Key_S, Qt::NoModifier);
+  QApplication::sendEvent(target, &release);
+}
+
+bool MainWindow::DrainSnapshotsForTest() {
+  if (snapshots_ == nullptr) {
+    return false;
+  }
+  snapshots_->Drain();
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  return snapshots_->PendingCount() == 0;
+}
+
+void MainWindow::ClearFocusForTest() {
+  if (QWidget* focused = QApplication::focusWidget()) {
+    focused->clearFocus();
+  }
+}
+
+void MainWindow::SetSnapshotPicturesRootForTest(const QString& root) {
+  if (snapshots_ != nullptr) {
+    snapshots_->SetPicturesRoot(root);
+  }
+}
+
+QString MainWindow::SnapshotStateForTest() const {
+  const int pending = snapshots_ == nullptr ? 0 : snapshots_->PendingCount();
+  return QStringLiteral(
+             "saved=%1 pending=%2 last_frame=%3 capture_frame=%4 fallback=%5 "
+             "playing=%6 current=%7 last=%8 error=%9 hardware=%10")
+      .arg(static_cast<qlonglong>(snapshot_saved_paths_.size()))
+      .arg(pending)
+      .arg(static_cast<qlonglong>(snapshot_last_saved_frame_))
+      .arg(static_cast<qlonglong>(snapshot_last_capture_frame_))
+      .arg(snapshot_last_fallback_ ? 1 : 0)
+      .arg(playback_ != nullptr && playback_->IsPlaying() ? 1 : 0)
+      .arg(static_cast<qlonglong>(current_frame_))
+      .arg(snapshot_last_path_.isEmpty() ? QStringLiteral("-") : snapshot_last_path_)
+      .arg(snapshot_last_error_.isEmpty() ? QStringLiteral("-") : snapshot_last_error_)
+      .arg(displayed_frame_ != nullptr && displayed_frame_->hw_frames_ctx != nullptr ? 1 : 0);
+}
+
+QStringList MainWindow::SnapshotSavedPathsForTest() const {
+  return snapshot_saved_paths_;
+}
+
+QSize MainWindow::SnapshotDisplaySizeForTest() const {
+  if (displayed_frame_ == nullptr || displayed_frame_->width <= 0 ||
+      displayed_frame_->height <= 0) {
+    return {};
+  }
+  return lapian::snapshot::SnapshotDisplaySize(
+      QSize(displayed_frame_->width, displayed_frame_->height), displayed_rotation_);
+}
+
+QString MainWindow::SnapshotLastPathForTest() const { return snapshot_last_path_; }
+
+bool MainWindow::SnapshotLastFallbackForTest() const { return snapshot_last_fallback_; }
+
+qint64 MainWindow::SnapshotLastCaptureFrameForTest() const {
+  return static_cast<qint64>(snapshot_last_capture_frame_);
+}
+
+qint64 MainWindow::SnapshotLastSavedFrameForTest() const {
+  return static_cast<qint64>(snapshot_last_saved_frame_);
+}
+
+QString MainWindow::SnapshotLastErrorForTest() const { return snapshot_last_error_; }
+
+QString MainWindow::SnapshotStatusForTest() const {
+  return statusBar() == nullptr ? QString() : statusBar()->currentMessage();
+}
+
+void MainWindow::ResetSnapshotPerfSamplesForTest() {
+  snapshot_capture_samples_.clear();
+  snapshot_save_samples_.clear();
+}
+
+QString MainWindow::SnapshotPerfSummaryForTest() const {
+  auto summarize = [](std::vector<double> samples, const QString& prefix) {
+    if (samples.empty()) {
+      return QStringLiteral("%1_n=0").arg(prefix);
+    }
+    std::sort(samples.begin(), samples.end());
+    const double p50 = samples[samples.size() / 2];
+    const std::size_t p95_index =
+        std::min(samples.size() - 1,
+                 static_cast<std::size_t>(static_cast<double>(samples.size()) * 0.95));
+    return QStringLiteral("%1_n=%2 %1_p50=%3ms %1_p95=%4ms %1_max=%5ms")
+        .arg(prefix)
+        .arg(samples.size())
+        .arg(p50, 0, 'f', 2)
+        .arg(samples[p95_index], 0, 'f', 2)
+        .arg(samples.back(), 0, 'f', 2);
+  };
+  return summarize(snapshot_capture_samples_, QStringLiteral("capture")) +
+         QStringLiteral(" ") +
+         summarize(snapshot_save_samples_, QStringLiteral("save"));
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
