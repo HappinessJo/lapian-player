@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMainWindow>
+#include <QPointer>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -18,6 +20,7 @@ class QAction;
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
+class QKeyEvent;
 class QLabel;
 class QSlider;
 class QTimer;
@@ -113,11 +116,35 @@ class MainWindow : public QMainWindow {
   QString SnapshotStatusForTest() const;
   void ResetSnapshotPerfSamplesForTest();
   QString SnapshotPerfSummaryForTest() const;
+  // T6.1 自动化验证入口：与 F / Esc / 双击画面走同一套切换逻辑与提示。
+  void ToggleFullScreenForTest();
+  void PressFullScreenKeyForTest();
+  void PressEscapeKeyForTest();
+  void PressSpaceKeyForTest();
+  void FocusVideoForTest();
+  void DoubleClickVideoForTest();
+  bool IsFullScreenForTest() const;
+  bool IsMaximizedForTest() const;
+  bool IsPlayingForTest() const;
+  QString FullScreenStateForTest() const;
+  QSize GfxWidgetSizeForTest() const;
+  QSize SwapChainSizeForTest() const;
+  QSize TimelineSizeForTest() const;
+  qint64 TimelineFrameAtForTest(int x, int y) const;
+  void ClickTimelineForTest(int x, int y);
+  QString InfoFrameTextForTest() const;
+  QString FocusWidgetNameForTest() const;
+  bool IsTextInputFocusedForTest() const;
+  bool TimelineVisibleForTest() const;
+  bool InfoBarVisibleForTest() const;
+  qint64 CurrentFrameForTest() const;
+  qint64 LastFullScreenToggleMsForTest() const;
 
  protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
   void closeEvent(QCloseEvent* event) override;
+  void keyPressEvent(QKeyEvent* event) override;
 
  private slots:
   void OpenDialog();
@@ -180,6 +207,14 @@ class MainWindow : public QMainWindow {
   void CancelPendingMarkJump();
   void RememberDisplayedFrame(const AVFrame* frame, int rotation,
                               std::int64_t frame_index);
+  // T6.1：全屏进入/退出。保存/恢复普通窗口几何、最大化状态与焦点；
+  // 不改布局（时间轴/信息栏/侧栏/状态栏在全屏下仍可用）。
+  void EnterFullScreen();
+  void ExitFullScreen();
+  void ToggleFullScreen();
+  void UpdateFullScreenActionState();
+  void SendKeyForTest(int key);
+  void RestoreFocusIfNeeded(QWidget* expected);
 
   GfxWidget* gfx_ = nullptr;
   TimelineWidget* timeline_ = nullptr;
@@ -209,6 +244,8 @@ class MainWindow : public QMainWindow {
   QAction* loop_clear_action_ = nullptr;
   QAction* mark_action_ = nullptr;
   QAction* snapshot_action_ = nullptr;
+  QAction* fullscreen_action_ = nullptr;
+  QAction* exit_fullscreen_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
   std::unique_ptr<lapian::media::MediaSession> session_;
@@ -239,6 +276,11 @@ class MainWindow : public QMainWindow {
   std::int64_t snapshot_last_saved_frame_ = -1;
   bool snapshot_last_fallback_ = false;
   bool snapshot_log_ = false;
+  // T6.1 全屏：进入前的普通几何/最大化状态与焦点控件，退出时恢复。
+  QByteArray fullscreen_geometry_;
+  QPointer<QWidget> fullscreen_focus_widget_;
+  bool fullscreen_was_maximized_ = false;
+  qint64 fullscreen_last_toggle_ms_ = -1;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;

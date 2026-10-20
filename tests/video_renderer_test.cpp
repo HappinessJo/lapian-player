@@ -6,13 +6,26 @@
 #include <d3d11.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include <wrl/client.h>
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#endif
+extern "C" {
+#include <libavutil/frame.h>
+}
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 #include "media/VideoDecoder.h"
 #include "platform/gfx/D3D11Device.h"
@@ -109,6 +122,37 @@ bool HasNonBackgroundPixel(ID3D11DeviceContext* context, const RenderTarget& tar
   return found;
 }
 
+// T6.1 F1-A6：非 16:9 视口（全屏窗口减去时间轴/侧栏后正是这种形状）必须
+// letterbox 而不是拉伸。整行都应是清屏背景色，容差覆盖 8-bit 量化。
+bool RowIsBackground(ID3D11DeviceContext* context, const RenderTarget& target, UINT y,
+                     UINT step) {
+  context->CopyResource(target.staging.Get(), target.texture.Get());
+  D3D11_TEXTURE2D_DESC staging_desc{};
+  target.staging->GetDesc(&staging_desc);
+  if (y >= staging_desc.Height) {
+    return false;
+  }
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if (FAILED(context->Map(target.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+    return false;
+  }
+  const auto* row =
+      static_cast<const std::uint8_t*>(mapped.pData) +
+      static_cast<std::size_t>(y) * mapped.RowPitch;
+  bool background = true;
+  for (UINT x = 0; x < staging_desc.Width; x += step) {
+    const int b = row[x * 4 + 0];
+    const int g = row[x * 4 + 1];
+    const int r = row[x * 4 + 2];
+    if (std::abs(r - 23) > 6 || std::abs(g - 23) > 6 || std::abs(b - 26) > 6) {
+      background = false;
+      break;
+    }
+  }
+  context->Unmap(target.staging.Get(), 0);
+  return background;
+}
+
 void TestFrame(const std::string& path, bool prefer_hardware, const std::string& label) {
   if (!FileExists(path)) {
     Skip(path + " 不存在");
@@ -155,6 +199,32 @@ void TestFrame(const std::string& path, bool prefer_hardware, const std::string&
   renderer.Render(target.view.Get(), 640, 360);
   Check(HasNonBackgroundPixel(device.context(), target),
         label + " 首帧画出了非背景像素");
+
+  // T6.1：把内容画进 640x640 视口（模拟全屏后非源比例的 picture 区）时，
+  // 留边必须是背景色，不能被拉伸填满。留边高度按实际帧尺寸计算，
+  // 以覆盖 16:9 之外的 4:3（10-bit 素材）等比例。
+  RenderTarget square;
+  if (!CreateRenderTarget(device.device(), 640, 640, &square, &error)) {
+    Check(false, label + " " + error);
+    return;
+  }
+  renderer.Render(square.view.Get(), 640, 640);
+  const double scale = std::min(640.0 / frame.av_frame->width,
+                                640.0 / frame.av_frame->height);
+  const int content_height =
+      static_cast<int>(std::lround(frame.av_frame->height * scale));
+  const int bar = (640 - content_height) / 2;
+  if (bar >= 16) {
+    Check(RowIsBackground(device.context(), square, 4, 16),
+          label + " 640x640 顶部留边为背景色（未拉伸）");
+    Check(RowIsBackground(device.context(), square, static_cast<UINT>(bar - 8), 16),
+          label + " 640x640 顶部留边边界仍为背景色");
+    Check(RowIsBackground(device.context(), square,
+                          static_cast<UINT>(640 - bar + 8), 16),
+          label + " 640x640 底部留边为背景色（未拉伸）");
+  }
+  Check(HasNonBackgroundPixel(device.context(), square),
+        label + " 640x640 中心仍画出视频");
 }
 
 }  // namespace

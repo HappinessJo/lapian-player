@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QSize>
 #include <QWidget>
 
 #include <memory>
@@ -8,6 +9,7 @@ struct AVFrame;
 struct ID3D11Device;
 class QFocusEvent;
 class QKeyEvent;
+class QMouseEvent;
 class QTimer;
 
 namespace lapian::gfx {
@@ -30,6 +32,9 @@ class GfxWidget : public QWidget {
   void ClearVideoFrame();
   // T1.2/T1.3：解码器必须用同一个 D3D11 设备，硬件帧才能跨线程/模块拷贝。
   ID3D11Device* d3d_device();
+  // T6.1：交换链后备缓冲的实际像素尺寸（逻辑尺寸 × devicePixelRatio）。
+  // 全屏切换后用它确认交换链跟随了控件 resize；未初始化/设备丢失时返回空。
+  QSize swapChainSize() const;
 
  signals:
   void deviceReady(const QString& summary);
@@ -37,6 +42,8 @@ class GfxWidget : public QWidget {
   void playPauseRequested();
   void stepRequested(int delta);
   void gotoRequested();
+  // T6.1：双击画面进入/退出全屏；单击仍走 QWidget 默认（不吞拖动/焦点）。
+  void fullScreenToggleRequested();
 
  protected:
   void showEvent(QShowEvent* event) override;
@@ -45,6 +52,7 @@ class GfxWidget : public QWidget {
   void keyPressEvent(QKeyEvent* event) override;
   void keyReleaseEvent(QKeyEvent* event) override;
   void focusOutEvent(QFocusEvent* event) override;
+  void mouseDoubleClickEvent(QMouseEvent* event) override;
 
  private:
   bool EnsureReady();

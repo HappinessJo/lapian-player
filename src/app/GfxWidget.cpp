@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QFocusEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -172,6 +173,14 @@ ID3D11Device* GfxWidget::d3d_device() {
   return device_->device();
 }
 
+QSize GfxWidget::swapChainSize() const {
+  if (!swap_chain_ || !swap_chain_->IsValid()) {
+    return {};
+  }
+  return QSize(static_cast<int>(swap_chain_->width()),
+               static_cast<int>(swap_chain_->height()));
+}
+
 void GfxWidget::showEvent(QShowEvent* event) {
   QWidget::showEvent(event);
   if (EnsureReady()) {
@@ -243,4 +252,14 @@ void GfxWidget::focusOutEvent(QFocusEvent* event) {
   step_direction_ = 0;
   step_repeat_started_ = false;
   QWidget::focusOutEvent(event);
+}
+
+void GfxWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+  // T6.1：双击画面切换全屏。单击路径不受影响（拖动/焦点仍是 QWidget 默认）。
+  if (event != nullptr && event->button() == Qt::LeftButton) {
+    emit fullScreenToggleRequested();
+    event->accept();
+    return;
+  }
+  QWidget::mouseDoubleClickEvent(event);
 }

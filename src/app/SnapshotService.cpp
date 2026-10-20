@@ -333,18 +333,21 @@ void SnapshotService::WorkerLoop() {
       }
     }
 
+    // 先发信号再清 busy_：Drain() 返回时 snapshotSaved/snapshotFailed 已经
+    // 投递到接收线程的事件队列，调用方再 processEvents 就能确定拿到结果。
+    // 若反过来先置 idle，Drain() 可能抢在信号入队前返回（4K 编码更长时可见）。
+    if (saved) {
+      emit snapshotSaved(path, fallback, static_cast<qint64>(task.request.frame), encode_ms);
+    } else {
+      emit snapshotFailed(error);
+    }
+
     av_frame_free(&task.frame);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       busy_ = false;
     }
     idle_cv_.notify_all();
-
-    if (saved) {
-      emit snapshotSaved(path, fallback, static_cast<qint64>(task.request.frame), encode_ms);
-    } else {
-      emit snapshotFailed(error);
-    }
   }
 
   if (com_needs_uninit) {

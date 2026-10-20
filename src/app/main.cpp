@@ -9,6 +9,8 @@
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRect>
+#include <QScreen>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -16,6 +18,8 @@
 
 #include <cstdio>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -45,6 +49,7 @@ int main(int argc, char* argv[]) {
   bool mark_test = false;
   bool note_test = false;
   bool snapshot_test = false;
+  bool fullscreen_test = false;
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
@@ -73,6 +78,8 @@ int main(int argc, char* argv[]) {
       note_test = true;
     } else if (arguments[i] == QStringLiteral("--snapshot-test")) {
       snapshot_test = true;
+    } else if (arguments[i] == QStringLiteral("--fullscreen-test")) {
+      fullscreen_test = true;
     } else if (arguments[i] == QStringLiteral("--snapshot-pictures") &&
                i + 1 < arguments.size()) {
       snapshot_pictures_arg = arguments[++i];
@@ -91,10 +98,12 @@ int main(int argc, char* argv[]) {
     qputenv("LAPIAN_MARK_LOG", "1");
   }
   QString snapshot_pictures_root;
-  if (snapshot_test) {
+  if (snapshot_test || fullscreen_test) {
     qputenv("LAPIAN_SNAPSHOT_LOG", "1");
     const QString default_root =
-        QDir::currentPath() + QStringLiteral("/build/t5.4-snapshot-pictures");
+        QDir::currentPath() +
+        (snapshot_test ? QStringLiteral("/build/t5.4-snapshot-pictures")
+                       : QStringLiteral("/build/t6.1-fullscreen-pictures"));
     snapshot_pictures_root =
         snapshot_pictures_arg.isEmpty() ? default_root : snapshot_pictures_arg;
     snapshot_pictures_root = QFileInfo(snapshot_pictures_root).absoluteFilePath();
@@ -112,8 +121,8 @@ int main(int argc, char* argv[]) {
   if (!file_path.isEmpty()) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, mark_test, note_test,
-                                    snapshot_test, snapshot_pictures_root, playback_rate,
-                                    has_playback_rate, process_start]() {
+                                    snapshot_test, fullscreen_test, snapshot_pictures_root,
+                                    playback_rate, has_playback_rate, process_start]() {
       window.OpenFile(file_path);
       if (!goto_text.isEmpty()) {
         window.GoToInputForTest(goto_text);
@@ -803,6 +812,279 @@ int main(int argc, char* argv[]) {
           }
           check("no-last-error", window.SnapshotLastErrorForTest().isEmpty());
 
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        });
+      }
+      if (fullscreen_test) {
+        // T6.1 F1-A6：F/双击全屏、Esc 退出、布局/帧号/时间轴/截图/焦点；
+        // --file-b 给 4K 时再验证全屏中 1080p→4K 切换与交换链。
+        const QString fs_video_b = file_b;
+        auto failures = std::make_shared<int>(0);
+        struct FullScreenTestState {
+          QRect normal_geometry;
+          QSize normal_gfx;
+          QSize normal_swap;
+          qint64 timeline_expected = -1;
+          QString focus_before_exit;
+          int snapshot_before_editor = 0;
+        };
+        auto state = std::make_shared<FullScreenTestState>();
+        auto schedule = [&window](int ms, auto fn) {
+          QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
+        };
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T6.1 fullscreen_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_state = [&window](const char* step) {
+          const QByteArray text = window.FullScreenStateForTest().toUtf8();
+          std::fprintf(stderr, "T6.1 fullscreen_state %s %s\n", step, text.constData());
+          std::fflush(stderr);
+        };
+        auto check_swap = [&window, check](const char* name) {
+          const QSize gfx = window.GfxWidgetSizeForTest();
+          const QSize swap = window.SwapChainSizeForTest();
+          const double dpr = window.devicePixelRatioF();
+          const int expected_w = static_cast<int>(std::lround(gfx.width() * dpr));
+          const int expected_h = static_cast<int>(std::lround(gfx.height() * dpr));
+          const bool ok = gfx.width() > 0 && gfx.height() > 0 && swap.width() > 0 &&
+                          std::abs(swap.width() - expected_w) <= 1 &&
+                          std::abs(swap.height() - expected_h) <= 1;
+          check(name, ok);
+          std::fprintf(stderr,
+                       "T6.1 fullscreen_swap %s gfx=%dx%d dpr=%.2f swap=%dx%d "
+                       "expected=%dx%d\n",
+                       name, gfx.width(), gfx.height(), dpr, swap.width(), swap.height(),
+                       expected_w, expected_h);
+          std::fflush(stderr);
+        };
+        auto check_png = [check](const QString& path, const QSize& expected,
+                                 const char* name) {
+          const QImage image(path);
+          check((std::string(name) + "-loads").c_str(), !image.isNull());
+          check((std::string(name) + "-size").c_str(), image.size() == expected);
+          std::fprintf(stderr,
+                       "T6.1 fullscreen_png %s path=%s actual=%dx%d expected=%dx%d\n", name,
+                       path.toUtf8().constData(), image.width(), image.height(),
+                       expected.width(), expected.height());
+          std::fflush(stderr);
+        };
+
+        schedule(500, [&window, state, log_state]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          state->normal_geometry = window.geometry();
+          state->normal_gfx = window.GfxWidgetSizeForTest();
+          state->normal_swap = window.SwapChainSizeForTest();
+          log_state("normal");
+        });
+
+        schedule(700, [&window, log_state]() {
+          window.PressFullScreenKeyForTest();
+          log_state("f-pressed");
+        });
+
+        schedule(950, [&window, state, check, check_swap, log_state]() {
+          log_state("entered");
+          check("f-enters", window.IsFullScreenForTest());
+          const QRect screen =
+              window.screen() == nullptr ? QRect() : window.screen()->geometry();
+          check("covers-screen",
+                std::abs(window.width() - screen.width()) <= 2 &&
+                    std::abs(window.height() - screen.height()) <= 2);
+          const QSize gfx = window.GfxWidgetSizeForTest();
+          check("gfx-grew", gfx.width() > state->normal_gfx.width() &&
+                                gfx.height() > state->normal_gfx.height());
+          check_swap("swap-fullscreen");
+          check("timeline-visible", window.TimelineVisibleForTest());
+          check("infobar-visible", window.InfoBarVisibleForTest());
+          check("info-frame-100",
+                window.InfoFrameTextForTest().contains(QStringLiteral("100")));
+          check("frame-100", window.CurrentFrameForTest() == 100);
+          check("display-1920x1080",
+                window.SnapshotDisplaySizeForTest() == QSize(1920, 1080));
+          // 全屏布局截图：视频区是原生 HWND，grab() 只能拿到黑底；截图只用于
+          // 证明时间轴/信息栏/侧栏没有被全屏裁掉（已知限制，见交接）。
+          const QString shot =
+              QDir::currentPath() + QStringLiteral("/build/t6.1-fullscreen.png");
+          const bool saved = window.grab().save(shot);
+          std::fprintf(stderr, "T6.1 fullscreen_shot path=%s ok=%d\n",
+                       shot.toUtf8().constData(), saved ? 1 : 0);
+          std::fflush(stderr);
+          check("layout-shot", saved);
+        });
+
+        schedule(1150, [&window, state]() {
+          const QSize size = window.TimelineSizeForTest();
+          const int x = size.width() / 2;
+          const int y = 12;
+          state->timeline_expected = window.TimelineFrameAtForTest(x, y);
+          std::fprintf(stderr, "T6.1 fullscreen_timeline x=%d expected=%lld\n", x,
+                       static_cast<long long>(state->timeline_expected));
+          std::fflush(stderr);
+          window.ClickTimelineForTest(x, y);
+        });
+
+        schedule(1500, [&window, state, check, log_state]() {
+          log_state("timeline-clicked");
+          check("timeline-click-frame",
+                state->timeline_expected >= 0 &&
+                    window.CurrentFrameForTest() == state->timeline_expected);
+          check("timeline-click-paused", !window.IsPlayingForTest());
+          check("timeline-click-info",
+                window.InfoFrameTextForTest().contains(
+                    QString::number(state->timeline_expected)));
+        });
+
+        schedule(1700, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.PressSnapshotKeyForTest();
+          log_state("snapshot-pressed");
+        });
+
+        schedule(2050, [&window, check, check_png, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("snapshot-saved");
+          const QString path = window.SnapshotLastPathForTest();
+          check("fullscreen-snapshot-saved", !path.isEmpty());
+          check("fullscreen-snapshot-frame",
+                window.SnapshotLastSavedFrameForTest() == 100);
+          check("fullscreen-snapshot-exists", QFileInfo::exists(path));
+          check_png(path, QSize(1920, 1080), "fullscreen-shot");
+        });
+
+        schedule(2300, [&window, state]() {
+          // spec §3.7 / T5.3：备注框聚焦时 F/S 是文本输入，Esc 也不退全屏。
+          window.AddMarkForTest();
+          state->snapshot_before_editor = window.SnapshotSavedPathsForTest().size();
+          window.FocusNoteEditorForTest();
+          window.PressFullScreenKeyForTest();
+          window.PressSnapshotKeyForTest();
+          window.PressEscapeKeyForTest();
+        });
+
+        schedule(2600, [&window, state, check, log_state]() {
+          log_state("editor-keys");
+          check("f-in-editor-kept-fullscreen", window.IsFullScreenForTest());
+          check("s-in-editor-no-snapshot",
+                window.SnapshotSavedPathsForTest().size() ==
+                    state->snapshot_before_editor);
+          check("esc-in-editor-kept-fullscreen", window.IsFullScreenForTest());
+          check("editor-still-focused", window.IsTextInputFocusedForTest());
+          window.ClearFocusForTest();
+        });
+
+        schedule(2850, [&window, state, log_state]() {
+          window.FocusVideoForTest();
+          state->focus_before_exit = window.FocusWidgetNameForTest();
+          window.PressFullScreenKeyForTest();  // F 退出全屏
+        });
+
+        schedule(3150, [&window, state, check, check_swap, log_state]() {
+          log_state("exited");
+          check("f-exits", !window.IsFullScreenForTest());
+          const QRect now = window.geometry();
+          check("geometry-restored",
+                std::abs(now.width() - state->normal_geometry.width()) <= 2 &&
+                    std::abs(now.height() - state->normal_geometry.height()) <= 2 &&
+                    std::abs(now.x() - state->normal_geometry.x()) <= 2 &&
+                    std::abs(now.y() - state->normal_geometry.y()) <= 2);
+          const QSize gfx = window.GfxWidgetSizeForTest();
+          check("gfx-restored",
+                std::abs(gfx.width() - state->normal_gfx.width()) <= 1 &&
+                    std::abs(gfx.height() - state->normal_gfx.height()) <= 1);
+          check_swap("swap-normal");
+          check("focus-kept", window.FocusWidgetNameForTest() == state->focus_before_exit);
+          check("timeline-visible-after", window.TimelineVisibleForTest());
+          check("info-visible-after", window.InfoBarVisibleForTest());
+          check("frame-kept", window.CurrentFrameForTest() == 100);
+          std::fprintf(stderr, "T6.1 fullscreen_focus before=%s after=%s\n",
+                       state->focus_before_exit.toUtf8().constData(),
+                       window.FocusWidgetNameForTest().toUtf8().constData());
+          std::fflush(stderr);
+        });
+
+        schedule(3350, [&window]() { window.PressFullScreenKeyForTest(); });
+        schedule(3600, [&window, check]() {
+          check("f-reenters", window.IsFullScreenForTest());
+          window.PressFullScreenKeyForTest();
+        });
+        schedule(3850, [&window, check]() {
+          check("f-toggles-exit", !window.IsFullScreenForTest());
+        });
+
+        schedule(4050, [&window]() { window.DoubleClickVideoForTest(); });
+        schedule(4300, [&window, check]() {
+          check("dblclick-enters", window.IsFullScreenForTest());
+          window.DoubleClickVideoForTest();
+        });
+        schedule(4550, [&window, check]() {
+          check("dblclick-exits", !window.IsFullScreenForTest());
+        });
+
+        schedule(4750, [&window]() {
+          window.GoToInputForTest(QStringLiteral("20"));
+          window.PressSpaceKeyForTest();
+        });
+        schedule(5000, [&window, check, log_state]() {
+          log_state("space-playing");
+          check("space-plays-after-exit", window.IsPlayingForTest());
+          window.PressSpaceKeyForTest();
+        });
+        schedule(5250, [&window, check, log_state]() {
+          log_state("space-paused");
+          check("space-pauses-after-exit", !window.IsPlayingForTest());
+        });
+
+        if (!fs_video_b.isEmpty()) {
+          schedule(5450, [&window]() {
+            window.PressFullScreenKeyForTest();  // 全屏中切 4K
+          });
+          schedule(5700, [&window, fs_video_b, log_state]() {
+            window.OpenFile(fs_video_b);
+            window.GoToInputForTest(QStringLiteral("60"));
+            window.PressSnapshotKeyForTest();
+            log_state("4k-pressed");
+          });
+          schedule(6250, [&window, check, check_png, check_swap, log_state]() {
+            window.DrainSnapshotsForTest();
+            log_state("4k-saved");
+            check("4k-fullscreen-kept", window.IsFullScreenForTest());
+            check("4k-display",
+                  window.SnapshotDisplaySizeForTest() == QSize(3840, 2160));
+            check("4k-frame", window.SnapshotLastSavedFrameForTest() == 60);
+            check("4k-no-error", window.SnapshotLastErrorForTest().isEmpty());
+            check_png(window.SnapshotLastPathForTest(), QSize(3840, 2160),
+                      "4k-fullscreen");
+            check_swap("swap-4k");
+            check("4k-info-frame",
+                  window.InfoFrameTextForTest().contains(QStringLiteral("60")));
+            window.PressEscapeKeyForTest();
+          });
+          schedule(6500, [&window, check, log_state]() {
+            log_state("4k-exited");
+            check("4k-esc-exits", !window.IsFullScreenForTest());
+            check("4k-timeline-visible", window.TimelineVisibleForTest());
+          });
+        }
+
+        const int final_ms = fs_video_b.isEmpty() ? 6100 : 7400;
+        schedule(final_ms - 500, [&window]() { window.showMaximized(); });
+        schedule(final_ms - 300, [&window, check]() {
+          // 最大化状态下进入/退出全屏：退出后应回到最大化，而不是普通窗口。
+          window.PressFullScreenKeyForTest();
+          check("maximized-f-enters", window.IsFullScreenForTest());
+          window.PressEscapeKeyForTest();
+        });
+        schedule(final_ms, [&window, failures, check, log_state]() {
+          window.DrainSnapshotsForTest();
+          log_state("maximized-exited");
+          check("maximized-restored", window.IsMaximizedForTest());
+          std::fprintf(stderr, "T6.1 fullscreen_toggle_ms=%lld\n",
+                       static_cast<long long>(window.LastFullScreenToggleMsForTest()));
+          std::fflush(stderr);
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });
       }

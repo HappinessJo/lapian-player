@@ -20,6 +20,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -250,6 +251,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(snapshot_action_, &QAction::triggered, this, &MainWindow::CaptureSnapshot);
   addAction(snapshot_action_);
 
+  // T6.1 全屏：F 切换；Esc 只在全屏时启用，且文本输入聚焦时会让位。
+  fullscreen_action_ = new QAction(QStringLiteral("全屏"), this);
+  fullscreen_action_->setShortcut(Qt::Key_F);
+  fullscreen_action_->setShortcutContext(Qt::WindowShortcut);
+  connect(fullscreen_action_, &QAction::triggered, this, &MainWindow::ToggleFullScreen);
+  addAction(fullscreen_action_);
+
+  exit_fullscreen_action_ = new QAction(QStringLiteral("退出全屏"), this);
+  exit_fullscreen_action_->setShortcut(Qt::Key_Escape);
+  exit_fullscreen_action_->setShortcutContext(Qt::WindowShortcut);
+  exit_fullscreen_action_->setEnabled(false);
+  connect(exit_fullscreen_action_, &QAction::triggered, this, &MainWindow::ExitFullScreen);
+  addAction(exit_fullscreen_action_);
+
   connect(mark_panel_, &MarkPanel::markActivated, this,
           [this](const QString& id, qint64 frame) {
             ActivateMark(id, static_cast<std::int64_t>(frame));
@@ -375,6 +390,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     GoToFrame(current_frame_ + delta);
   });
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
+  connect(gfx_, &GfxWidget::fullScreenToggleRequested, this, &MainWindow::ToggleFullScreen);
+  // Esc 的可用性跟随“全屏 + 是否在文本框内”：编辑备注时 Esc 仍交给文本框，
+  // 不在备注框里退出全屏（T5.3 的焦点让位语义）。
+  connect(qApp, &QApplication::focusChanged, this,
+          [this](QWidget*, QWidget*) { UpdateFullScreenActionState(); });
   connect(timeline_, &TimelineWidget::scrubStarted, this, &MainWindow::OnScrubStarted);
   connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
           &MainWindow::OnScrubTargetChanged);
@@ -1315,6 +1335,241 @@ void MainWindow::CaptureSnapshot() {
       QStringLiteral("正在保存截图（帧 %1）…")
           .arg(static_cast<qlonglong>(displayed_frame_index_)),
       3000);
+}
+
+void MainWindow::ToggleFullScreen() {
+  // spec §3.7：文本框聚焦时除 Esc/Enter 外不触发全局快捷键。F 与双击画面
+  // 都不该在备注/帧号输入中间抢焦点（MarkPanel 的 ShortcutOverride 是第一层）。
+  if (IsTextInputFocused()) {
+    return;
+  }
+  if (isFullScreen()) {
+    ExitFullScreen();
+  } else {
+    EnterFullScreen();
+  }
+}
+
+void MainWindow::EnterFullScreen() {
+  if (isFullScreen()) {
+    return;
+  }
+  // 布局不改：时间轴/信息栏/侧栏/状态栏在全屏下仍可用（F1-A6 只要求
+  // 画面比例不变、时间轴与帧号仍可用）。
+  fullscreen_geometry_ = saveGeometry();
+  fullscreen_was_maximized_ = isMaximized();
+  fullscreen_focus_widget_ = QApplication::focusWidget();
+
+  QElapsedTimer timer;
+  timer.start();
+  showFullScreen();
+  fullscreen_last_toggle_ms_ = timer.elapsed();
+  UpdateFullScreenActionState();
+  RestoreFocusIfNeeded(fullscreen_focus_widget_);
+  if (gfx_ != nullptr) {
+    gfx_->update();
+  }
+  statusBar()->showMessage(QStringLiteral("已进入全屏：F / Esc 退出"), 2500);
+  qInfo() << "进入全屏:" << width() << "x" << height()
+          << "耗时" << fullscreen_last_toggle_ms_ << "ms";
+}
+
+void MainWindow::ExitFullScreen() {
+  if (!isFullScreen()) {
+    return;
+  }
+  QPointer<QWidget> focus_before = QApplication::focusWidget();
+  const bool was_maximized = fullscreen_was_maximized_;
+  const QByteArray geometry = fullscreen_geometry_;
+
+  QElapsedTimer timer;
+  timer.start();
+  if (was_maximized) {
+    showMaximized();
+  } else {
+    showNormal();
+    restoreGeometry(geometry);
+  }
+  fullscreen_last_toggle_ms_ = timer.elapsed();
+  fullscreen_was_maximized_ = false;
+  UpdateFullScreenActionState();
+  // 全屏切换不应让键盘焦点消失：优先恢复到退出前的控件，其次退回进入前的。
+  RestoreFocusIfNeeded(focus_before);
+  if (QApplication::focusWidget() == nullptr) {
+    RestoreFocusIfNeeded(fullscreen_focus_widget_);
+  }
+  fullscreen_focus_widget_.clear();
+  if (gfx_ != nullptr) {
+    gfx_->update();
+  }
+  statusBar()->showMessage(QStringLiteral("已退出全屏"), 1500);
+  qInfo() << "退出全屏:" << width() << "x" << height()
+          << "耗时" << fullscreen_last_toggle_ms_ << "ms";
+}
+
+void MainWindow::UpdateFullScreenActionState() {
+  if (exit_fullscreen_action_ == nullptr) {
+    return;
+  }
+  // 文本框聚焦时把 Esc 留给文本框（T5.3），同时 handler 里还会再检查一次。
+  exit_fullscreen_action_->setEnabled(isFullScreen() && !IsTextInputFocused());
+}
+
+void MainWindow::RestoreFocusIfNeeded(QWidget* expected) {
+  if (expected == nullptr || !expected->isVisible() ||
+      expected->focusPolicy() == Qt::NoFocus) {
+    return;
+  }
+  if (QApplication::focusWidget() == expected) {
+    return;
+  }
+  expected->setFocus(Qt::OtherFocusReason);
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* event) {
+  // QAction 的 Esc 快捷键被禁用（例如文本框聚焦）时，按键会沿父链传到这里；
+  // 这里再做一次“编辑框内不退全屏”的兜底。
+  if (event != nullptr && event->key() == Qt::Key_Escape && isFullScreen() &&
+      !IsTextInputFocused()) {
+    ExitFullScreen();
+    event->accept();
+    return;
+  }
+  QMainWindow::keyPressEvent(event);
+}
+
+void MainWindow::SendKeyForTest(int key) {
+  QWidget* target = QApplication::focusWidget();
+  if (target == nullptr) {
+    target = this;
+  }
+  QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+  QApplication::sendEvent(target, &press);
+  QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier);
+  QApplication::sendEvent(target, &release);
+}
+
+void MainWindow::ToggleFullScreenForTest() { ToggleFullScreen(); }
+
+void MainWindow::PressFullScreenKeyForTest() { SendKeyForTest(Qt::Key_F); }
+
+void MainWindow::PressEscapeKeyForTest() { SendKeyForTest(Qt::Key_Escape); }
+
+void MainWindow::PressSpaceKeyForTest() { SendKeyForTest(Qt::Key_Space); }
+
+void MainWindow::FocusVideoForTest() {
+  if (gfx_ != nullptr) {
+    gfx_->setFocus(Qt::OtherFocusReason);
+  }
+}
+
+void MainWindow::DoubleClickVideoForTest() {
+  if (gfx_ == nullptr) {
+    return;
+  }
+  const QPointF local(gfx_->width() / 2.0, gfx_->height() / 2.0);
+  const QPointF global = gfx_->mapToGlobal(local.toPoint());
+  QMouseEvent event(QEvent::MouseButtonDblClick, local, global, Qt::LeftButton,
+                    Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(gfx_, &event);
+}
+
+bool MainWindow::IsFullScreenForTest() const { return isFullScreen(); }
+
+bool MainWindow::IsMaximizedForTest() const { return isMaximized(); }
+
+bool MainWindow::IsPlayingForTest() const {
+  return playback_ != nullptr && playback_->IsPlaying();
+}
+
+QString MainWindow::FullScreenStateForTest() const {
+  const QSize gfx_size = GfxWidgetSizeForTest();
+  const QSize swap_size = SwapChainSizeForTest();
+  const QSize display = SnapshotDisplaySizeForTest();
+  QString info_frame = InfoFrameTextForTest();
+  info_frame.replace(QLatin1Char(' '), QLatin1Char('_'));
+  const double dpr = gfx_ == nullptr ? 0.0 : gfx_->devicePixelRatioF();
+  QStringList parts;
+  parts << QStringLiteral("fullscreen=%1").arg(isFullScreen() ? 1 : 0);
+  parts << QStringLiteral("frame=%1").arg(static_cast<qlonglong>(current_frame_));
+  parts << QStringLiteral("playing=%1").arg(IsPlayingForTest() ? 1 : 0);
+  parts << QStringLiteral("gfx=%1x%2").arg(gfx_size.width()).arg(gfx_size.height());
+  parts << QStringLiteral("swap=%1x%2").arg(swap_size.width()).arg(swap_size.height());
+  parts << QStringLiteral("dpr=%1").arg(dpr, 0, 'f', 2);
+  parts << QStringLiteral("timeline=%1").arg(TimelineVisibleForTest() ? 1 : 0);
+  parts << QStringLiteral("info=%1").arg(InfoBarVisibleForTest() ? 1 : 0);
+  parts << QStringLiteral("info_frame=%1").arg(info_frame);
+  parts << QStringLiteral("display=%1x%2").arg(display.width()).arg(display.height());
+  parts << QStringLiteral("focus=%1").arg(FocusWidgetNameForTest());
+  parts << QStringLiteral("toggle_ms=%1").arg(fullscreen_last_toggle_ms_);
+  return parts.join(QLatin1Char(' '));
+}
+
+QSize MainWindow::GfxWidgetSizeForTest() const {
+  return gfx_ == nullptr ? QSize() : gfx_->size();
+}
+
+QSize MainWindow::SwapChainSizeForTest() const {
+  return gfx_ == nullptr ? QSize() : gfx_->swapChainSize();
+}
+
+QSize MainWindow::TimelineSizeForTest() const {
+  return timeline_ == nullptr ? QSize() : timeline_->size();
+}
+
+qint64 MainWindow::TimelineFrameAtForTest(int x, int y) const {
+  if (timeline_ == nullptr) {
+    return -1;
+  }
+  return static_cast<qint64>(timeline_->FrameAtPosition(QPointF(x, y)));
+}
+
+void MainWindow::ClickTimelineForTest(int x, int y) {
+  if (timeline_ == nullptr) {
+    return;
+  }
+  const QPointF local(x, y);
+  const QPointF global = timeline_->mapToGlobal(QPoint(x, y));
+  QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton,
+                    Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(timeline_, &press);
+  QMouseEvent release(QEvent::MouseButtonRelease, local, global, Qt::LeftButton,
+                      Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(timeline_, &release);
+}
+
+QString MainWindow::InfoFrameTextForTest() const {
+  if (info_bar_ == nullptr) {
+    return {};
+  }
+  const QLabel* label = info_bar_->findChild<QLabel*>(QStringLiteral("infoFrame"));
+  return label == nullptr ? QString() : label->text();
+}
+
+QString MainWindow::FocusWidgetNameForTest() const {
+  QWidget* focus = QApplication::focusWidget();
+  if (focus == nullptr) {
+    return QStringLiteral("none");
+  }
+  return QString::fromLatin1(focus->metaObject()->className());
+}
+
+bool MainWindow::IsTextInputFocusedForTest() const { return IsTextInputFocused(); }
+
+bool MainWindow::TimelineVisibleForTest() const {
+  return timeline_ != nullptr && timeline_->isVisible();
+}
+
+bool MainWindow::InfoBarVisibleForTest() const {
+  return info_bar_ != nullptr && info_bar_->isVisible();
+}
+
+qint64 MainWindow::CurrentFrameForTest() const {
+  return static_cast<qint64>(current_frame_);
+}
+
+qint64 MainWindow::LastFullScreenToggleMsForTest() const {
+  return fullscreen_last_toggle_ms_;
 }
 
 void MainWindow::StepBackward() {
