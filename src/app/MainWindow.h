@@ -153,6 +153,7 @@ class MainWindow : public QMainWindow {
   void PressKeyDownForTest(int key, int modifiers = 0);
   void PressKeyUpForTest(int key, int modifiers = 0);
   void PressAutoRepeatKeyForTest(int key, int modifiers = 0);
+  void PressAutoRepeatReleaseForTest(int key, int modifiers = 0);
   bool FocusMarkTreeForTest();
   bool FocusVolumeSliderForTest();
   QString KeyStateForTest() const;
@@ -267,7 +268,7 @@ class MainWindow : public QMainWindow {
   void StartStepRepeat(int delta);
   void StopStepRepeat();
   void SendKeyPressForTest(int key, int modifiers, bool auto_repeat);
-  void SendKeyReleaseForTest(int key, int modifiers);
+  void SendKeyReleaseForTest(int key, int modifiers, bool auto_repeat = false);
   // T6.3：加载/应用/保存设置。只在 UI 构造完成后、首次打开文件前应用；
   // 读取失败静默回退默认，保存失败不阻塞关窗。
   void LoadSettingsIntoUi();

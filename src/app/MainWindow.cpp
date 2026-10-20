@@ -430,6 +430,13 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
     }
     const std::int64_t before = current_frame_;
     GoToFrame(before + step_direction_);
+    if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+      std::fprintf(stderr, "T6.2 step_timer before=%lld after=%lld dir=%d active=%d\n",
+                   static_cast<long long>(before),
+                   static_cast<long long>(current_frame_), step_direction_,
+                   step_repeat_timer_->isActive() ? 1 : 0);
+      std::fflush(stderr);
+    }
     if (current_frame_ == before) {
       StopStepRepeat();  // 到边界：不再重复 seek 同一帧
     }
@@ -1823,6 +1830,15 @@ bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
   }
   const int key = event->key();
   const Qt::KeyboardModifiers key_modifiers = event->modifiers();
+  if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG") &&
+      (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)) {
+    std::fprintf(stderr,
+                 "T6.2 key_event type=%d key=%d auto=%d dir=%d frame=%lld\n",
+                 static_cast<int>(event->type()), key,
+                 event->isAutoRepeat() ? 1 : 0, step_direction_,
+                 static_cast<long long>(current_frame_));
+    std::fflush(stderr);
+  }
   const bool is_step = key == Qt::Key_PageUp || key == Qt::Key_PageDown ||
                        key == Qt::Key_Left || key == Qt::Key_Right;
   const bool is_nav = key == Qt::Key_Home || key == Qt::Key_End;
@@ -1838,6 +1854,12 @@ bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
   if (event->type() == QEvent::KeyRelease) {
     // 只吞掉“正在连发”的松开；文本框里的松开仍交给文本框。
     if (is_step && step_direction_ != 0) {
+      // Qt 在物理长按时会为 OS 自动重复插入 KeyRelease（见 Qt FAQ“长按收到
+      // 多个 keyReleaseEvents”）。这种 release 不是松开，不能停连发；真正松开
+      // 的 KeyRelease 才是 isAutoRepeat()==false。
+      if (event->isAutoRepeat()) {
+        return true;
+      }
       StopStepRepeat();
       return true;
     }
@@ -1946,12 +1968,13 @@ void MainWindow::SendKeyPressForTest(int key, int modifiers, bool auto_repeat) {
   QApplication::sendEvent(target, &press);
 }
 
-void MainWindow::SendKeyReleaseForTest(int key, int modifiers) {
+void MainWindow::SendKeyReleaseForTest(int key, int modifiers, bool auto_repeat) {
   QWidget* target = QApplication::focusWidget();
   if (target == nullptr) {
     target = this;
   }
-  QKeyEvent release(QEvent::KeyRelease, key, Qt::KeyboardModifiers(modifiers));
+  QKeyEvent release(QEvent::KeyRelease, key, Qt::KeyboardModifiers(modifiers),
+                    QString(), auto_repeat);
   QApplication::sendEvent(target, &release);
 }
 
@@ -1976,6 +1999,10 @@ void MainWindow::PressKeyUpForTest(int key, int modifiers) {
 
 void MainWindow::PressAutoRepeatKeyForTest(int key, int modifiers) {
   SendKeyPressForTest(key, modifiers, true);
+}
+
+void MainWindow::PressAutoRepeatReleaseForTest(int key, int modifiers) {
+  SendKeyReleaseForTest(key, modifiers, true);
 }
 
 void MainWindow::ToggleFullScreenForTest() { ToggleFullScreen(); }

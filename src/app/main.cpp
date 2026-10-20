@@ -1365,6 +1365,11 @@ int main(int argc, char* argv[]) {
                        static_cast<long long>(state->hold_auto_before));
           std::fflush(stderr);
         });
+        schedule(3500, [&window, check]() {
+          check("autorepeat-release-active", window.StepRepeatActiveForTest());
+          window.PressAutoRepeatReleaseForTest(Qt::Key_PageDown, 0);
+          check("autorepeat-release-ignored", window.StepRepeatActiveForTest());
+        });
         schedule(3550, [&window, state, check]() {
           window.PressKeyUpForTest(Qt::Key_PageDown, 0);
           state->hold_release_frame = window.CurrentFrameForTest();
