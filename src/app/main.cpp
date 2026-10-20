@@ -81,6 +81,7 @@ int main(int argc, char* argv[]) {
   int memory_seconds = 60;
   int memory_steps = 40;
   int memory_switch_cycles = 3;
+  int memory_interval = 30;
   QString settings_path_arg;
   QString dpi_tag;
   QString banner_tag;
@@ -156,6 +157,9 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--memory-switch-cycles") &&
                i + 1 < arguments.size()) {
       memory_switch_cycles = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--memory-interval") &&
+               i + 1 < arguments.size()) {
+      memory_interval = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--memory-tag") &&
                i + 1 < arguments.size()) {
       memory_tag = arguments[++i];
@@ -323,7 +327,7 @@ int main(int argc, char* argv[]) {
     }
     memory_runner = std::make_unique<lapian::app::MemoryTestRunner>(
         &window, memory_mode, memory_tag, memory_seconds, memory_steps,
-        memory_switch_cycles, file_path, file_b);
+        memory_switch_cycles, memory_interval, file_path, file_b);
     memory_runner->Start();
   }
 

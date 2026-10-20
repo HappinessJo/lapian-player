@@ -1545,6 +1545,67 @@ QString MainWindow::FrameCacheStateForTest() const {
       .arg(stats.evictions);
 }
 
+int MainWindow::FrameCacheEntryCountForTest() const {
+  return session_ == nullptr ? 0
+                             : session_->frame_cache().stats().entries;
+}
+
+qint64 MainWindow::FrameCacheByteCountForTest() const {
+  return session_ == nullptr
+             ? 0
+             : static_cast<qint64>(session_->frame_cache().stats().bytes);
+}
+
+QString MainWindow::AudioStateForTest() const {
+  if (!audio_) {
+    return QStringLiteral("none");
+  }
+  using lapian::audio::AudioState;
+  switch (audio_->status().state) {
+    case AudioState::kClosed:
+      return QStringLiteral("closed");
+    case AudioState::kOpening:
+      return QStringLiteral("opening");
+    case AudioState::kPlaying:
+      return QStringLiteral("playing");
+    case AudioState::kPaused:
+      return QStringLiteral("paused");
+    case AudioState::kSilent:
+      return QStringLiteral("silent");
+    case AudioState::kError:
+      return QStringLiteral("error");
+  }
+  return QStringLiteral("unknown");
+}
+
+qulonglong MainWindow::AudioUnderrunCountForTest() const {
+  return audio_ ? static_cast<qulonglong>(audio_->status().underruns) : 0;
+}
+
+QString MainWindow::WaveformStateForTest() const {
+  if (!waveform_) {
+    return QStringLiteral("none");
+  }
+  using lapian::audio::WaveformState;
+  const lapian::audio::WaveformStatus status = waveform_->status();
+  switch (status.state) {
+    case WaveformState::kIdle:
+      return QStringLiteral("idle");
+    case WaveformState::kRunning:
+      return QStringLiteral("running:%1%")
+          .arg(QString::number(status.progress * 100.0, 'f', 0));
+    case WaveformState::kReady:
+      return QStringLiteral("ready");
+    case WaveformState::kFailed:
+      return QStringLiteral("failed");
+    case WaveformState::kNoAudio:
+      return QStringLiteral("noaudio");
+    case WaveformState::kCancelled:
+      return QStringLiteral("cancelled");
+  }
+  return QStringLiteral("unknown");
+}
+
 void MainWindow::ShowGotoDialog() {
   if (IsTextInputFocused()) {
     return;

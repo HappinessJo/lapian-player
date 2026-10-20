@@ -52,6 +52,12 @@ add_test(NAME lapian_status_notice_test COMMAND lapian_status_notice_test)
 set_tests_properties(lapian_status_notice_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T7.3 浸泡分析：稳态窗口斜率/增长率/句柄/线程/帧停顿/缓存/UI 心跳判定。纯 C++。
+add_executable(lapian_soak_test soak_stats_test.cpp)
+lapian_apply_common_options(lapian_soak_test)
+target_link_libraries(lapian_soak_test PRIVATE lapian_soak)
+add_test(NAME lapian_soak_test COMMAND lapian_soak_test)
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

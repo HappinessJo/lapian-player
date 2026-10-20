@@ -60,6 +60,13 @@ lapian_apply_common_options(lapian_settings)
 target_include_directories(lapian_settings PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 
+# T7.3 长时浸泡：采样趋势/阈值判定，纯 C++，产品与单测共用。
+add_library(lapian_soak STATIC
+  app/SoakStats.cpp
+  app/SoakStats.h)
+lapian_apply_common_options(lapian_soak)
+target_include_directories(lapian_soak PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # T5.2 标记侧栏：列表/存储位置/警告；产品与离屏测试共用。
 add_library(lapian_mark_ui STATIC
   app/MarkPanel.cpp
@@ -152,6 +159,7 @@ target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
                                      lapian_timeline lapian_audio lapian_marks
                                      lapian_mark_ui lapian_snapshot lapian_settings
+                                     lapian_soak
                                      lapian::ffmpeg
                                      Qt6::Widgets windowscodecs ole32 psapi)
 lapian_copy_ffmpeg_dlls(lapian)

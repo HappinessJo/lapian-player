@@ -206,6 +206,12 @@ class MainWindow : public QMainWindow {
   QString IndexStateForTest() const;
   // T7.2：帧缓存上限/占用/命中统计（用于 --memory-test 与日志）。
   QString FrameCacheStateForTest() const;
+  // T7.3：长时浸泡采样用的轻量读数（缓存条目、音频/波形状态与 underrun）。
+  int FrameCacheEntryCountForTest() const;
+  qint64 FrameCacheByteCountForTest() const;
+  QString AudioStateForTest() const;
+  qulonglong AudioUnderrunCountForTest() const;
+  QString WaveformStateForTest() const;
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
