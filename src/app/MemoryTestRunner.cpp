@@ -369,7 +369,8 @@ void MemoryTestRunner::FinishSoak() {
       "T7.3 soak_summary mode=soak tag=%s display=%dx%d duration_s=%.1f "
       "samples=%zu steady=%zu warmup_s=%.0f limit_mb=%.0f pass=%d "
       "ws_start_mb=%.1f ws_final_mb=%.1f ws_max_mb=%.1f growth_mb=%.1f "
-      "slope_mb_per_h=%.2f private_max_mb=%.1f "
+      "slope_mb_per_h=%.2f baseline_blocks=%zu baseline_growth_mb=%.1f "
+      "baseline_slope_mb_per_h=%.2f private_max_mb=%.1f "
       "handles=%u/%u/%u threads=%u/%u/%u audio_underruns=%llu "
       "loop_jumps=%d cache_max=%d frame_stall_events=%zu "
       "playback_stopped_events=%zu ui_gap_max_ms=%.0f flags=%s\n",
@@ -377,6 +378,7 @@ void MemoryTestRunner::FinishSoak() {
       a.duration_s, a.total_samples, a.steady_samples, warmup_s,
       thresholds.memory_limit_mb, a.passed ? 1 : 0, a.ws_start_mb,
       a.ws_final_mb, a.ws_max_mb, a.ws_growth_mb, a.ws_slope_mb_per_hour,
+      a.baseline_blocks, a.baseline_growth_mb, a.baseline_slope_mb_per_hour,
       a.private_max_mb, a.handles_start, a.handles_end, a.handles_max,
       a.threads_start, a.threads_end, a.threads_max,
       static_cast<unsigned long long>(a.audio_underruns_end), a.loop_jumps_end,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace lapian::app {
 namespace {
@@ -94,6 +95,62 @@ bool AnalyzeSoak(const std::vector<SoakSample>& samples, double warmup_s,
     }
   }
 
+  // 5 分钟分块下包络：取每块最小 WS，避免循环边界的瞬时分配尖峰/末端高点
+  // 主导斜率。持续增长应表现为“每块最低水位”整体抬升。
+  if (steady.size() >= 2 && thresholds.baseline_block_s > 0.0) {
+    const double block_s = thresholds.baseline_block_s;
+    const double origin = steady.front()->t_s;
+    std::vector<double> block_min;
+    std::vector<double> block_time;
+    for (const SoakSample* sample : steady) {
+      const double offset = sample->t_s - origin;
+      const std::size_t index =
+          static_cast<std::size_t>(offset / block_s);
+      if (index >= block_min.size()) {
+        block_min.resize(index + 1,
+                         std::numeric_limits<double>::infinity());
+        block_time.resize(
+            index + 1,
+            origin + static_cast<double>(index) * block_s);
+      }
+      block_min[index] = std::min(block_min[index], sample->ws_mb);
+    }
+    std::vector<double> envelope_time;
+    std::vector<double> envelope_ws;
+    envelope_time.reserve(block_min.size());
+    envelope_ws.reserve(block_min.size());
+    for (std::size_t i = 0; i < block_min.size(); ++i) {
+      if (std::isfinite(block_min[i])) {
+        envelope_time.push_back(block_time[i]);
+        envelope_ws.push_back(block_min[i]);
+      }
+    }
+    out->baseline_blocks = envelope_ws.size();
+    if (envelope_ws.size() >= 2) {
+      out->baseline_growth_mb = envelope_ws.back() - envelope_ws.front();
+      double x_mean = 0.0;
+      double y_mean = 0.0;
+      for (std::size_t i = 0; i < envelope_ws.size(); ++i) {
+        x_mean += (envelope_time[i] - envelope_time.front()) / 3600.0;
+        y_mean += envelope_ws[i];
+      }
+      x_mean /= static_cast<double>(envelope_ws.size());
+      y_mean /= static_cast<double>(envelope_ws.size());
+      double numerator = 0.0;
+      double denominator = 0.0;
+      for (std::size_t i = 0; i < envelope_ws.size(); ++i) {
+        const double x =
+            (envelope_time[i] - envelope_time.front()) / 3600.0 - x_mean;
+        const double y = envelope_ws[i] - y_mean;
+        numerator += x * y;
+        denominator += x * x;
+      }
+      if (denominator > 0.0) {
+        out->baseline_slope_mb_per_hour = numerator / denominator;
+      }
+    }
+  }
+
   for (const SoakSample* sample : steady) {
     if (!sample->playing) {
       ++out->playback_stopped_events;
@@ -124,9 +181,10 @@ bool AnalyzeSoak(const std::vector<SoakSample>& samples, double warmup_s,
 
   out->memory_over_limit = out->ws_max_mb > thresholds.memory_limit_mb;
   out->memory_growth =
-      steady.size() >= 3 &&
-      out->ws_growth_mb >= thresholds.growth_min_delta_mb &&
-      out->ws_slope_mb_per_hour > thresholds.growth_limit_mb_per_hour;
+      out->baseline_blocks >= 3 &&
+      out->baseline_growth_mb >= thresholds.baseline_growth_min_mb &&
+      out->baseline_slope_mb_per_hour >
+          thresholds.growth_limit_mb_per_hour;
   out->handle_growth =
       steady.size() >= 2 &&
       out->handles_end > out->handles_start + thresholds.handle_growth_limit;

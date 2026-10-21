@@ -26,10 +26,13 @@ struct SoakSample {
 struct SoakThresholds {
   // P14：2h 1080p 连续播放 working set ≤1.2GB。
   double memory_limit_mb = 1200.0;
-  // “无持续增长”的自动化口径：稳态窗口线性斜率与绝对增量同时超限才判失败，
-  // 避免启动后一次性的堆/解码器高水位被误判为泄漏。
+  // “无持续增长”的自动化口径：先用 5 分钟分块取 WS 最小值（下包络），
+  // 再对包络做线性拟合。这样循环边界的瞬时分配尖峰不会把斜率抬高；
+  // 原始斜率/首末增量仍保留在报告里，便于对照。
   double growth_limit_mb_per_hour = 16.0;
   double growth_min_delta_mb = 16.0;
+  double baseline_block_s = 300.0;
+  double baseline_growth_min_mb = 12.0;
   std::uint32_t handle_growth_limit = 64;
   std::uint32_t thread_growth_limit = 2;
   // P5 的“卡顿”口径是 >200ms；浸泡只看是否出现秒级 UI 冻结。
@@ -46,6 +49,9 @@ struct SoakAnalysis {
   double ws_max_mb = 0.0;
   double ws_growth_mb = 0.0;
   double ws_slope_mb_per_hour = 0.0;
+  std::size_t baseline_blocks = 0;
+  double baseline_growth_mb = 0.0;
+  double baseline_slope_mb_per_hour = 0.0;
   double private_max_mb = 0.0;
   std::uint32_t handles_start = 0;
   std::uint32_t handles_end = 0;

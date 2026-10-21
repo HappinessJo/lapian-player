@@ -222,6 +222,40 @@ int main() {
     Check(analysis.passed, "乱序稳态样本仍通过");
   }
 
+  // 13. 循环边界周期性 +20MB 尖峰、基线下包络平稳：不判持续增长。
+  {
+    auto samples = MakeSamples(121);
+    SetPlaybackFrames(&samples);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+      samples[i].ws_mb = 100.0 + 5.0 * (samples[i].t_s / 3600.0);
+      if (i % 10 == 0) {
+        samples[i].ws_mb += 20.0;
+      }
+    }
+    const SoakAnalysis analysis = Analyze(samples);
+    Check(analysis.ws_growth_mb > 12.0, "尖峰使原始首末增量变大");
+    Check(analysis.baseline_blocks >= 10, "下包络分块 >=10");
+    Check(analysis.baseline_growth_mb < 12.0, "下包络增长低于门槛");
+    Check(!analysis.memory_growth, "周期性尖峰不判持续增长");
+    Check(analysis.passed, "有界锯齿判定通过");
+  }
+
+  // 14. 20MB/h 慢泄漏：下包络也持续抬升。
+  {
+    auto samples = MakeSamples(121);
+    SetPlaybackFrames(&samples);
+    for (SoakSample& sample : samples) {
+      sample.ws_mb = 100.0 + 20.0 * (sample.t_s / 3600.0);
+    }
+    const SoakAnalysis analysis = Analyze(samples);
+    Check(analysis.baseline_slope_mb_per_hour > 16.0,
+          "慢泄漏下包络斜率超限");
+    Check(analysis.baseline_growth_mb >= 12.0,
+          "慢泄漏下包络增量超限");
+    Check(analysis.memory_growth, "20MB/h 慢泄漏被识别");
+    Check(!analysis.passed, "慢泄漏判定失败");
+  }
+
   if (g_failures == 0) {
     std::printf("[ OK ] T7.3 soak_stats 全部通过\n");
     return 0;
