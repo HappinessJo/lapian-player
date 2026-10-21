@@ -436,6 +436,7 @@ void MemoryTestRunner::Sample(const QString& phase) {
   soak.playing = window_->IsPlayingForTest();
   soak.loop_jumps = window_->LoopJumpCountForTest();
   soak.audio_underruns = window_->AudioUnderrunCountForTest();
+  soak.audio_state = Utf8(window_->AudioStateForTest());
   soak.cache_entries = window_->FrameCacheEntryCountForTest();
   soak.ui_gap_max_ms = max_ui_gap_ms_;
   max_ui_gap_ms_ = 0.0;
@@ -444,13 +445,14 @@ void MemoryTestRunner::Sample(const QString& phase) {
   std::fprintf(stderr,
                "T7.3 soak_sample tag=%s phase=%s t_s=%.1f ws_mb=%.1f "
                "private_mb=%.1f handles=%u threads=%u frame=%lld playing=%d "
-               "loop_jumps=%d audio_underruns=%llu waveform=%s cache_entries=%d "
-               "ui_gap_ms=%.0f\n",
+               "loop_jumps=%d audio_underruns=%llu audio_state=%s waveform=%s "
+               "cache_entries=%d ui_gap_ms=%.0f\n",
                tag_.toUtf8().constData(), phase.toUtf8().constData(), soak.t_s,
                soak.ws_mb, soak.private_mb, soak.handles, soak.threads,
                static_cast<long long>(soak.frame), soak.playing ? 1 : 0,
                soak.loop_jumps,
                static_cast<unsigned long long>(soak.audio_underruns),
+               soak.audio_state.c_str(),
                Utf8(window_->WaveformStateForTest()).c_str(),
                soak.cache_entries, soak.ui_gap_max_ms);
   std::fflush(stderr);

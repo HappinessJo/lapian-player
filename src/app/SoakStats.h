@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace lapian::app {
@@ -19,6 +20,7 @@ struct SoakSample {
   bool playing = false;         // 采样瞬间是否在播放
   int loop_jumps = 0;           // 累计 B→A 跳转次数
   std::uint64_t audio_underruns = 0;
+  std::string audio_state;      // closed/opening/playing/paused/silent/error/none
   int cache_entries = 0;        // 纯播放路径应为 0
   double ui_gap_max_ms = 0.0;   // 距上一次 UI 心跳的最大间隔（本次采样窗口）
 };
