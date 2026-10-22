@@ -23,6 +23,7 @@
 | CMake | 3.31.6（便携） | BSD-3-Clause | 构建 |
 | aqtinstall | 3.3.0 | MIT | 构建期下载 Qt |
 | Python | 3.14.2 | PSF-2.0 | 构建脚本 |
+| Inno Setup | 6.7.3 | Inno Setup License | 编译 Windows 安装包（不随包分发；商业用户按其许可请求购买） |
 
 ## 系统组件（不随包分发）
 

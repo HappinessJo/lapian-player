@@ -2,6 +2,7 @@
 param(
   [switch]$Clean,
   [switch]$SkipTests,
+  [switch]$Package,
   [string]$BuildDir = '',
   [string]$DistDir = '',
   [string]$QtRoot = '',
@@ -111,3 +112,8 @@ Invoke-Tool -Exe (Join-Path $DistDir 'lapian_env_check.exe') -Arguments @() -Des
 $timer.Stop()
 Write-Host ("[OK] Release 构建与打包完成，用时 {0:N1}s" -f $timer.Elapsed.TotalSeconds)
 Write-Host "产物目录：$DistDir"
+
+if ($Package) {
+  Write-Host '=== 8/8 分发打包（安装包 + 便携 zip） ==='
+  & (Join-Path $PSScriptRoot 'package.ps1') -SkipBuild
+}
