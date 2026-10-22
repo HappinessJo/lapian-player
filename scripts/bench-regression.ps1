@@ -1,8 +1,10 @@
-﻿# T7.8 基准回归脚本（开发/验收用；不入分发）。
+﻿# T7.8/T7.9 基准回归脚本（开发/验收用；不入分发）。
 #
 # 把 T7.1/T7.2/T7.4/T7.5/T7.6 的测试探针固化成一条命令：
 #   冷启动 P1/P2 → 拖动 P4/P6/P7/P8/P9（1080p + 4K）→ 步进 P7（1080p + 4K）
 #   → 内存 P10/P11 → T7.5 鲁棒性（可选只读 ACL）→ P12 体积/哈希。
+# T7.9 起 drag 套件增加“精确 seek 后紧接 PgUp/PgDn”单样本；目标避开关键帧，
+# 目标距关键帧 <1 直接判失败（否则测到的是长 GOP 边界，不属于 80/150ms 口径）。
 #
 # 阈值全部来自 scripts\bench\thresholds.json（spec.md v0.3 §4.1/§4.5），
 # 同机复现基线来自 scripts\bench\baseline-dev.json（±10%，带噪声下限）。
@@ -537,7 +539,7 @@ function Invoke-DragSuite {
   $status = 'pass'
   $begin = Get-FirstLine $r.stderr 'T7\.4 drag_begin'
   $summary = Get-FirstLine $r.stderr 'T7\.4 drag_summary'
-  $details = [ordered]@{ begin = $begin; summary = $summary; distributions = @(); after_seek = $null }
+  $details = [ordered]@{ begin = $begin; summary = $summary; distributions = @(); after_seek = $null; after_seek_target = $null }
 
   if (-not $r.started) {
     Add-InfraError ("drag {0} 启动失败：{1}" -f $Label, $r.error)
@@ -578,13 +580,19 @@ function Invoke-DragSuite {
     $details.distributions += $dist[$name]
   }
 
-  $afterSeek = Get-FirstLine $r.stderr 'T7\.4 p7_after_seek'
+  $afterSeek = Get-FirstLine $r.stderr 'T7\.4 p7_after_seek spot'
+  $afterTarget = Get-FirstLine $r.stderr 'T7\.4 p7_after_seek_target'
   $afterUp = $null
   $afterDown = $null
+  $spotDistance = $null
   if ($afterSeek -match 'spot_updown_ms=([0-9.]+)/([0-9.]+)') {
     $afterUp = [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture)
     $afterDown = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
     $details.after_seek = $afterSeek
+  }
+  if ($afterTarget -match 'keyframe_distance=(-?[0-9]+)') {
+    $spotDistance = [int]$Matches[1]
+    $details.after_seek_target = $afterTarget
   }
 
   $p9P50 = $null
@@ -623,6 +631,12 @@ function Invoke-DragSuite {
   } else {
     Add-InfraError ("drag {0} 缺少 fps，无法校验 P9 的 2s 前提" -f $Label)
   }
+
+  # P7 spec：精确 seek 后紧接 PgUp/PgDn 各测一次。目标必须避开关键帧，
+  # 否则测到的是长 GOP 边界（proxy-V1 是 10s GOP），不属于 80/150ms 口径。
+  Add-Check $checks (New-Check "drag$Label.p7_after_seek_target_distance" $spotDistance '>=' 1 'P7 seek 后单步样本必须避开关键帧目标')
+  Add-Check $checks (New-Check "drag$Label.p7_after_seek_up_ms" $afterUp '<=' $cfg.p7_max_p95_ms 'P7 精确 seek 后紧接 PgUp（单样本）')
+  Add-Check $checks (New-Check "drag$Label.p7_after_seek_down_ms" $afterDown '<=' $cfg.p7_max_p95_ms 'P7 精确 seek 后紧接 PgDn（单样本）')
 
   # 独立复算与 runner 自报 pass 对比，避免阈值/汇总分叉。
   $calcP4 = ($null -ne $p4Fps -and $p4Fps -ge [double]$cfg.p4_min_fps)
@@ -665,6 +679,7 @@ function Invoke-DragSuite {
   Set-Metric "drag$Label.p9_prefix_max_frames" $p9Prefix
   Set-Metric "drag$Label.p7_after_seek_up_ms" $afterUp
   Set-Metric "drag$Label.p7_after_seek_down_ms" $afterDown
+  Set-Metric "drag$Label.p7_after_seek_keyframe_distance" $spotDistance
 
   return [ordered]@{
     name = "drag$Label"
@@ -678,6 +693,7 @@ function Invoke-DragSuite {
       p8_fps = $p8Fps; p8_frames = $p8Frames; p8_presents = $p8Presents
       p9_p50_ms = $p9P50; p9_p95_ms = $p9P95; p9_prefix_max_frames = $p9Prefix
       p7_after_seek_up_ms = $afterUp; p7_after_seek_down_ms = $afterDown
+      p7_after_seek_keyframe_distance = $spotDistance
       runner_flags = $runnerFlags
     }
     details = $details

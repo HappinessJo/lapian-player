@@ -220,7 +220,19 @@ void DragTestRunner::RunP4() {
 void DragTestRunner::RunP7() {
   window_->ClearFocusForTest();
   window_->FocusVideoForTest();
-  const qint64 mid = std::min<qint64>(last_frame_ - 40, 250);
+  const qint64 spot_ceiling = std::max<qint64>(0, last_frame_ - 40);
+  qint64 mid = std::min<qint64>(spot_ceiling, 250);
+  // 避开“目标正好是关键帧”的样本：那测到的是“从上一个 GOP 头部解到目标前一帧”，
+  // 不是 spec P7 的“精确 seek 解到目标后紧接 PgUp”。10s GOP 代理上约 400ms，
+  // 属长 GOP 可用档，80ms 不适用；这里选关键帧后 8 帧，覆盖正常 seek 解码路径。
+  if (window_->FrameDistanceFromKeyframeForTest(mid) == 0 && mid + 8 <= spot_ceiling) {
+    mid += 8;
+  }
+  const qint64 spot_distance = window_->FrameDistanceFromKeyframeForTest(mid);
+  std::fprintf(stderr,
+               "T7.4 p7_after_seek_target frame=%lld keyframe_distance=%lld\n",
+               static_cast<long long>(mid), static_cast<long long>(spot_distance));
+  std::fflush(stderr);
   // spec：精确 seek 后紧接 PgUp/PgDn 各测一次（单样本，单独报告）。
   {
     window_->GoToFrameForTest(mid);

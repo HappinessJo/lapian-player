@@ -9,15 +9,17 @@ struct AVFrame;
 
 namespace lapian::media {
 
-// T7.2：精确 seek 的帧缓存策略。
-// - kNone：不读也不写（普通跳转/前进步进/播放循环，避免改变解码器位置语义）；
+// T7.2/T7.9：精确 seek 的帧缓存策略。
+// - kNone：不读也不写（播放循环/前进步进，避免改变解码器位置语义）；
 // - kBackwardWindow：命中则直接返回；未命中时缓存解码到目标前的最后 N 帧
-//   （后退步进），后续连续后退可直接命中。
-// 普通跳转也写缓存（target-only）实测每次多一次 3MB 回拷、对连续后退无帮助，
-// 因此产品路径只在后退步进预热。
+//   （后退步进），后续连续后退可直接命中；
+// - kSeekHandoff：不读写 FrameCache；精确 seek 时只保留目标前一帧的 AVFrame
+//   引用（硬解帧保留 D3D11 纹理引用，不回拷），供紧接 PgUp 直接呈现。
+//   不读缓存是为了不改变 P9 冷随机跳转的语义；只保留一帧是为了不占解码表面池。
 enum class FrameCacheMode {
   kNone,
   kBackwardWindow,
+  kSeekHandoff,
 };
 
 struct FrameCacheLimits {

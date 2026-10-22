@@ -1,5 +1,6 @@
 // T1.4 会话切换测试：失败不破坏旧会话；成功替换路径/首帧。
 
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -88,6 +89,27 @@ int main() {
                               lapian::media::FrameCacheMode::kBackwardWindow),
           "后退到第 99 帧（命中缓存）");
     Check(info.pts_us == session.index().PtsOfFrame(99), "缓存命中帧精确");
+
+    // T7.9：精确 seek 只保留目标前一帧的 AVFrame 引用（不写 FrameCache）；
+    // 紧接 PgUp 走 handoff，不应从关键帧重解或触发缓存 miss。
+    const std::uint64_t hits_before =
+        session.frame_cache().stats().hits;
+    const std::uint64_t misses_before =
+        session.frame_cache().stats().misses;
+    Check(session.SeekToFrame(200, &info, &seek_error,
+                              lapian::media::FrameCacheMode::kSeekHandoff),
+          "精确 seek 到第 200 帧（保留前帧引用）");
+    Check(info.pts_us == session.index().PtsOfFrame(200), "seek handoff 目标帧精确");
+    Check(!session.frame_cache().Contains(199), "seek handoff 不写 FrameCache");
+    Check(!session.frame_cache().Contains(200), "seek handoff 不缓存目标帧");
+    Check(session.SeekToFrame(199, &info, &seek_error,
+                              lapian::media::FrameCacheMode::kBackwardWindow),
+          "seek 后紧接 PgUp 走 handoff");
+    Check(info.pts_us == session.index().PtsOfFrame(199), "seek 后 PgUp 帧精确");
+    Check(session.frame_cache().stats().hits == hits_before,
+          "seek 后 PgUp 未走 FrameCache 命中");
+    Check(session.frame_cache().stats().misses == misses_before,
+          "seek 后 PgUp 未走 FrameCache 未命中");
   }
 
   session.Close();

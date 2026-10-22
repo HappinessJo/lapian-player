@@ -41,6 +41,10 @@ int BitDepthOfFormat(int format) {
   }
 }
 
+// T7.9：精确 seek 后紧接 PgUp 的一帧 handoff 只保留目标前一帧的 AVFrame 引用；
+// 硬解帧不回拷，避免 av_hwframe_transfer_data 等 GPU 队列（实测 70–80ms），
+// 否则会把 P6/P9 的余量吃掉。引用在下一次 seek/Close 时释放。
+
 }  // namespace
 
 MediaSession::MediaSession() = default;
@@ -49,6 +53,15 @@ MediaSession::~MediaSession() {
   if (last_hit_frame_ != nullptr) {
     av_frame_free(&last_hit_frame_);
   }
+  ClearSeekHandoff();
+}
+
+void MediaSession::ClearSeekHandoff() {
+  if (seek_previous_frame_ != nullptr) {
+    av_frame_free(&seek_previous_frame_);
+  }
+  seek_previous_index_ = -1;
+  seek_previous_info_ = DecodedFrameInfo{};
 }
 
 bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std::string* error,
@@ -61,6 +74,7 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
     av_frame_free(&last_hit_frame_);
   }
   frame_cache_.Clear();
+  ClearSeekHandoff();
   decoder_stale_ = true;
 
   // T7.1：分段计时只用于冷启动报告；失败路径也记录，便于区分探测/解码/索引。
@@ -163,6 +177,7 @@ bool MediaSession::BuildIndexNow(std::string* error, const std::atomic<bool>* ca
 void MediaSession::InstallIndex(FrameIndex index, double build_ms) {
   // 新索引可能改变帧号/PTS 映射，旧缓存必须丢弃。
   frame_cache_.Clear();
+  ClearSeekHandoff();
   decoder_stale_ = true;
   sequential_frame_ = -1;
   index_ = std::move(index);
@@ -198,6 +213,29 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
     return false;
   }
 
+  // T7.9：精确 seek 后的 handoff。目标正好是上一帧时直接返回引用，
+  // 不再从关键帧解码；这是 spec P7“精确 seek 后紧接 PgUp”的单步路径。
+  if (cache_mode == FrameCacheMode::kBackwardWindow &&
+      seek_previous_index_ == frame && seek_previous_frame_ != nullptr) {
+    AVFrame* clone = av_frame_clone(seek_previous_frame_);
+    if (clone != nullptr) {
+      last_hit_frame_ = clone;
+      *out = seek_previous_info_;
+      out->av_frame = clone;
+      decoder_stale_ = true;
+      sequential_frame_ = -1;
+      if (seek_log) {
+        std::fprintf(stderr,
+                     "T7.4 seek_log frame=%lld hit=2 handoff=1 total_ms=%.2f\n",
+                     static_cast<long long>(frame), ElapsedMs(seek_started));
+        std::fflush(stderr);
+      }
+      return true;
+    }
+  }
+  // 新的 seek 会让上一帧 handoff 失效。
+  ClearSeekHandoff();
+
   // T7.4：前进步进/精确 seek 后紧接 PgDn：解码器已经停在目标帧上时直接解一帧。
   // 旧实现每次前进都从最近关键帧重解到目标（4K 2s GOP 约 20–60 帧，p95 >200ms）。
   if (cache_mode == FrameCacheMode::kNone && sequential_frame_ == frame &&
@@ -220,7 +258,7 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
     sequential_frame_ = -1;
   }
 
-  if (cache_mode != FrameCacheMode::kNone) {
+  if (cache_mode == FrameCacheMode::kBackwardWindow) {
     AVFrame* hit = nullptr;
     FrameCacheEntryInfo cache_info;
     if (frame_cache_.Get(frame, &hit, &cache_info)) {
@@ -261,9 +299,14 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
       cache_from = std::max(
           start_frame, frame - static_cast<std::int64_t>(max_entries) + 1);
     }
+    AVFrame* previous_candidate = nullptr;
+    DecodedFrameInfo previous_info;
     for (std::int64_t index = start_frame; index <= frame; ++index) {
       DecodedFrameInfo info;
       if (!decoder_->DecodeNextFrame(&info, error)) {
+        if (previous_candidate != nullptr) {
+          av_frame_free(&previous_candidate);
+        }
         return false;
       }
       ++decoded_frames;
@@ -273,12 +316,33 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
                          info.duration_us, info.key_frame);
         cache_ms += ElapsedMs(cache_started);
       }
+      // T7.9：只保留目标前一帧的引用；目标帧本身直接交给调用方呈现。
+      if (cache_mode == FrameCacheMode::kSeekHandoff && index == frame - 1) {
+        if (previous_candidate != nullptr) {
+          av_frame_free(&previous_candidate);
+        }
+        previous_candidate = av_frame_clone(info.av_frame);
+        if (previous_candidate != nullptr) {
+          previous_info = info;
+          previous_info.av_frame = nullptr;
+        }
+      }
       if (index == frame) {
         *out = info;
         decoder_stale_ = false;
         sequential_frame_ = frame + 1;
+        if (previous_candidate != nullptr) {
+          ClearSeekHandoff();
+          seek_previous_frame_ = previous_candidate;
+          seek_previous_index_ = frame - 1;
+          seek_previous_info_ = previous_info;
+          previous_candidate = nullptr;
+        }
         return true;
       }
+    }
+    if (previous_candidate != nullptr) {
+      av_frame_free(&previous_candidate);
     }
     *error = "seek 解码未到目标帧";
     return false;
@@ -355,6 +419,7 @@ void MediaSession::Close() {
     av_frame_free(&last_hit_frame_);
   }
   frame_cache_.Clear();
+  ClearSeekHandoff();
   decoder_stale_ = true;
   sequential_frame_ = -1;
   decoder_.reset();

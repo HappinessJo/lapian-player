@@ -49,7 +49,7 @@ class MediaSession {
   void InstallIndex(FrameIndex index, double build_ms);
   bool HasIndex() const { return index_.IsReady() && !index_.empty(); }
   int video_stream_index() const { return probe_.info.video.stream_index; }
-  // T7.2：普通跳转/播放循环默认 kNone（保证解码器停在目标帧之后）；
+  // T7.2/T7.9：普通跳转传 kSeekHandoff（保留目标前一帧引用，供 seek 后 PgUp 直接呈现）；
   // 后退步进传 kBackwardWindow 预热最近若干帧，后续连续后退可直接命中。
   bool SeekToFrame(std::int64_t frame, DecodedFrameInfo* out, std::string* error,
                    FrameCacheMode cache_mode = FrameCacheMode::kNone);
@@ -72,6 +72,8 @@ class MediaSession {
   bool IsVfrSuspect() const { return probe_.info.vfr.suspect; }
 
  private:
+  void ClearSeekHandoff();
+
   MediaProbeResult probe_;
   MediaProbeResult last_attempt_;
   FrameIndex index_;
@@ -81,6 +83,11 @@ class MediaSession {
   MediaOpenTimings last_open_timings_;
   // 缓存命中时返回的软件帧，保持到下一次 Seek/Close，沿用解码器帧的生命周期约定。
   AVFrame* last_hit_frame_ = nullptr;
+  // T7.9：精确 seek 时保留的目标前一帧引用（硬解帧保持 D3D11 纹理，不回拷），
+  // 供“seek 后紧接 PgUp”直接呈现；下一次 Seek/Close 释放。
+  AVFrame* seek_previous_frame_ = nullptr;
+  std::int64_t seek_previous_index_ = -1;
+  DecodedFrameInfo seek_previous_info_;
   // true 表示解码器未必停在“最后返回帧的下一帧”，起播前需要重新定位。
   bool decoder_stale_ = true;
   // T7.4：解码器顺序位置（下一帧 DecodeNextFrame 会返回的帧号）；-1 表示未知。

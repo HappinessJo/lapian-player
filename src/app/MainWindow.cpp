@@ -2832,9 +2832,10 @@ void MainWindow::StepForward() {
 }
 
 void MainWindow::GoToFrame(std::int64_t frame) {
-  // 普通跳转/拖动松手/标记跳转不写缓存：实测每次多一次 3MB 回拷，
-  // 而连续后退需要的是“目标之前一窗帧”，由 GoToFrameForStep 单独预热。
-  GoToFrameInternal(frame, lapian::media::FrameCacheMode::kNone);
+  // T7.9：精确 seek 时保留目标前一帧的引用（不回拷），使“seek 后紧接 PgUp”
+  // 直接呈现；不读 FrameCache，避免改变 P9 冷随机跳转的语义。连续后退仍由
+  // GoToFrameForStep 的 kBackwardWindow 预热。
+  GoToFrameInternal(frame, lapian::media::FrameCacheMode::kSeekHandoff);
 }
 
 void MainWindow::GoToFrameForStep(std::int64_t frame, bool backward) {
