@@ -1,6 +1,6 @@
 # 给下个 agent 的新会话提示词（可直接复制）
 
-- **版本**：v18（2026-10-22；T7.3 90min 单文件 + 1h 子区间循环均 pass，无可复现增长；只差 V10 2h）
+- **版本**：v19（2026-10-22；T7.4 4K proxy 硬解一轮达标，T7.3 P14 仍待 V10）
 - **用法**：复制下面 ```text 代码块整段发给新 agent；它仍应先读文件、跑 ctest，不要只信摘要。
 
 ```text
@@ -10,92 +10,88 @@
 
 先读（按顺序）：
 - AGENTS.md
-- docs\handoff-2026-10-21-t7.3.md（当前交接，含 2026-10-22 的 90min/1h 结果）
-- docs\perf\T7.3-soak.md（T7.3 全部数字与结论）
-- spec.md（§4.1 P14、§4.4、§3 的 F1–F8）
+- docs\handoff-2026-10-22-t7.4.md（当前交接：T7.4 4K 路径、硬/软解两轮、缺口）
+- docs\perf\T7.4-4k.md（T7.4 全部数字与口径）
+- docs\handoff-2026-10-21-t7.3.md 与 docs\perf\T7.3-soak.md（T7.3 状态，P14 待 V10）
+- spec.md（§4.1 的 4K 放宽档/P14、§4.4、§3 的 F1–F8）
 - plan.md、tasks.md（M7 T7.1–T7.8）、docs\adr\ADR-001–006
-- 需要时再读 T7.2.1/T7.2/T7.1 交接；不要重读全部历史交接。
 
 第一步核对，不相信旧对话转述：
 1. git status --short；git log --oneline -8
-2. 读 tasks.md 的 T7.3 行与 AGENTS.md 的“当前状态”
+2. 读 tasks.md 的 T7.4 行、T7.3 行与 AGENTS.md 的“当前状态”
 3. 跑 ctest（命令见下），确认 21/21
 
 当前基线（以 git log 为准）：
-- 代码提交：`5dfbe06`（--memory-loop-frames）或更新；T7.3 相关还有 `188c63e`/
-  `31d0d94`/`ed61ba7`/`852b68a`。文档提交 `af72c0b` 或更新；工作区应 clean。
-- ctest 21/21（约 15s）；dist 32.52MB / 25 文件。
-- T7.3 已完成：
-  - `v10-1p5h`：1h34m 1080p 素材，单文件连续播放 90min，
-    `--memory-no-loop`，pass=1；WS 150.9→153.1MB（+2.1），斜率 1.22MB/h，
-    loop_jumps=0，cache 0，underrun 0。
-  - `loopseg3600`：同一 1.5h 文件，只循环前 3650 帧（≈152s），1h，
-    `--memory-loop-frames 3650`，pass=1；WS 156.0→159.9MB（+3.9），
-    斜率 0.79MB/h，23 次 B→A，cache 0，underrun 0。
-  - 之前 152s 短文件循环 30min/1h 的 +18.2/+20.8MB 没有复现；多次复测
-    +3.0/+4.8/+7.4 都 pass。当前没有可复现的确定性泄漏；异常根因未定位。
-- **T7.3 仍未通过 P14**：只有 1.5h 素材，不是 V10 2h；没有 V10 7200s 数据。
-  不要把 90min 当 2h，不要写 P14/V10/基线机通过。
+- 代码提交：`40bba7f`（T7.4）或更新；文档提交 `aab2a84` 之后；工作区应 clean。
+- ctest 21/21（约 15s）；dist 32.54MB / 25 文件。
+- T7.4 已完成（4K proxy，不是正式 V4）：
+  - 硬解 4K（proxy-V4，20 样本 p95）：P4 60.8/61.0fps、P6 142.6/143.4ms、
+    P7 后退 1.86/1.67ms（max 410ms，1/20 超）、前进 4.34/4.40ms、
+    P8 13.0fps 26/26 Present、P9 225.4/226.8ms、P11 播放 WS max 140.1MB。
+  - 40 步 `--memory-test step`：后退 p95 2.00/1.76ms、前进 4.12/4.15ms，
+    WS 高水位 683.6MB（4K 后退窗口 256MiB/20 帧）。
+  - 已知缺口：seek 后 PgUp 单样本 201–213ms >150ms（精确 seek 不预热后退缓存）；
+    软解一轮 P6 301.7ms、P9 320.6ms 未过（spec 软解不保证）。
+- T7.3 仍未通过 P14：90min 单文件 + 1h 子区间循环 pass，但 V10 2h 未做；
+  不要写 P14/V10/基线机通过，也不要把 90min 当 2h。
 
-接下来只做这三件事之一（按优先级）：
-1. 如果用户提供 V10（2h 1080p 真素材）：
-   跑单文件连续播放，显式 -NoLoop：
-   powershell -ExecutionPolicy Bypass -File scripts\soak-bench.ps1 `
-     -File <V10路径> -Seconds 7200 -Interval 30 -Tag v10-soak -NoLoop
-   看 `T7.3 soak_summary` 的 pass/ws_max/growth/baseline_growth/flags；
-   通过则补 P14 证据（注明开发机/暖缓存/非基线机），失败则按 flags 定位。
-2. 没有 V10：不要再重复 30min/60min/90min 长跑；现有证据已足够说明
-   “无可复现持续增长”。直接问用户：是等 V10，还是带 caveat 先开 T7.4。
-   如果用户同意先开 T7.4，就做 4K 路径；T7.3 保持“P14 待 V10”未关闭。
-3. 只有异常再次出现时才定位：加 D3D11 表面池/句柄/ETW 计数，不要盲目改
-   产品循环/音频代码；先证明是每次 B→A 的分配，再改。
+接下来做 T7.5（错误与鲁棒性）或 T7.6（打包/关联），按 tasks.md：
+- T7.5：V8、损坏文件、只读目录、设备丢失、中文/长路径、网络盘；5s 内响应，
+  无崩溃/冻结。不依赖 V4/V10，可直接做。
+- T7.6：Inno Setup 每用户安装、ProgID/关联、便携 zip、许可文本、卸载清理；
+  P12 ≤100MB（当前 32.54MB，余量充足）。
+- 有 V10 时随时插 T7.3 收口：`scripts\soak-bench.ps1 -File <V10> -Seconds 7200
+  -Interval 30 -Tag v10-soak -NoLoop`；看 `T7.3 soak_summary` 的 pass/flags。
+- T7.7 全量验收需要 V1–V10 与基线机，不要用 4K proxy 代替 V4。
 
 常用命令：
 - 构建+测试+打包：
   powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
-- ctest（需要 TMP/TEMP 和 Qt bin 在 PATH）：
+- ctest：
   $env:TMP = Join-Path $PWD '.deps\tmp'; $env:TEMP = $env:TMP
   $env:PATH = (Join-Path $PWD 'third_party\Qt\6.8.3\msvc2022_64\bin') + ';' + $env:PATH
   ctest --test-dir build\release -C Release --output-on-failure
-- 子区间循环（同一长文件只循环前 N 帧，1h 示例）：
-  powershell -ExecutionPolicy Bypass -File scripts\soak-bench.ps1 `
-    -File media\测试2.mp4 -Seconds 3600 -Interval 30 -Tag loopseg3600 -LoopFrames 3650
-- 改 `scripts\soak-bench.ps1` 时必须保留 UTF-8 BOM，否则 Windows PowerShell 5.1
-  会解析失败；改完用 Parser::ParseFile 验证。
+- T7.4 探针（需要时复跑；20 样本，走产品拖动/键位/跳转路径）：
+  dist\lapian.exe --file media\proxy\proxy-V4.mp4 --drag-test --drag-tag 4k-hard
+  dist\lapian.exe --file media\proxy\proxy-V4.mp4 --drag-test --drag-tag 4k-soft `
+    --force-software-decode
+- 4K 播放内存/步进：
+  dist\lapian.exe --file media\proxy\proxy-V4.mp4 --memory-test --memory-mode play `
+    --memory-seconds 15 --memory-tag 4k-play
+  dist\lapian.exe --file media\proxy\proxy-V4.mp4 --memory-test --memory-mode step `
+    --memory-steps 40 --memory-tag 4k-step
+- 诊断日志（默认关）：LAPIAN_SEEK_LOG / LAPIAN_STEP_LOG / LAPIAN_PUT_LOG。
 
 已交付、不要重写：
-- `--memory-mode soak`、`SoakStats` 5min 下包络、UI 心跳/30s 看门狗、
-  `--memory-interval`、`--memory-no-loop`、`--memory-loop-frames`、
-  `scripts\soak-bench.ps1`、`lapian_soak_test`。
-- T7.1 的异步索引/`--startup-test`/`--index-test`；T7.2 的 `FrameCache`/
-  `--memory-test`/缓存策略；T7.2.1 的 B=末帧/显示尺寸；不要改这些语义。
+- T7.4：`MediaSession::sequential_frame_` 顺序前进快路径、4K 后退窗口
+  256MiB/20、`--drag-test`/`--drag-samples`/`--drag-tag`/
+  `--force-software-decode`。不要为了 P7 降质/丢帧或放宽 150ms。
+- T7.1 的异步索引；T7.2 的 FrameCache 语义（仍只缓存后退步进的软件 NV12 帧）；
+  T7.2.1 的 B=末帧/显示尺寸；T7.3 的 soak 判定。
+- 长 GOP 循环 B→A 148–157ms（F4-A2）仍是已知缺口，留给 T7.7；不要顺手改。
 
 判定口径（不要放宽阈值来变绿）：
-- P14：2h 1080p 连续播放，WS ≤1200MB，无持续增长，不崩溃/卡死。
-- 自动判据：5 分钟下包络（每块取最低 WS）做线性拟合；斜率 >16MB/h 且
-  增量 ≥12MB 才判 memory_growth。小幅正斜率/一次性预热不算。
-- 90min/1h 的 pass 只是“没有可复现增长”，不是 P14 通过。
+- 4K P4 ≥20fps、P6 ≤300ms、P7 ≤150ms、P9 ≤300ms、P8 ≥12fps 且每帧呈现、
+  P11 ≤1.5GB；P6/P9 以目标距前关键帧 ≤2s 为前提。
+- P7 的 p95 允许 1/20 超限，但必须同时报告 max 与尖峰；4K 2s GOP 下缓存重填
+  ~410ms 是已知成本，不是“无卡顿”。
+- P14：2h 1080p 连续播放，WS ≤1200MB，无持续增长，不崩溃/卡死；V10 必选。
 
 不要提前宣称：
-- IME/AltGr、F1-A6 真人、F6/F8、F8-A1 真实 %APPDATA%、
-  4K/VFR/正式 P3/P4/P8、T6.2.1 硬件级自动化、T6.4 真实显示缩放/多显示器、
-  T6.5 真实 VFR/10-bit/HDR、T7.1 冷缓存/基线机/正式 V1 P1/P2、
-  T7.2 正式 P10/P11 或 4K P7、T7.3 P14/V10、F4-A2 长 GOP 或基线机通过。
-- 已知缺口：T7.2 的 4K 步进 p95 ~228ms（P7 150ms 未达）；长 GOP 循环
-  B→A 148–157ms（F4-A2 未达）；这些留给 T7.4/T7.7。
+- 正式 V4/V1/V5/V10、基线机、冷缓存；4K proxy 不能代替 V4。
+- T7.4 软解通过（P6/P9 未过）；P7 “seek 后 PgUp”通过（单样本超限）。
+- T7.3 P14/V10；F4-A2 长 GOP；真实 IME/AltGr、F1-A6 真人、200% 真实缩放。
 
 工作方式：
 - 计划内任务不用逐项确认；只有计划外、不可逆、规格歧义、权限/硬件限制才问。
 - 一个任务 = 一次可审查变更；先提交代码，再提交文档（交接 + perf 证据）。
 - 每个任务保持 build-release.ps1、ctest、dist 通过；性能任务补 docs/perf/ 数字。
-- 只做 F1–F8/P1–P14；spec v0.3 冻结；不重做 T1–T7.2.1。
-- 先给 3–5 行极短计划，然后读 `docs\handoff-2026-10-21-t7.3.md`，按上面
-  第 1/2 条继续；不要重复已经做过的短时 soak。
+- 只做 F1–F8/P1–P14；spec v0.3 冻结；不重做 T1–T7.4。
+- 先给 3–5 行极短计划，再读 `docs\handoff-2026-10-22-t7.4.md` 的 §5 下一步。
 ```
 
 ## 使用说明
 
 - 新 agent 必须先读文件、跑 `ctest`，以 `git log`/`tasks.md` 为准，不要只信这段摘要。
 - 若 HEAD 已前进，以最新提交和 `tasks.md` 为准；本提示词只描述 2026-10-22 的状态。
-- T7.3 的正式收口只差 V10 2h；没有 V10 时不要继续堆短时探针，也不要把
-  90min/1h 写成 P14。
+- T7.4 只是 4K proxy 证据；T7.3 的正式收口仍差 V10 2h，两者不要混写。
