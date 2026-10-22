@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -67,6 +68,7 @@ extern "C" {
 #include "core/MediaClock.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
+#include "media/PathProbe.h"
 #include "media/PreviewDecoder.h"
 
 namespace {
@@ -1071,6 +1073,56 @@ void MainWindow::OpenFile(const QString& path) {
   double audio_open_ms = 0.0;
   double waveform_start_ms = 0.0;
   double first_upload_ms = 0.0;
+  // T7.5：Qt 文件对话框/拖拽给的是正斜杠路径。正斜杠绝对路径（尤其带盘符）
+  // 在 FFmpeg 里可能被当成 URL，缺失文件会报 “Illegal byte sequence” 而不是
+  // “文件不存在”。打开前统一转成 Windows 原生分隔符。
+  const QString native_path = QDir::toNativeSeparators(path);
+  const QByteArray utf8 = native_path.toUtf8();
+  const std::string path_utf8(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+  // T7.5：网络路径先在有限时间内预检。断开的映射盘/不可达 UNC 的 SMB 连接
+  // 默认要 ~20s 才失败；如果直接进 avformat_open_input，UI 线程会冻结超过
+  // spec §4.4 的 5s。预检失败时保留当前会话与播放状态，只报可读错误。
+  if (lapian::media::IsNetworkPath(path_utf8)) {
+    constexpr int kNetworkPathProbeTimeoutMs = 3000;
+    QElapsedTimer probe_timer;
+    probe_timer.start();
+    const lapian::media::PathProbeResult probe =
+        lapian::media::ProbePathWithTimeout(path_utf8, kNetworkPathProbeTimeoutMs);
+    const double probe_ms = static_cast<double>(probe_timer.nsecsElapsed()) / 1.0e6;
+    if (qEnvironmentVariableIsSet("LAPIAN_OPEN_LOG")) {
+      std::fprintf(stderr,
+                   "T7.5 open_probe kind=network status=%d elapsed_ms=%.1f\n",
+                   static_cast<int>(probe.status), probe_ms);
+      std::fflush(stderr);
+    }
+    if (probe.status != lapian::media::PathProbeStatus::kReachable) {
+      ShowOpenError(QStringLiteral("无法打开网络路径：%1\n\n%2")
+                        .arg(QDir::toNativeSeparators(path),
+                             QString::fromStdString(probe.message)));
+      return;
+    }
+  }
+  // T7.5：文件夹不是视频。FFmpeg 对目录会报 ENOENT/权限错误，提示会误导；
+  // 这里在进入探测前直接给准确说明（网络路径已在上面确认可达）。
+  const QFileInfo input_info(path);
+  if (input_info.exists() && input_info.isDir()) {
+    ShowOpenError(QStringLiteral("这是一个文件夹，不是视频文件：\n%1")
+                      .arg(QDir::toNativeSeparators(path)));
+    return;
+  }
+  // T7.5：本地文件先试读一次。独占中的文件 FFmpeg 会报 ENOENT（提示“文件不存在”
+  // 会误导）；ACL 拒绝则直接给出权限提示。网络路径已在上面预检，不再做可能
+  // 阻塞的额外打开。
+  if (!lapian::media::IsNetworkPath(path_utf8) && input_info.exists()) {
+    QFile readable(path);
+    if (!readable.open(QIODevice::ReadOnly)) {
+      ShowOpenError(
+          QStringLiteral("无法读取该文件（可能被其他程序独占，或权限不足）：\n%1\n\n%2")
+              .arg(QDir::toNativeSeparators(path), readable.errorString()));
+      return;
+    }
+    readable.close();
+  }
   CancelPendingMarkJump();
   if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
@@ -1084,9 +1136,6 @@ void MainWindow::OpenFile(const QString& path) {
   if (snapshots_ != nullptr) {
     snapshots_->Drain();
   }
-
-  const QByteArray utf8 = path.toUtf8();
-  const std::string path_utf8(utf8.constData(), static_cast<std::size_t>(utf8.size()));
 
   auto candidate = std::make_unique<lapian::media::MediaSession>();
   std::string error;
@@ -1119,6 +1168,7 @@ void MainWindow::OpenFile(const QString& path) {
   // T7.1：旧索引线程先取消并 join，避免它把结果装到新会话上。
   CancelIndexBuild();
   session_ = std::move(candidate);
+  last_open_error_.clear();
   playback_->SetSession(session_.get());
   current_frame_ = 0;
   snapshot_saved_paths_.clear();
@@ -1496,8 +1546,13 @@ void MainWindow::LoadMarksForCurrentSession() {
       return index.FindExactPts(pts_us, frame);
     };
   }
+  lapian::core::MarkStoreOptions mark_options;
+  if (!mark_appdata_root_for_test_.isEmpty()) {
+    mark_options.appdata_marks_dir =
+        mark_appdata_root_for_test_.toUtf8().toStdString();
+  }
   lapian::core::MarkStore opened_marks = lapian::core::MarkStore::Open(
-      session_->path_utf8(), session_->info().duration_us, {}, mark_lookup);
+      session_->path_utf8(), session_->info().duration_us, mark_options, mark_lookup);
   marks_ = std::make_unique<lapian::core::MarkStore>(std::move(opened_marks));
   marks_dirty_ = false;
 }
@@ -1582,6 +1637,24 @@ QString MainWindow::AudioStateForTest() const {
 
 qulonglong MainWindow::AudioUnderrunCountForTest() const {
   return audio_ ? static_cast<qulonglong>(audio_->status().underruns) : 0;
+}
+
+// T7.5：模拟 USB 音频设备拔出/恢复；只驱动 AudioEngine 已有状态机，
+// 不改产品默认路径（真实设备失效仍由 AUDCLNT_E_DEVICE_INVALIDATED 触发）。
+void MainWindow::SimulateAudioDeviceLossForTest(bool active) {
+  if (audio_) {
+    audio_->SimulateDeviceLossForTest(active);
+  }
+}
+
+QString MainWindow::LastOpenErrorForTest() const { return last_open_error_; }
+
+QString MainWindow::LastNavigationErrorForTest() const {
+  return last_navigation_error_;
+}
+
+void MainWindow::SetMarkAppDataRootForTest(const QString& root) {
+  mark_appdata_root_for_test_ = root;
 }
 
 QString MainWindow::WaveformStateForTest() const {
@@ -2792,8 +2865,10 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
       info_bar_->SetFrame(static_cast<int>(current_frame_));
     }
     statusBar()->showMessage(QStringLiteral("跳帧失败：") + QString::fromStdString(error), 5000);
+    last_navigation_error_ = QString::fromStdString(error);
     return;
   }
+  last_navigation_error_.clear();
 
   gfx_->SetVideoFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees);
   RememberDisplayedFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees,
@@ -2895,6 +2970,7 @@ void MainWindow::OnPlaybackEnded() {
 
 void MainWindow::ShowOpenError(const QString& message) {
   qWarning() << "打开失败:" << message;
+  last_open_error_ = message;
   if (info_bar_ != nullptr) {
     info_bar_->SetError(message);
   }

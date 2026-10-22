@@ -106,6 +106,8 @@ add_library(lapian_media STATIC
   media/MediaProbe.h
   media/MediaSession.cpp
   media/MediaSession.h
+  media/PathProbe.cpp
+  media/PathProbe.h
   media/PreviewDecoder.cpp
   media/PreviewDecoder.h
   media/SeekEngine.cpp
@@ -149,6 +151,8 @@ qt_add_executable(lapian WIN32
   app/DragTestRunner.h
   app/MemoryTestRunner.cpp
   app/MemoryTestRunner.h
+  app/RobustTestRunner.cpp
+  app/RobustTestRunner.h
   app/PlaybackController.cpp
   app/PlaybackController.h
   app/ProcessMemory.cpp

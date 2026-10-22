@@ -35,6 +35,22 @@ QString FromUtf8(const std::string& text) {
 
 std::string ToUtf8(const QString& text) { return text.toUtf8().toStdString(); }
 
+#ifdef _WIN32
+// T7.5：ReplaceFileW/MoveFileExW 不会自动加长路径前缀。sidecar 位于 >MAX_PATH
+// 的中文长目录时，Qt 能创建临时文件，但 Win32 替换会失败并误回退 AppData。
+// 这里显式转成 `\\?\C:\...` / `\\?\UNC\server\share\...`。
+std::wstring NativeLongPath(const QString& path) {
+  QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+  if (native.startsWith(QStringLiteral("\\\\?\\"))) {
+    return native.toStdWString();
+  }
+  if (native.startsWith(QStringLiteral("\\\\"))) {
+    return (QStringLiteral("\\\\?\\UNC\\") + native.mid(2)).toStdWString();
+  }
+  return (QStringLiteral("\\\\?\\") + native).toStdWString();
+}
+#endif
+
 // 绝对化 + 解析 . / .. + 正斜杠转反斜杠；存在的本地文件再解析 8.3/符号链接。
 // UNC 不做文件系统解析，避免打开不存在/离线的网络路径时阻塞。
 QString CleanAbsolutePath(const QString& input) {
@@ -401,8 +417,8 @@ bool WriteAtomically(const QString& target, const QByteArray& bytes, std::string
   }
 
 #ifdef _WIN32
-  const std::wstring temp_native = temp_path.toStdWString();
-  const std::wstring target_native = target.toStdWString();
+  const std::wstring temp_native = NativeLongPath(temp_path);
+  const std::wstring target_native = NativeLongPath(target);
   bool replaced = false;
   if (QFileInfo::exists(target)) {
     replaced = ReplaceFileW(target_native.c_str(), temp_native.c_str(), nullptr,

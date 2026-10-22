@@ -718,6 +718,38 @@ void TestAtomicFailure(const QString& root) {
         "重新保存后包含两个标记");
 }
 
+void TestLongPathAtomicWrite(const QString& root) {
+  std::printf("\n-- >MAX_PATH 中文长路径 sidecar --\n");
+  QString directory = root + QStringLiteral("/long");
+  const QString segment = QStringLiteral("很长的中文目录名称_用于测试长路径");
+  int index = 0;
+  while (directory.size() < 290) {
+    directory += QLatin1Char('/') + segment + QString::number(index++);
+  }
+  const QString video = NewVideo(directory, QStringLiteral("长路径.mp4"));
+  Check(video.size() > 260, "测试视频路径 >260 字符");
+
+  const MarkStoreOptions options = OptionsFor(root + QStringLiteral("/appdata-long"));
+  const MarkPaths paths = ResolveMarkPaths(ToUtf8(video), options);
+  const QString sidecar = FromUtf8(paths.sidecar);
+  const QString fallback = FromUtf8(paths.fallback);
+  MarkStore store = MarkStore::Open(ToUtf8(video), 5'000'000, options);
+  Check(store.valid(), "长路径 MarkStore 有效");
+  Check(store.AddMark(3, 3000, "长路径", "note", nullptr), "长路径添加标记");
+  const SaveResult saved = store.Save();
+  Check(saved.ok, "长路径 sidecar 保存成功");
+  Check(saved.wrote, "长路径 sidecar 确实写入");
+  Check(!saved.path.empty() && FromUtf8(saved.path) == sidecar,
+        "写入 sidecar 而不是 AppData 回退");
+  Check(!store.using_fallback(), "长路径不标记为 AppData 回退");
+  Check(QFileInfo::exists(sidecar), "长路径 sidecar 文件存在");
+  Check(!QFileInfo::exists(fallback), "长路径没有产生 AppData 回退文件");
+
+  MarkStore reopened = MarkStore::Open(ToUtf8(video), 5'000'000, options);
+  Check(reopened.marks().size() == 1, "重开读回长路径 sidecar");
+  Check(!reopened.using_fallback(), "重开仍使用 sidecar");
+}
+
 void TestIdentityMismatch(const QString& root) {
   std::printf("\n-- 视频标识不一致 --\n");
   const QString directory = root + QStringLiteral("/identity");
@@ -815,6 +847,7 @@ int main(int argc, char** argv) {
   TestReconcile(temp.path());
   TestFallbackAndMigration(temp.path());
   TestAtomicFailure(temp.path());
+  TestLongPathAtomicWrite(temp.path());
   TestIdentityMismatch(temp.path());
 
   if (g_failures > 0) {

@@ -58,6 +58,15 @@ lapian_apply_common_options(lapian_soak_test)
 target_link_libraries(lapian_soak_test PRIVATE lapian_soak)
 add_test(NAME lapian_soak_test COMMAND lapian_soak_test)
 
+# T7.5 网络路径预检：UNC/映射盘识别、缺失/可达判定、不可达主机的有界等待。
+add_executable(lapian_path_probe_test path_probe_test.cpp)
+lapian_apply_common_options(lapian_path_probe_test)
+target_link_libraries(lapian_path_probe_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_path_probe_test)
+add_test(NAME lapian_path_probe_test COMMAND lapian_path_probe_test)
+set_tests_properties(lapian_path_probe_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

@@ -222,6 +222,13 @@ class MainWindow : public QMainWindow {
   QString AudioStateForTest() const;
   qulonglong AudioUnderrunCountForTest() const;
   QString WaveformStateForTest() const;
+  // T7.5：设备丢失模拟与错误详情（--robust-test 用；产品语义不变）。
+  void SimulateAudioDeviceLossForTest(bool active);
+  QString LastOpenErrorForTest() const;
+  QString LastNavigationErrorForTest() const;
+  // T7.5：--robust-test 用独立 AppData 根，避免只读目录回退写进真实
+  // %APPDATA%\拉片软件\marks。空 = 产品默认。
+  void SetMarkAppDataRootForTest(const QString& root);
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
@@ -399,6 +406,10 @@ class MainWindow : public QMainWindow {
   QStringList snapshot_saved_paths_;
   QString snapshot_last_path_;
   QString snapshot_last_error_;
+  // T7.5：失败原因供 --robust-test 与状态诊断读取；成功打开/跳转后清空。
+  QString last_open_error_;
+  QString last_navigation_error_;
+  QString mark_appdata_root_for_test_;
   std::int64_t snapshot_last_capture_frame_ = -1;
   std::int64_t snapshot_last_saved_frame_ = -1;
   bool snapshot_last_fallback_ = false;

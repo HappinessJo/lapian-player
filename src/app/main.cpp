@@ -39,6 +39,7 @@
 #include "app/DragTestRunner.h"
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
+#include "app/RobustTestRunner.h"
 
 int main(int argc, char* argv[]) {
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。
@@ -90,6 +91,13 @@ int main(int argc, char* argv[]) {
   int drag_samples = 20;
   QString drag_tag;
   bool force_software_decode = false;
+  // T7.5：错误与鲁棒性探针。
+  bool robust_test = false;
+  QString robust_media;
+  QString robust_tag;
+  QString robust_root;
+  QString robust_only;
+  QString robust_readonly_dir;
   QString settings_path_arg;
   QString dpi_tag;
   QString banner_tag;
@@ -186,6 +194,23 @@ int main(int argc, char* argv[]) {
       drag_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--force-software-decode")) {
       force_software_decode = true;
+    } else if (arguments[i] == QStringLiteral("--robust-test")) {
+      robust_test = true;
+    } else if (arguments[i] == QStringLiteral("--robust-media") &&
+               i + 1 < arguments.size()) {
+      robust_media = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--robust-tag") &&
+               i + 1 < arguments.size()) {
+      robust_tag = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--robust-root") &&
+               i + 1 < arguments.size()) {
+      robust_root = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--robust-only") &&
+               i + 1 < arguments.size()) {
+      robust_only = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--robust-readonly-dir") &&
+               i + 1 < arguments.size()) {
+      robust_readonly_dir = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--banner-tag") &&
                i + 1 < arguments.size()) {
       banner_tag = arguments[++i];
@@ -283,6 +308,44 @@ int main(int argc, char* argv[]) {
     QDir().mkpath(snapshot_pictures_root);
   }
 
+  // T7.5：错误与鲁棒性探针的独立根。不覆盖 APPDATA，改用 MainWindow 的
+  // 测试 setter 注入 MarkStore 回退根，避免污染真实用户目录。
+  if (robust_test) {
+    if (robust_tag.isEmpty()) {
+      robust_tag = QStringLiteral("default");
+    }
+    if (robust_root.isEmpty()) {
+      robust_root = QDir::currentPath() + QStringLiteral("/build/t7.5-robust/") +
+                    robust_tag;
+    }
+    robust_root = QFileInfo(robust_root).absoluteFilePath();
+    QDir(robust_root).removeRecursively();
+    QDir().mkpath(robust_root);
+    QDir().mkpath(robust_root + QStringLiteral("/appdata"));
+    QDir().mkpath(robust_root + QStringLiteral("/pictures"));
+    if (robust_media.isEmpty()) {
+      const QString proxy =
+          QDir::currentPath() + QStringLiteral("/media/proxy/proxy-V1.mp4");
+      const QString v9 = QDir::currentPath() + QStringLiteral("/media/V9.mp4");
+      if (QFileInfo::exists(proxy)) {
+        robust_media = proxy;
+      } else if (QFileInfo::exists(v9)) {
+        robust_media = v9;
+      } else {
+        robust_media = file_path;
+      }
+    }
+    if (robust_media.isEmpty()) {
+      std::fprintf(stderr, "T7.5 robust_fail reason=missing_media\n");
+      return 2;
+    }
+    if (robust_only.isEmpty()) {
+      robust_only = QStringLiteral("all");
+    }
+    qputenv("LAPIAN_OPEN_LOG", "1");
+    qputenv("LAPIAN_MARK_LOG", "1");
+  }
+
   // T7.1：冷启动埋点。--startup-test 自动开日志；单独设置 LAPIAN_STARTUP_LOG=1
   // 也能在不退出程序的情况下观察分段耗时。
   if (startup_test) {
@@ -322,6 +385,10 @@ int main(int argc, char* argv[]) {
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
     window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
+  }
+  if (robust_test) {
+    window.SetMarkAppDataRootForTest(robust_root + QStringLiteral("/appdata"));
+    window.SetSnapshotPicturesRootForTest(robust_root + QStringLiteral("/pictures"));
   }
 
   // T7.1：首帧 Present 后写一条 first_present 并退出；80ms 留给 DWM/绘制收尾。
@@ -372,6 +439,21 @@ int main(int argc, char* argv[]) {
     drag_runner->Start();
   }
 
+  // T7.5：错误与鲁棒性探针。
+  std::unique_ptr<lapian::app::RobustTestRunner> robust_runner;
+  if (robust_test) {
+    lapian::app::RobustTestRunner::Options options;
+    options.media = robust_media;
+    options.tag = robust_tag;
+    options.root = robust_root;
+    options.only = robust_only;
+    options.read_only_dir = robust_readonly_dir;
+    options.pictures_root = robust_root + QStringLiteral("/pictures");
+    robust_runner =
+        std::make_unique<lapian::app::RobustTestRunner>(&window, options);
+    robust_runner->Start();
+  }
+
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
   QTimer::singleShot(0, &window, [&app, &window, startup_test, startup_log, startup_ms,
                                   file_path]() {
@@ -386,7 +468,7 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if (!file_path.isEmpty() && !memory_test && !drag_test) {
+  if (!file_path.isEmpty() && !memory_test && !drag_test && !robust_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
                                     mark_test, note_test,

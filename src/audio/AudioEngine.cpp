@@ -72,6 +72,7 @@ struct AudioEngine::Impl {
   std::atomic<bool> muted{false};
   std::atomic<double> clock_seconds{0.0};
   std::atomic<bool> clock_valid{false};
+  std::atomic<bool> simulate_device_loss{false};
 
   mutable std::mutex status_mutex;
   AudioStatus status;
@@ -469,6 +470,11 @@ struct AudioEngine::Impl {
   }
 
   void RetryDevice() {
+    if (simulate_device_loss.load()) {
+      // 仍处于模拟拔出状态：保持静音，不反复打开真实设备。
+      next_retry = std::chrono::steady_clock::now() + kDeviceRetryInterval;
+      return;
+    }
     std::string error;
     bool decoder_failed = false;
     if (!OpenDeviceAndDecoder(&error, &decoder_failed)) {
@@ -489,6 +495,13 @@ struct AudioEngine::Impl {
   }
 
   void Pump() {
+    if (simulate_device_loss.load()) {
+      if (playing) {
+        // 与真实设备失效同一条路径：停播、使时钟失效、2s 后重试。
+        HandleDeviceLost();
+      }
+      return;
+    }
     if (!playing || !ready) {
       return;
     }
@@ -692,6 +705,7 @@ bool AudioEngine::Open(const std::string& utf8_path, int stream_index,
     impl_->playing = false;
     impl_->decoder_eof = false;
     impl_->device_retry = false;
+    impl_->simulate_device_loss.store(false);
     impl_->handled_serial = 0;
     impl_->handled_rate_serial = 0;
     impl_->rate = impl_->requested_rate.load();
@@ -801,6 +815,11 @@ bool AudioEngine::ClockSeconds(double* seconds) const {
   }
   *seconds = value;
   return true;
+}
+
+void AudioEngine::SimulateDeviceLossForTest(bool active) {
+  impl_->simulate_device_loss.store(active);
+  impl_->cv.notify_all();
 }
 
 }  // namespace lapian::audio

@@ -57,6 +57,12 @@ class AudioEngine {
 
   AudioStatus status() const;
 
+  // T7.5 测试专用：模拟渲染设备丢失/恢复（USB 声卡拔出无法在自动化里物理复现）。
+  // active=true 时音频线程走与 AUDCLNT_E_DEVICE_INVALIDATED 相同的
+  // HandleDeviceLost 路径：静音 + 时钟失效（视频回退 QPC）+ 2s 重试；
+  // active=false 后下一次重试重新打开设备并恢复播放。产品默认不调用。
+  void SimulateDeviceLossForTest(bool active);
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
