@@ -42,6 +42,7 @@
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
 #include "app/OnlineAuthTestRunner.h"
+#include "app/OnlineCacheTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
@@ -100,6 +101,30 @@ int main(int argc, char* argv[]) {
       options.timeout_ms = 10000;
     }
     return lapian::app::RunOnlineHttpSelfCheck(options);
+  }
+
+  // T8.3：缓存存储/配额探针同样无 GUI：临时根 + 合成文件，不联网、不需要 SESSDATA。
+  if (HasArgument(argc, argv, "--online-cache-test")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineCacheTestOptions options;
+    const QStringList cache_args = QCoreApplication::arguments();
+    for (int i = 1; i < cache_args.size(); ++i) {
+      const QString& arg = cache_args[i];
+      if (arg == QStringLiteral("--cache-test-root") && i + 1 < cache_args.size()) {
+        options.root = cache_args[++i];
+      } else if (arg.startsWith(QStringLiteral("--cache-test-root="))) {
+        options.root =
+            arg.mid(static_cast<int>(std::strlen("--cache-test-root=")));
+      } else if (arg == QStringLiteral("--cache-test-keep")) {
+        options.keep_root = true;
+      }
+    }
+    return lapian::app::RunOnlineCacheTest(options);
   }
 
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。

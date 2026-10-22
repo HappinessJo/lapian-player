@@ -518,6 +518,8 @@ void MainWindow::LoadSettingsIntoUi() {
   const lapian::core::SettingsLoadResult result = settings_store_->Load();
   settings_last_load_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
   settings_load_status_ = lapian::core::SettingsLoadStatusName(result.status);
+  // T8.3：保留读到的缓存键；保存时只覆盖音量/波形，避免把 cache_root/quota 冲掉。
+  loaded_settings_ = result.settings;
   ApplySettings(result.settings);
   if (settings_log_) {
     const QByteArray path = settings_store_->file_path().toUtf8();
@@ -576,11 +578,14 @@ bool MainWindow::FlushSettings() {
   }
   QElapsedTimer timer;
   timer.start();
-  const bool ok = settings_store_->Save(
-      lapian::core::AppSettings{volume_, waveform_visible_});
+  // T8.3：只改音量/波形，保留 cache_root/cache_quota_gb（避免把在线缓存设置冲掉）。
+  lapian::core::AppSettings settings =
+      lapian::core::MergeVolumeWaveform(loaded_settings_, volume_, waveform_visible_);
+  const bool ok = settings_store_->Save(settings);
   settings_last_save_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
   if (ok) {
     settings_dirty_ = false;
+    loaded_settings_ = settings;
   }
   if (settings_log_) {
     const QByteArray path = settings_store_->file_path().toUtf8();

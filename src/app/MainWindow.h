@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/AppSettings.h"
 #include "core/FrameMath.h"
 #include "core/LoopRange.h"
 #include "core/MarkStore.h"
@@ -443,6 +444,8 @@ class MainWindow : public QMainWindow {
   bool settings_dirty_ = false;
   bool applying_settings_ = false;
   bool settings_log_ = false;
+  // T8.3：最近一次读到的设置；保存音量/波形时保留 cache_root/cache_quota_gb。
+  lapian::core::AppSettings loaded_settings_;
   // T7.1：冷启动分段计时日志（LAPIAN_STARTUP_LOG 或 --startup-test）。
   bool startup_log_ = false;
   // T7.1：索引线程与取消。CancelIndexBuild 会 join，索引循环每包检查取消标志。

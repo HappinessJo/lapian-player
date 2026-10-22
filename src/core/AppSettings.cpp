@@ -25,6 +25,11 @@ constexpr bool kDefaultWaveformVisible = true;
 
 int ClampVolume(int volume) { return std::clamp(volume, 0, 100); }
 
+// T8.3：缓存配额 1–100GB；越界截断，非法值用默认。
+int ClampCacheQuotaGb(int quota_gb) {
+  return std::clamp(quota_gb, kCacheQuotaMinGb, kCacheQuotaMaxGb);
+}
+
 }  // namespace
 
 QByteArray SerializeAppSettings(const AppSettings& settings) {
@@ -32,13 +37,17 @@ QByteArray SerializeAppSettings(const AppSettings& settings) {
   root.insert(QStringLiteral("schema"), kSchemaVersion);
   root.insert(QStringLiteral("volume"), ClampVolume(settings.volume));
   root.insert(QStringLiteral("waveform"), settings.waveform_visible);
+  // T8.3 新增键：旧版本读到会当未知键忽略（不改变 v1 键语义）。
+  root.insert(QStringLiteral("cache_root"), settings.cache_root);
+  root.insert(QStringLiteral("cache_quota_gb"), ClampCacheQuotaGb(settings.cache_quota_gb));
   return QJsonDocument(root).toJson(QJsonDocument::Compact) + '\n';
 }
 
-SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {
-  SettingsLoadResult result;
+SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {  SettingsLoadResult result;
   result.settings.volume = kDefaultVolume;
   result.settings.waveform_visible = kDefaultWaveformVisible;
+  result.settings.cache_root.clear();
+  result.settings.cache_quota_gb = kCacheQuotaDefaultGb;
 
   const QByteArray trimmed = bytes.trimmed();
   if (trimmed.isEmpty()) {
@@ -88,10 +97,37 @@ SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {
   if (waveform.isBool()) {
     result.settings.waveform_visible = waveform.toBool();
   }
+  // T8.3：缓存根按原样保存（空/类型不对 → 默认根）；配额按 1–100GB clamp。
+  const QJsonValue cache_root = root.value(QStringLiteral("cache_root"));
+  if (cache_root.isString()) {
+    result.settings.cache_root = cache_root.toString();
+  }
+  const QJsonValue cache_quota = root.value(QStringLiteral("cache_quota_gb"));
+  if (cache_quota.isDouble()) {
+    const double raw = cache_quota.toDouble();
+    if (std::isfinite(raw)) {
+      if (raw <= static_cast<double>(kCacheQuotaMinGb)) {
+        result.settings.cache_quota_gb = kCacheQuotaMinGb;
+      } else if (raw >= static_cast<double>(kCacheQuotaMaxGb)) {
+        result.settings.cache_quota_gb = kCacheQuotaMaxGb;
+      } else {
+        result.settings.cache_quota_gb = static_cast<int>(std::lround(raw));
+      }
+    }
+  }
 
   // 未知键（含未来版本新增键）直接忽略。
   result.status = SettingsLoadStatus::kLoaded;
   return result;
+}
+
+AppSettings MergeVolumeWaveform(const AppSettings& base, int volume,
+                                bool waveform_visible) {
+  AppSettings merged = base;
+  merged.volume = ClampVolume(volume);
+  merged.waveform_visible = waveform_visible;
+  merged.cache_quota_gb = ClampCacheQuotaGb(base.cache_quota_gb);
+  return merged;
 }
 
 QString SettingsLoadStatusName(SettingsLoadStatus status) {

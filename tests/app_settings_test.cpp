@@ -20,6 +20,7 @@
 namespace {
 
 using lapian::core::AppSettings;
+using lapian::core::MergeVolumeWaveform;
 using lapian::core::ParseAppSettings;
 using lapian::core::SerializeAppSettings;
 using lapian::core::SettingsLoadResult;
@@ -66,6 +67,22 @@ void CheckSettings(const SettingsLoadResult& result, SettingsLoadStatus status,
   ++g_failures;
 }
 
+// T8.3：缓存根/配额（空根 = 默认 %LOCALAPPDATA%\拉片软件\cache）。
+void CheckCache(const SettingsLoadResult& result, const QString& cache_root,
+                int cache_quota_gb, const std::string& what) {
+  const bool ok = result.settings.cache_root == cache_root &&
+                  result.settings.cache_quota_gb == cache_quota_gb;
+  if (ok) {
+    std::printf("[ OK ] %s\n", what.c_str());
+    return;
+  }
+  std::printf("[FAIL] %s\n  实际：root=%s quota=%d\n  期望：root=%s quota=%d\n",
+              what.c_str(), result.settings.cache_root.toUtf8().constData(),
+              result.settings.cache_quota_gb, cache_root.toUtf8().constData(),
+              cache_quota_gb);
+  ++g_failures;
+}
+
 bool WriteAll(const QString& path, const QByteArray& bytes) {
   const QFileInfo info(path);
   if (!QDir().mkpath(info.absolutePath())) {
@@ -95,6 +112,13 @@ void TestParse() {
     Check(object.value(QStringLiteral("schema")).toInt() == 1, "serialize-schema");
     Check(object.value(QStringLiteral("volume")).toInt() == 37, "serialize-volume");
     Check(!object.value(QStringLiteral("waveform")).toBool(true), "serialize-waveform");
+    // T8.3：缓存键写入但不改 v1 schema（仍是 1）。
+    Check(object.value(QStringLiteral("cache_root")).isString(),
+          "serialize-cache-root-present");
+    Check(object.value(QStringLiteral("cache_root")).toString().isEmpty(),
+          "serialize-cache-root-default-empty");
+    Check(object.value(QStringLiteral("cache_quota_gb")).toInt() == 20,
+          "serialize-cache-quota-default-20");
     CheckSettings(ParseAppSettings(bytes), SettingsLoadStatus::kLoaded, 37, false,
                   "parse-roundtrip");
   }
@@ -165,6 +189,31 @@ void TestParse() {
                 SettingsLoadStatus::kCorrupt, 100, true, "parse-corrupt-null");
   CheckSettings(ParseAppSettings(QByteArrayLiteral("{\"volume\":50}")),
                 SettingsLoadStatus::kCorrupt, 100, true, "parse-missing-schema");
+  // T8.3：缓存键缺失/非法类型 → 默认；越界 → clamp 1–100GB。
+  CheckCache(ParseAppSettings(QByteArrayLiteral("{\"schema\":1}")),
+             QString(), 20, "parse-cache-missing-defaults");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral(
+          "{\"schema\":1,\"cache_root\":\"D:/缓存 根\",\"cache_quota_gb\":7}")),
+      QStringLiteral("D:/缓存 根"), 7, "parse-cache-roundtrip");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral(
+          "{\"schema\":1,\"cache_root\":42,\"cache_quota_gb\":\"big\"}")),
+      QString(), 20, "parse-cache-invalid-types-default");
+  CheckCache(ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"cache_quota_gb\":0}")),
+             QString(), 1, "parse-cache-quota-clamp-low");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"cache_quota_gb\":150}")),
+      QString(), 100, "parse-cache-quota-clamp-high");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"cache_quota_gb\":-1e300}")),
+      QString(), 1, "parse-cache-quota-clamp-huge-negative");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"cache_quota_gb\":99.6}")),
+      QString(), 100, "parse-cache-quota-round-up");
+  CheckCache(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"cache_quota_gb\":1.4}")),
+      QString(), 1, "parse-cache-quota-round-down");
   CheckSettings(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1.5,\"volume\":50}")),
       SettingsLoadStatus::kCorrupt, 100, true, "parse-fractional-schema");
@@ -208,6 +257,7 @@ void TestStore() {
         "store-save-under-limit");
   CheckSettings(store.Load(), SettingsLoadStatus::kLoaded, 37, false,
                 "store-roundtrip");
+  CheckCache(store.Load(), QString(), 20, "store-roundtrip-cache-defaults");
   // 原子写不应留下临时文件。
   const QStringList leftovers =
       QDir(root).entryList(QDir::Files | QDir::Hidden | QDir::System);
@@ -218,6 +268,34 @@ void TestStore() {
   Check(store.Save(AppSettings{90, true}), "store-overwrite-ok");
   CheckSettings(store.Load(), SettingsLoadStatus::kLoaded, 90, true,
                 "store-overwrite-roundtrip");
+
+  // T8.3：缓存根/配额跨会话（含中文路径）；v1 键仍各自生效。
+  AppSettings with_cache{55, false};
+  with_cache.cache_root = temp.path() + QStringLiteral("/缓存 根");
+  with_cache.cache_quota_gb = 33;
+  Check(store.Save(with_cache), "store-save-cache-keys");
+  const SettingsLoadResult cache_loaded = store.Load();
+  CheckSettings(cache_loaded, SettingsLoadStatus::kLoaded, 55, false,
+                "store-cache-keeps-v1-keys");
+  CheckCache(cache_loaded, with_cache.cache_root, 33, "store-cache-roundtrip");
+  // 写入前 clamp：150 → 100。
+  AppSettings clamped{10, true};
+  clamped.cache_quota_gb = 150;
+  Check(store.Save(clamped), "store-save-cache-clamp");
+  CheckCache(store.Load(), QString(), 100, "store-cache-clamp-high");
+
+  // T8.3：产品保存音量/波形时保留缓存键（MainWindow 走这个纯函数）。
+  AppSettings base{10, true};
+  base.cache_root = QStringLiteral("D:/自定义缓存 根");
+  base.cache_quota_gb = 42;
+  const AppSettings merged = MergeVolumeWaveform(base, 80, false);
+  Check(merged.volume == 80 && !merged.waveform_visible, "merge-volume-waveform");
+  CheckCache(SettingsLoadResult{merged, SettingsLoadStatus::kLoaded},
+             QStringLiteral("D:/自定义缓存 根"), 42, "merge-preserves-cache-keys");
+  const AppSettings merged_defaults = MergeVolumeWaveform(AppSettings{}, 300, true);
+  Check(merged_defaults.volume == 100, "merge-clamps-volume");
+  CheckCache(SettingsLoadResult{merged_defaults, SettingsLoadStatus::kLoaded},
+             QString(), 20, "merge-defaults-cache-keys");
 
   // 损坏文件：回退默认，文件保持原样（只有下一次保存才覆盖）。
   Check(WriteAll(store.file_path(), QByteArrayLiteral("{oops")), "store-write-corrupt");

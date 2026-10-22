@@ -63,6 +63,7 @@ target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 # T8.1 在线解析：BV/URL 归一化、匿名 view 元数据、错误映射、可注入 IHttpClient。
 # T8.2 补显式 SESSDATA、nav 自检、DPAPI 凭据；HTTP 实现仍是动态加载 WinHTTP，
 # 自检通过后 T8.16 再决定打包栈（libcurl 只在构建时可选）。
+# T8.3 补 CacheStore：缓存根/meta.json/.part→.mp4/配额 LRU/续传/清空；纯本地存储。
 add_library(lapian_online STATIC
   online/BiliAuth.cpp
   online/BiliAuth.h
@@ -70,6 +71,8 @@ add_library(lapian_online STATIC
   online/BiliResolver.h
   online/BiliResolveClient.cpp
   online/BiliResolveClient.h
+  online/CacheStore.cpp
+  online/CacheStore.h
   online/CredentialStore.cpp
   online/CredentialStore.h
   online/IHttpClient.h
@@ -175,6 +178,8 @@ qt_add_executable(lapian WIN32
   app/MemoryTestRunner.h
   app/OnlineAuthTestRunner.cpp
   app/OnlineAuthTestRunner.h
+  app/OnlineCacheTestRunner.cpp
+  app/OnlineCacheTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
   app/OnlineHttpSelfCheckRunner.h
   app/OnlineResolveDialog.cpp

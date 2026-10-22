@@ -85,6 +85,15 @@ add_test(NAME lapian_online_auth_test COMMAND lapian_online_auth_test)
 set_tests_properties(lapian_online_auth_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.3 缓存存储与配额：默认根/meta/.part→.mp4/续传/300MB LRU/当前保护/
+# 20GB 记账/损坏重建/清空保留记录/磁盘满预检/跨会话/长路径/无明文。纯本地存储。
+add_executable(lapian_online_cache_test online_cache_test.cpp)
+lapian_apply_common_options(lapian_online_cache_test)
+target_link_libraries(lapian_online_cache_test PRIVATE lapian_online lapian_settings)
+add_test(NAME lapian_online_cache_test COMMAND lapian_online_cache_test)
+set_tests_properties(lapian_online_cache_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)
