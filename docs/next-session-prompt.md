@@ -1,6 +1,6 @@
 # 给下个 agent 的新会话提示词（可直接复制）
 
-- **版本**：v24（2026-10-22；T7.8 已完成，HEAD `74a4f0b`；下一步 T7.7，V10 2h 仍待）
+- **版本**：v24（2026-10-22；T7.8 已完成，HEAD `74a4f0b` 文档 / `74609e1` 提示词；下一步 T7.7，V10 2h 仍待）
 - **用法**：复制下面 ```text 代码块整段发给新 agent；它仍应先读文件、跑 ctest，不要只信摘要。
 
 ```text
@@ -22,9 +22,9 @@
 
 第一步核对（不要相信旧对话转述）：
 1. git status --short；git log --oneline -6
-   预期 HEAD 为 74a4f0b（T7.8 文档），其前依次为 71ce5fb（thresholds 说明）、
-   756b4a7（build-release 收尾 exit 0）、892c5ac（T7.8 脚本/阈值/基线）；
-   工作区 clean。
+   预期 git log 包含 74a4f0b（T7.8 文档）与 74609e1（T7.8 提示词 v24），
+   其前依次为 71ce5fb（thresholds 说明）、756b4a7（build-release 收尾 exit 0）、
+   892c5ac（T7.8 脚本/阈值/基线）；若 HEAD 再前进，以 git log 为准；工作区 clean。
 2. 读 tasks.md 的 T7.8/T7.7/T7.3 行与 AGENTS.md 的“当前状态”。
 3. 跑 ctest（命令见下），确认 22/22。
 4. 确认 dist 25 文件 / 32.63MB；out\package 下有 setup 11.31MB、
@@ -171,7 +171,7 @@
 ## 使用说明
 
 - 新 agent 必须先读文件、跑 `ctest`，以 `git log`/`tasks.md` 为准，不要只信这段摘要。
-- 当前 HEAD `74a4f0b`（T7.8 文档）；T7.8 代码/基线 `892c5ac`，构建收尾
+- 当前 HEAD `74a4f0b`（T7.8 文档）/`74609e1`（提示词 v24）；T7.8 代码/基线 `892c5ac`，构建收尾
   `756b4a7`，thresholds 说明 `71ce5fb`。若 HEAD 已前进，以最新提交和
   `tasks.md` 为准。
 - T7.8 是开发机基准回归（热缓存、代理素材、非基线机）；T7.5 是合成/模拟证据；
