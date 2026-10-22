@@ -2,17 +2,18 @@
 
 > 给后续新开对话的 agent：先读本文件，再读 [spec.md](spec.md)、[plan.md](plan.md)、[tasks.md](tasks.md)。
 > 产品决策以 `spec.md` v0.3 为准；技术方案以 `plan.md` + ADR 为准；任务以 `tasks.md` 为准。
-> 最后更新：2026-10-22（v6.7：用户决定自用/内部预览，T7.7/P14 正式验收暂缓；构建/预检/包体冻结为 preview）
+> 最后更新：2026-10-23（v6.13：v2 在线 T8.2 HTTP 栈自检/凭据完成（WinHTTP nav `code=0/isLogin=true`，DPAPI/SESSDATA/DEC-3/脱敏）；T8.3 待开；v1 仍按内部预览收口，T7.7/P14 正式验收暂缓）
 
 ---
 
 ## 1. 当前状态
 
 - **项目**：拉片软件，Windows 桌面端的帧级参考片审阅器。
-- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；**T7.3 soak 监测代码完成（`188c63e`/`31d0d94`/`852b68a`）；90min 单文件连续播放 `pass=1`（WS 150.9→153.1，+2.1MB），1h 同文件子区间循环也 `pass=1`（156.0→159.9，+3.9MB，23 次 B→A）；152s 循环的 +18.2/+20.8MB 未复现；V10 2h 未做，P14 未通过。T7.4（`40bba7f`）4K 路径：proxy-V4 硬解一轮 P4/P6/P7/P8/P9/P11 达到 4K 放宽档（P7 p95 2ms 级但每约 20 步有 ~410ms 缓存重填尖峰；seek 后 PgUp 单样本 201–213ms 超限，T7.9 已修 4K）；软解 P6/P9 未过**；T7.5 错误与鲁棒性：`--robust-test` 75 项/0 失败（6.84s）、只读目录 ACL 17/17、7 类坏文件 ≤34ms、不可达 UNC 3.03s（修复前 21s）、288 字符长路径 sidecar/截图通过、设备丢失模拟恢复；T7.6 打包/关联/许可/体积：`scripts/package.ps1`/`installer.iss` 每用户安装（非管理员、`%LOCALAPPDATA%\Programs\拉片软件`）、ProgID/4 扩展名 OpenWithProgids（不设默认）、便携 zip 13.65MB/setup 11.31MB、卸载清理且保留 settings/marks/sidecar；T7.8 基准回归：`scripts\bench-regression.ps1` + 阈值/基线，8 套件；T7.9 收口 P7 seek→PgUp（`d1c7369`，60 项/0 失败、30/30 容差、27/30 严格 ±10%；4K 2s GOP spot 206→0.06ms；基线 `dev-2026-10-22-t7.9`）；`ctest` 22/22、`dist` 32.65MB/25 文件；**可达 SMB 共享、物理设备丢失、真实 V8 未验；F1-A1 仅本机热缓存预检；P1/P2 热缓存；1080p 旧 372ms 经查是 10s GOP 关键帧边界（不属 80ms），4K 2s GOP 已修至 0.06ms；T7.11 P7 跨 GOP 边界实测（修复前）：2s GOP p95 145.60ms、1s 92.65ms；T7.11.1（`7af822e`）已用延后回拷修复为 2s **64.13ms**、1s **27.11ms**、1080p60 HEVC 2s 67.31ms，连续后退 p95 0.03/0.06ms；全量 60 项/0 失败、30/30 容差；2s 余量 15.9ms，基线机待 T7.7**；V1–V8 真素材手测待补；T7.10 合成 V1–V10 片单已生成，合成 V10 2h soak `v10-synth` `pass=1`（WS 162.4→164.8MB、包络 0.16MB/h、handles 691→675、threads 56→50、frame_stall=0、underruns=0、ui_gap 212ms；替身 P14 稳定性，不是正式 P14）；T7.10 的 V1–V9 冒烟 18/18；**T7.7 执行清单与预检脚本已入库**（`docs/perf/T7.7-acceptance-checklist.md`、`scripts/t7.7-preflight.ps1`），当前 `verdict=blocked`（真实 V1–V10 0/10、非基线机、冷缓存/Explorer 未做），本机 P7 2s 复跑 65.33ms（余量 14.67ms）、1s 30.07ms（short_gop pass=1），仍不写 T7.7/P1–P14 通过。**2026-10-22 用户决定：手头没有真实 V1–V10/基线机，停止正式 T7.7/P14 验收，按“开发完成、资源阻塞、未验收”的内部预览收口；T7.7 保持 blocked，不标完成、不宣称通过。** 预览说明见 [docs/preview-release-2026-10-22.md](docs/preview-release-2026-10-22.md)。**新对话先读 [docs/handoff-2026-10-22-t7.7.md](docs/handoff-2026-10-22-t7.7.md)**。
+- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；**T7.3 soak 监测代码完成（`188c63e`/`31d0d94`/`852b68a`）；90min 单文件连续播放 `pass=1`（WS 150.9→153.1，+2.1MB），1h 同文件子区间循环也 `pass=1`（156.0→159.9，+3.9MB，23 次 B→A）；152s 循环的 +18.2/+20.8MB 未复现；V10 2h 未做，P14 未通过。T7.4（`40bba7f`）4K 路径：proxy-V4 硬解一轮 P4/P6/P7/P8/P9/P11 达到 4K 放宽档（P7 p95 2ms 级但每约 20 步有 ~410ms 缓存重填尖峰；seek 后 PgUp 单样本 201–213ms 超限，T7.9 已修 4K）；软解 P6/P9 未过**；T7.5 错误与鲁棒性：`--robust-test` 75 项/0 失败（6.84s）、只读目录 ACL 17/17、7 类坏文件 ≤34ms、不可达 UNC 3.03s（修复前 21s）、288 字符长路径 sidecar/截图通过、设备丢失模拟恢复；T7.6 打包/关联/许可/体积：`scripts/package.ps1`/`installer.iss` 每用户安装（非管理员、`%LOCALAPPDATA%\Programs\拉片软件`）、ProgID/4 扩展名 OpenWithProgids（不设默认）、便携 zip 13.65MB/setup 11.31MB、卸载清理且保留 settings/marks/sidecar；T7.8 基准回归：`scripts\bench-regression.ps1` + 阈值/基线，8 套件；T7.9 收口 P7 seek→PgUp（`d1c7369`，60 项/0 失败、30/30 容差、27/30 严格 ±10%；4K 2s GOP spot 206→0.06ms；基线 `dev-2026-10-22-t7.9`）；`ctest` 24/24、`dist` 32.89MB/25 文件；**可达 SMB 共享、物理设备丢失、真实 V8 未验；F1-A1 仅本机热缓存预检；P1/P2 热缓存；1080p 旧 372ms 经查是 10s GOP 关键帧边界（不属 80ms），4K 2s GOP 已修至 0.06ms；T7.11 P7 跨 GOP 边界实测（修复前）：2s GOP p95 145.60ms、1s 92.65ms；T7.11.1（`7af822e`）已用延后回拷修复为 2s **64.13ms**、1s **27.11ms**、1080p60 HEVC 2s 67.31ms，连续后退 p95 0.03/0.06ms；全量 60 项/0 失败、30/30 容差；2s 余量 15.9ms，基线机待 T7.7**；V1–V8 真素材手测待补；T7.10 合成 V1–V10 片单已生成，合成 V10 2h soak `v10-synth` `pass=1`（WS 162.4→164.8MB、包络 0.16MB/h、handles 691→675、threads 56→50、frame_stall=0、underruns=0、ui_gap 212ms；替身 P14 稳定性，不是正式 P14）；T7.10 的 V1–V9 冒烟 18/18；**T7.7 执行清单与预检脚本已入库**（`docs/perf/T7.7-acceptance-checklist.md`、`scripts/t7.7-preflight.ps1`），当前 `verdict=blocked`（真实 V1–V10 0/10、非基线机、冷缓存/Explorer 未做），本机 P7 2s 复跑 65.33ms（余量 14.67ms）、1s 30.07ms（short_gop pass=1），仍不写 T7.7/P1–P14 通过。**2026-10-22 用户决定：手头没有真实 V1–V10/基线机，停止正式 T7.7/P14 验收，按“开发完成、资源阻塞、未验收”的内部预览收口；T7.7 保持 blocked，不标完成、不宣称通过。** 预览说明见 [docs/preview-release-2026-10-22.md](docs/preview-release-2026-10-22.md)。**新对话先读 [docs/handoff-2026-10-22-t7.7.md](docs/handoff-2026-10-22-t7.7.md)**。
+- **v2 在线（S1/S2 完成；S3 定稿，T8.0/T8.1/T8.2 完成；B/DEC-1…5 已拍板；T8.3 待开）**：v2 做"输入 BV → 在线播放 → 逐帧研究"，保留本地模式。入口 [product-v2-vision.md](docs/product-v2-vision.md)、[ADR-007](docs/adr/ADR-007-bilibili-online.md)、[S2 spike 报告](docs/perf/v2-online-spike.md)、[S1/S2 交接](docs/handoff-2026-10-23-s1s2.md)、**[S3 增量规格](docs/spec-v1.0-delta.md)**、**[v2 任务](tasks-v2.md)**、[S3 交接](docs/handoff-2026-10-23-s3.md)、**[T8.1 证据](docs/perf/v2-online-resolve.md)**、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、**[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)**、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)。关键实测：普通用户登录只到 1080P30，1080P60/4K 不可得；可增长读层已验证；HTTP 栈必须自检（同一 Cookie：curl 通过、.NET -101，**T8.2 已用产品栈 WinHTTP 通过**）。**S3 未改 v1 冻结文件/产品代码；ADR-007 仅加“附条件接受”评审记录，D1–D5 未改。B 与 DEC-1…5 已全部拍板（M1→M2；5s/80ms/2.5s/100ms/80%；首次在线打开自检；横幅+角标；300MB+20GB 记账单测）；T8.1 解析层已完成（BV/URL→匿名 view→回显确认；156/0）；T8.2 已完成（WinHTTP nav 5 次 161–202ms、`cookie_sent=1`、`vip_status=0`；SESSDATA/DPAPI 凭据 UI、DEC-3 首次提交自检、日志脱敏、`--online-http-selfcheck`/`--online-auth-test`；ctest 24/24；libcurl 未构建）；T8.3 缓存/T8.5 取流未做。**
 - **规格**：[spec.md](spec.md) **v0.3**，首期唯一验收来源。
-- **规划**：[plan.md](plan.md) v0.2（技术方案）、[tasks.md](tasks.md) v0.27（已审核任务）、[docs/adr/](docs/adr/)（架构决策）、[docs/spec-v0.3-delta.md](docs/spec-v0.3-delta.md)（已并入 v0.3）、[spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)（方案 A）。
-- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.65MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/256MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）与 T7.3 长时浸泡监测（`--memory-mode soak`、`SoakStats` 5min 下包络、线程数/UI 心跳/看门狗、`scripts\soak-bench.ps1`；30min/1h 探针触发 `memory_growth`，V10 2h 未做）与 T7.4 4K 路径（前进顺序解码、4K 后退窗口 20 帧、`--drag-test`/`--force-software-decode`、4K proxy 硬解 P4/P6/P7/P8/P9/P11 达标）与 T7.5 错误与鲁棒性（`--robust-test`、网络路径 3s 有界预检、长路径 sidecar、只读 ACL 脚本、设备丢失模拟；75 项/0 失败）与 T7.6 打包/关联/许可/体积（`scripts\package.ps1`/`installer.iss`、每用户安装、ProgID/4 扩展名 OpenWithProgids、便携 zip、setup 11.31MB、卸载清理保留用户数据）与 T7.8 基准回归（`scripts\bench-regression.ps1`、`scripts\bench\thresholds.json`、`baseline-dev.json`，8 套件）；`ctest` **22/22**。
+- **规划**：[plan.md](plan.md) v0.2（v1 技术方案）+ **v2 增量章节**、[tasks.md](tasks.md) v0.28（v1 已收口）、**[tasks-v2.md](tasks-v2.md) v0.5（v2 任务）**、[docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)（v2 在线验收）、[docs/adr/](docs/adr/)（架构决策）、[docs/spec-v0.3-delta.md](docs/spec-v0.3-delta.md)（已并入 v0.3）、[spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)（方案 A）。
+- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.89MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/256MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）与 T7.3 长时浸泡监测（`--memory-mode soak`、`SoakStats` 5min 下包络、线程数/UI 心跳/看门狗、`scripts\soak-bench.ps1`；30min/1h 探针触发 `memory_growth`，V10 2h 未做）与 T7.4 4K 路径（前进顺序解码、4K 后退窗口 20 帧、`--drag-test`/`--force-software-decode`、4K proxy 硬解 P4/P6/P7/P8/P9/P11 达标）与 T7.5 错误与鲁棒性（`--robust-test`、网络路径 3s 有界预检、长路径 sidecar、只读 ACL 脚本、设备丢失模拟；75 项/0 失败）与 T7.6 打包/关联/许可/体积（`scripts\package.ps1`/`installer.iss`、每用户安装、ProgID/4 扩展名 OpenWithProgids、便携 zip、setup 11.31MB、卸载清理保留用户数据）与 T7.8 基准回归（`scripts\bench-regression.ps1`、`scripts\bench\thresholds.json`、`baseline-dev.json`，8 套件）；`ctest` **24/24**。
 - **本文件**：给新对话 agent 的项目上下文，不替代 spec 的验收条款。
 
 **规格与规划的差异**：`spec.md` v0.3 已应用；plan/tasks 已按 v0.3 同步。实现以 tasks.md 为准；后续只允许通过 spec 版本记录修正验收口径，不静默改。
@@ -23,7 +24,9 @@
 
 ## 2. 一句话产品
 
-把 AE 时间轴里“拖到某一帧、前后翻帧、对着音乐看节奏”这一小块能力抽出来，做成 Windows 上秒开、无项目、无联网的参考片审阅器。只读，不剪辑；帧是第一等时间单位。
+把 AE 时间轴里“拖到某一帧、前后翻帧、对着音乐看节奏”这一小块能力抽出来，做成 Windows 上秒开、零项目的参考片审阅器。只读，不剪辑；帧是第一等时间单位。
+
+它有两种模式：**本地模式（v1）**打开已有文件，运行期零网络请求；**在线模式（v2）**输入 BV 在线播放、边看边缓存，只处理公开免费内容与用户自带 Cookie，不绕过付费/DRM/地区限制。文档分层见 [docs/spec-versioning.md](docs/spec-versioning.md)。
 
 它不是“轻量版 AE”，也不是“普通播放器 + 逐帧快捷键”。差异化只可能来自三件事：
 
@@ -40,7 +43,8 @@
 | 平台 | Windows 10 21H2+ / Windows 11 x64；不做 macOS / Linux / 网页 / 移动 |
 | 技术栈 | C++20 + Qt 6 Widgets + FFmpeg LGPL 动态链接 + D3D11 + WASAPI（ADR-001/004） |
 | 当前阶段 | 实现阶段；M0 完成；M1–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5、T7.1–T7.9 代码/脚本完成；T7.3 90min 单文件 + 1h 子区间循环 pass，P14/V10 未通过；T7.4 4K proxy 硬解一轮达标（T7.9 已修 seek 后 PgUp）；T7.5 鲁棒性 75 项/只读 17 项通过（可达 SMB/物理设备丢失/真实 V8 未验）；T7.6 每用户安装/ProgID/便携 zip/卸载本机通过（F1-A1 未正式验收）；T7.8 基准回归 + T7.9 P7 收口：60 项/0 失败、30/30 容差内（P1/P2 热缓存）；T7.10 合成 V10 2h soak `pass=1`、V1–V9 冒烟 18/18；T7.11 修复前 P7 跨 GOP 边界 2s 145.60ms/1s 92.65ms；**T7.11.1（`7af822e`）延后回拷修复后 2s 64.13ms、1s 27.11ms、1080p60 HEVC 67.31ms，连续后退 p95 0.03/0.06ms；全量 60 项/0 失败、30/30 容差；2s 余量 15.9ms；T7.7 清单/预检脚本已入库，本机预检 blocked，P7 2s 复跑 65.33ms；基线机待复跑；2026-10-22 用户决定内部预览收口，正式验收暂缓** |
-| 规划/任务 | `plan.md` v0.2（技术方案）、`tasks.md` v0.27（T0.1–T7.11.1 + T7.7 清单）、`docs/adr/ADR-001`–`006` |
+| 规划/任务 | `plan.md` v0.2 + v2 章节 v0.3、`tasks.md` v0.28（v1 收口）、`tasks-v2.md` v0.5（v2）、`docs/adr/ADR-001`–`007` |
+| v2 在线 | S1/S2 完成；S3 定稿（T8.0/T8.1/T8.2 完成）；B/DEC-1…5 已拍板；ADR-007 附条件接受；普通用户登录只到 1080P30（1080P60/4K 不可得，**不进 MVP 验收**）；可增长读层单读者已验证、并发未验；HTTP 栈已自检：WinHTTP nav `code=0/isLogin=true`（161–202ms，普通用户），libcurl 未构建；SESSDATA/DPAPI/DEC-3/脱敏完成；T8.3 缓存/T8.5 取流待做 |
 | 帧号 | 0 基“显示帧序号”；CFR 精确；VFR 按显示帧计数并提示；等距帧格；`HH:MM:SS:FF` 时间码辅助 |
 | 保证档 | 1080p，H.264/H.265，8-bit SDR，≤60fps，MP4/MOV/MKV；保证档要求 D3D11 + 硬解 |
 | 可用档 | 4K ≤30fps；VP9/AV1/WebM 能播则播；H.265 4K60；长 GOP 帧精确但性能按可用档 |
@@ -141,7 +145,9 @@
 
 ---
 
-## 7. 明确不做（首期非目标）
+## 7. 明确不做
+
+> 本节原始版本是**首期（v1）非目标**。2026-10-23 起 v2 在线模式已开放“仅公开免费内容 + 用户自带 Cookie”的在线播放；弹幕/评论/账号体系/云端同步/批量抓取仍然不做（见 §1 v2 条目、[product-v2-vision.md](docs/product-v2-vision.md)、[spec-versioning.md](docs/spec-versioning.md)）。
 
 **创作与输出**
 
@@ -150,8 +156,8 @@
 
 **获取与联网**
 
-- B 站或任何联网获取、账号、弹幕、评论。
-- 云端同步、账号体系。
+- 弹幕、评论、账号体系、云端同步、批量抓取/收藏夹下载 —— 仍然不做。
+- v2 已开放：B 站公开免费内容的在线播放 + 自动缓存（可选用户自带 Cookie）；**不做付费/DRM/地区限制绕过，不再分发**。
 
 **分析与取色**
 
@@ -250,7 +256,7 @@
 
 ## 11. 与 agent 的协作规则
 
-1. **先读本文件、`spec.md`、`plan.md`、`tasks.md` 与 ADR**；确认 spec 是 v0.3、tasks 已同步；不要凭记忆回答项目决策。
+1. **先读本文件、`spec.md`、`plan.md`、`tasks.md` 与 ADR**；确认 spec 是 v0.3、tasks 已同步；不要凭记忆回答项目决策。**v2 会话另读 [docs/spec-versioning.md](docs/spec-versioning.md) 与 [docs/handoff-2026-10-23-s1s2.md](docs/handoff-2026-10-23-s1s2.md)；v2 任务以 `tasks-v2.md` 为准。**
 2. **`spec.md` v0.3 是验收基础**；历史回补与 P6/P7 方案 A 已并入。冲突时先指出，按 §9 版本记录处理，不静默选。
 3. **不重开 §6 已拍板项。** 用户要改时，先列出受影响的验收条款，再等确认；不要直接改。
 4. **不自行加需求。** 新想法先放候选池，一句话价值 + 触发条件，不写验收；优先级不明标“待定”。
@@ -272,8 +278,8 @@
 | 文档 | 版本 | 日期 | 状态 |
 |---|---|---|---|
 | `spec.md` | v0.3 | 2026-10-19 | 首期范围冻结；已应用回补 + P6/P7 方案 A |
-| `AGENTS.md` | v6.7 | 2026-10-22 | 项目上下文；T7.7 验收清单/预检脚本、内部预览收口；正式 T7.7/P14 暂缓，不宣称通过 |
-| `plan.md` | v0.2 | 2026-10-19 | 技术规划；已同步 v0.3 |
+| `AGENTS.md` | v6.13 | 2026-10-23 | 项目上下文；v2 在线 S1/S2 完成、S3 定稿（T8.0/T8.1/T8.2 完成）、B/DEC-1…5 已拍板、ADR-007 附条件接受；v1 仍内部预览收口、T7.7/P14 正式验收暂缓 |
+| `plan.md` | v0.2 + v2 章节 v0.3 | 2026-10-19 / 2026-10-23 | v1 技术规划（已同步 v0.3）+ v2 在线增量章节（定稿） |
 | `tasks.md` | v0.28 | 2026-10-22 | 任务清单；T7.7 清单/预检、内部预览收口；正式 T7.7/P14 暂缓 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
 | `docs/spec-v0.3-p6p7-proposal.md` | v1.0 | 2026-10-19 | P6/P7 方案 A 提案，已拍板并应用 |
@@ -314,7 +320,7 @@
 | `docs/handoff-2026-10-22-t7.10.md` | v1 | 2026-10-22 | 历史交接：合成 V1–V10 片单、V10 soak 启动/采样；收口见 T7.11 |
 | `docs/handoff-2026-10-22-t7.11.md` | v1 | 2026-10-22 | 历史交接：合成 V10 soak 收口、V1–V9 冒烟、P7 跨 GOP 边界专项未过；已由 T7.11.1 修复 |
 | `docs/handoff-2026-10-22-t7.11.1.md` | v1 | 2026-10-22 | 历史交接：P7 跨 GOP 边界延后回拷修复、2s 64.13ms/1s 27.11ms、全量 60/0；T7.7/正式 V10 待 |
-| `docs/handoff-2026-10-22-t7.7.md` | v1 | 2026-10-22 | **当前交接**：T7.7 验收清单/预检脚本、本机 precheck blocked、P7 2s 复跑 65.33ms；真实片单/基线机/冷缓存待 |
+| `docs/handoff-2026-10-22-t7.7.md` | v1 | 2026-10-22 | v1 交接（本地模式）：T7.7 验收清单/预检脚本、本机 precheck blocked、P7 2s 复跑 65.33ms；真实片单/基线机/冷缓存待 |
 | `docs/perf/T7.7-acceptance-checklist.md` | v1 | 2026-10-22 | T7.7 F1–F8/P1–P14 执行清单、命令/素材/证据/口径、当前阻塞 |
 | `docs/perf/T7.5-robustness.md` | v1 | 2026-10-22 | T7.5 坏文件/网络/长路径/只读 ACL/设备丢失/回归与缺口 |
 | `docs/perf/T7.6-packaging.md` | v1 | 2026-10-22 | T7.6 体积/安装/关联/卸载/启动/零网络与限制 |
@@ -360,6 +366,19 @@
 | `docs/perf/T7.2.1-loop-renderer.md` | v1 | 2026-10-20 | T7.2.1 B=末帧循环根因/数字、1080p 1088 纹理与渲染尺寸、回归与缺口 |
 | `docs/perf/T7.3-soak.md` | v1 | 2026-10-22 | T7.3 循环/单文件 soak、WS 漂移、90min+1h pass、下包络判定与缺口 |
 | `docs/perf/T7.4-4k.md` | v1 | 2026-10-22 | T7.4 4K proxy 拖动/松手/步进/长按/跳转/内存、硬解与软解、P7 尖峰与缺口 |
+| `docs/product-v2-vision.md` | v1.0 | 2026-10-22 | v2 产品愿景；S1 五个决定（在线语义/Cookie/清晰度缓存/合规边界/成功指标） |
+| `docs/adr/ADR-007-bilibili-online.md` | v0.1 | 2026-10-22 / 2026-10-23 | v2 在线取流/缓存/可增长读层/DASH 双输入；**附条件接受**（T8.2/T8.4 回填；D1–D5 未改） |
+| `docs/perf/v2-online-spike.md` | v0.2 | 2026-10-23 | S2 测量：档位矩阵（匿名 + 普通用户）、Range/吞吐、可增长读层/取消、失败码、go/no-go |
+| `docs/handoff-2026-10-23-s1s2.md` | v1 | 2026-10-23 | S1/S2 交接：五决定、硬事实、未验证项、S3 拍板点与提示词 |
+| `docs/spec-versioning.md` | v1.0 | 2026-10-23 | 文档分层与版本规则：v1 冻结 / v2 增量 / 完整品定义 / 任务分家（tasks-v2.md） |
+| `docs/spec-v1.0-delta.md` | v0.3 | 2026-10-23 | v2 在线模式增量验收：O1–O11、OP1–OP10、缓存/错误/隐私、OB 片单、B 大会员条件验收、DEC-1…DEC-5 已拍板；未并入 spec.md |
+| `tasks-v2.md` | v0.5 | 2026-10-23 | v2 任务：T8.0/T8.1/T8.2 完成；M1 `durl` 720p（T8.1–T8.8）→ M2 DASH 1080p（T8.9–T8.16）；T8.15 B 大会员条件验收 |
+| `docs/handoff-2026-10-23-s3.md` | v1.2 | 2026-10-23 | S3 交接：T8.0 完成、DEC/B 拍板结果、ADR 附条件接受、S4 从 T8.1 开始 |
+| `docs/perf/v2-online-resolve.md` | v1.0 | 2026-10-23 | T8.1 解析层证据：BV/URL、匿名 view、分P、错误矩阵、取消/超时、本地回归、dist 导入表 |
+| `docs/handoff-2026-10-23-t8.1.md` | v1 | 2026-10-23 | 历史交接：T8.1 接口、156 项探针、缺口、T8.2 所需账号/网络/curl 对照 |
+| `docs/perf/v2-online-http-selfcheck.md` | v1.0 | 2026-10-23 | **当前证据**：T8.2 HTTP 栈自检/凭据/DPAPI/DEC-3/脱敏；门 WinHTTP nav 通过（161–202ms、`cookie_sent=1`） |
+| `docs/handoff-2026-10-23-t8.2.md` | v1 | 2026-10-23 | **当前交接**：T8.2 接口、104/0 单测、54/0 产品探针、缺口、T8.3/T8.5 需要 |
+| `docs/next-session-prompt-t8.2.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.2 提示词（HTTP 栈自检、SESSDATA/DPAPI、DEC-3、日志脱敏、门/停止条件） |
 
 **变更记录**
 
@@ -435,8 +454,21 @@
 
 - 2026-10-22：完成 T7.7 验收清单与预检脚本（`docs/perf/T7.7-acceptance-checklist.md`、`scripts/t7.7-preflight.ps1`）。本机预检 `verdict=blocked`：真实 V1–V10 0/10、非基线机（6C/12T/31.6GB/RTX 4060）、关联未安装、冷缓存/Explorer 未做；合成片单 9/9 + V8 5/5 `OK=0`；`ctest` 22/22、`dist` 32.65MB/25、setup 11.31MB、zip 13.66MB。P7 2s 复跑 p95 **65.33ms**（0/20 超 80，余量 14.67ms）、1s **30.07ms**（`short_gop pass=1`，脚本 N/A）。**不是 T7.7 通过；基线机必须复跑**。证据 [T7.7 交接](docs/handoff-2026-10-22-t7.7.md)、[清单](docs/perf/T7.7-acceptance-checklist.md)。P7 边界已在开发机修复（T7.11.1：2s 64.13ms/1s 27.11ms，余量 15.9ms），但必须在基线机复跑并记录 iGPU 下 `extra_hw_frames=32` 的 P10/P11；若基线机超 80ms，按 T7.11.1 证据评估空闲预解/批量回拷，不改阈值。T7.3 合成 V10 2h `pass=1` 只算替身，正式 P14 仍需真实 V10；T7.9 的普通 seek 后 PgUp 0.06ms 不等于跨 GOP 边界专项。不要把 90min 当 2h，也不要因为单文件/循环/合成 soak 都通过就写 P14 通过；不要把 T7.4 的 4K proxy 当正式 V4；不要把 T7.5 的合成坏文件/模拟设备丢失当成 V8 实物与物理设备验收；不要把 T7.6 的热缓存预检当成 F1-A1 通过；不要把 T7.8 的热缓存 P1/P2 当成冷启动验收。
 
+- 2026-10-23：完成 v2 在线 S1 产品定义 + S2 可行性验证（未改产品代码/spec/tasks）。S1 五个决定：无下载步骤+自动缓存可清、自带 Cookie、保帧率优先+20GB LRU、不绕过+凭据内最高档、任务完成率为主指标。S2 实测：匿名 DASH 恒 480p30；普通用户登录 DASH 1080P30（3/3）、durl 1080p 仅 1/3、1080P60/4K 不可得；1080p AVC 2.1–2.6Mbps；起播阈值 0.16–0.3MB；可增长读层（阻塞读/取消 3–15ms）已验证；同一 Cookie curl 通过而 .NET 一律 -101。产出 [vision](docs/product-v2-vision.md)、[ADR-007](docs/adr/ADR-007-bilibili-online.md)、[spike 报告](docs/perf/v2-online-spike.md)、[S1/S2 交接](docs/handoff-2026-10-23-s1s2.md)。S3 待开（只写文档）。本文件升至 v6.8。
+
+- 2026-10-23：完成 v2 在线 S3 规格与计划草案（未写产品代码、未改 v1 冻结文件/ADR 结论）。产出 [spec-v1.0-delta.md](docs/spec-v1.0-delta.md)（O1–O10、OP1–OP8、缓存/错误/隐私、OB 片单、DEC-1…DEC-5）、[plan.md](plan.md) v2 章节（组件/线程/可增长读层/DASH 双输入/风险 R19–R34/两周计划）、[tasks-v2.md](tasks-v2.md)（T8.0–T8.16，M1 durl 720p → M2 DASH 1080p，每项含依赖/验收/证据）、[S3 交接](docs/handoff-2026-10-23-s3.md)。明确 4K/1080P60 不进 MVP 验收；M1/M2 顺序、在线数字、登录自检时机、60fps 提示形态、配额验收方式留用户拍板。本文件升至 v6.9。
+
+- 2026-10-23：用户拍板 **B（大会员档条件验收）**。大会员 1080P60/4K SDR 做独立“可用档”条件验收：1080P60 若 AVC 可自动、HEVC-only 手动；4K 只手动；无大会员账号则 T8.15“未验证”；**不进 M1/M2 门**，不承诺 4K P7/P9/颜色/HDR。delta 升 v0.2（O11、OP9/OP10）、tasks-v2 升 v0.2（T8.15 升级）、plan v2 章节升 v0.2、S3 交接升 v1.1。DEC-1…DEC-5 仍待拍板。本文件升至 v6.10。
+
+- 2026-10-23：完成 **T8.0（S3 收口）**，用户“全部按建议”拍板 DEC-1…5：M1→M2；起播 p95 ≤5s/已缓存 P7 ≤80ms/缓存命中 ≤2.5s/未缓存提示取消 ≤100ms/任务完成率 ≥80%；首次在线打开自检；60fps 横幅+常驻角标；300MB 自动 + 20GB 记账单测。ADR-007 **附条件接受**（T8.2/T8.4 回填；D1–D5 未改）。delta/tasks/plan v2 章节升 v0.3，S3 交接升 v1.2；S4 从 T8.1 开始。本文件升至 v6.11。
+
+- 2026-10-23：完成 **T8.1 解析层**：BV/URL 归一化与本地校验、匿名 `view` 元数据、分P（默认 P1、`?p=`、切P）、错误映射、Ctrl+U 回显确认对话框、`--online-resolve-test`、`lapian_online_resolve_test`。ctest 23/23；产品探针 156/0（dist 同为 156/0）；本地非法 9 类 0ms/0 请求；取消 fake ≤5ms/关窗 ≤7ms、真实 WinHTTP 取消 15ms；P1 277.78ms/P2 334.30ms/P7 2s 67.37ms；dist 32.81MB/25 文件、无 `WINHTTP.DLL` 导入。T8.2/T8.5/缓存/播放未做。证据 [v2-online-resolve.md](docs/perf/v2-online-resolve.md)、交接 [T8.1](docs/handoff-2026-10-23-t8.1.md)；tasks-v2 升 v0.4。本文件升至 v6.12。
+- 2026-10-23：完成 **T8.2 HTTP 栈自检/凭据**：WinHTTP 产品栈 nav `code=0/isLogin=true`（普通用户，5 次 161–202ms，`cookie_sent=1`，`vip_status=0`）；`HttpRequest::sessdata` 只发 `api.bilibili.com:443`、禁 cookie jar/重定向；SESSDATA/DPAPI 凭据 UI、DEC-3 首次提交自检、`-101`/412/429/超时映射、日志脱敏；`--online-http-selfcheck`、`--online-auth-test`、`lapian_online_auth_test`（104/0）。ctest 24/24；产品探针 54/0；T8.1 156/0（dist 同）；本地 P1 267.83ms/P2 324.17ms/P7 2s p95 66.64ms；dist 32.89MB/25 文件；check-imports 无 WinHTTP/TLS/QtNetwork；libcurl 未构建。证据 [v2-online-http-selfcheck.md](docs/perf/v2-online-http-selfcheck.md)、交接 [T8.2](docs/handoff-2026-10-23-t8.2.md)；tasks-v2 升 v0.5。本文件升至 v6.13。
+
 ---
 
 ## 13. 新对话开场（可直接复制）
 
 > 完整提示词见 [docs/next-session-prompt.md](docs/next-session-prompt.md)。核心：先读 `AGENTS.md`、`docs/handoff-2026-10-22-t7.7.md`、`docs/preview-release-2026-10-22.md`、`docs/perf/T7.7-acceptance-checklist.md`、`spec.md`、`plan.md`、`tasks.md`、ADR-001–006；T7.7 清单/预检脚本已入库，本机 `verdict=blocked`，P7 2s 复跑 65.33ms；**用户已决定内部预览收口，除非资源到位，不要追正式 T7.7/P14，也不要宣称通过**；以 `git log`/`ctest` 为准，不要重做 T1–T7.11.1（T7.11.1 已修复 P7 边界：2s 64.13ms、1s 27.11ms、1080p60 HEVC 67.31ms）；T7.7 仍需真实 V1–V10、基线机、冷缓存 F1-A1、Explorer 真双击，正式 P14 仍需真实 V10；4K 仍 proxy；T7.5/T7.6 缺口照旧；只做 F1–F8/P1–P14，spec v0.3 冻结；每任务保持 build/ctest/dist 通过并补交接/证据。
+>
+> **v2（在线）走另一条线**：S1/S2 已完成、S3 定稿（T8.0/T8.1/T8.2 完成）；DEC/B 已拍板、ADR-007 附条件接受；T8.1/T8.2 完成，下一步 T8.3（缓存），见 [docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)、[plan.md](plan.md) v2 章节、[tasks-v2.md](tasks-v2.md)、[S3 交接](docs/handoff-2026-10-23-s3.md)、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)。不要用本节的 v1 提示词去做 v2。

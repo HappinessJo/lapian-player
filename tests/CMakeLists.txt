@@ -67,6 +67,24 @@ add_test(NAME lapian_path_probe_test COMMAND lapian_path_probe_test)
 set_tests_properties(lapian_path_probe_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.1 在线解析：BV/URL 归一化、view JSON、错误码、非法 0 请求、取消；
+# WinHttpClient 用本机慢服务器验证成功/超时/取消 ≤100ms/无 Cookie 头。
+add_executable(lapian_online_resolve_test online_resolve_test.cpp)
+lapian_apply_common_options(lapian_online_resolve_test)
+target_link_libraries(lapian_online_resolve_test PRIVATE lapian_online ws2_32)
+add_test(NAME lapian_online_resolve_test COMMAND lapian_online_resolve_test)
+set_tests_properties(lapian_online_resolve_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+# T8.2 凭据/nav：DPAPI 往返/无明文/损坏回退/清除、SESSDATA 校验、
+# nav 成功/-101/412/429/超时/取消/脱敏、Cookie 只允许 API host。
+add_executable(lapian_online_auth_test online_auth_test.cpp)
+lapian_apply_common_options(lapian_online_auth_test)
+target_link_libraries(lapian_online_auth_test PRIVATE lapian_online)
+add_test(NAME lapian_online_auth_test COMMAND lapian_online_auth_test)
+set_tests_properties(lapian_online_auth_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

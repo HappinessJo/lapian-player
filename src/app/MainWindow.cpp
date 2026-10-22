@@ -57,6 +57,7 @@ extern "C" {
 #include "app/GfxWidget.h"
 #include "app/InfoBar.h"
 #include "app/MarkPanel.h"
+#include "app/OnlineResolveDialog.h"
 #include "app/PlaybackController.h"
 #include "app/SnapshotImage.h"
 #include "app/SnapshotService.h"
@@ -159,6 +160,13 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   open_action_->setShortcut(QKeySequence::Open);
   connect(open_action_, &QAction::triggered, this, &MainWindow::OpenDialog);
   addAction(open_action_);
+
+  // T8.1：在线解析入口。只在用户按 Ctrl+U 后创建对话框/联网；本地启动不碰网络层。
+  online_action_ = new QAction(QStringLiteral("在线打开..."), this);
+  online_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+U")));
+  online_action_->setShortcutContext(Qt::WindowShortcut);
+  connect(online_action_, &QAction::triggered, this, &MainWindow::OpenOnlineDialog);
+  addAction(online_action_);
 
   play_action_ = new QAction(QStringLiteral("播放"), this);
   play_action_->setShortcut(Qt::Key_Space);
@@ -1049,7 +1057,8 @@ void MainWindow::ShowEmptyState() {
   current_frame_ = 0;
   setWindowTitle(QStringLiteral("拉片软件"));
   status_label_->setText(base_info_ + QStringLiteral(" · 未打开文件"));
-  statusBar()->showMessage(QStringLiteral("将视频拖到这里，或按 Ctrl+O 打开"));
+  statusBar()->showMessage(
+      QStringLiteral("将视频拖到这里，或按 Ctrl+O 打开；在线按 Ctrl+U 输入 BV 号"));
 }
 
 void MainWindow::OpenDialog() {
@@ -1067,6 +1076,33 @@ void MainWindow::OpenDialog() {
   if (!path.isEmpty()) {
     OpenFile(path);
   }
+}
+
+void MainWindow::OpenOnlineDialog() {
+  if (IsTextInputFocused()) {
+    return;
+  }
+  ShowOnlineDialog();
+}
+
+void MainWindow::OpenOnlineDialogForTest() { ShowOnlineDialog(); }
+
+void MainWindow::ShowOnlineDialog() {
+  if (online_dialog_ == nullptr) {
+    online_dialog_ = new OnlineResolveDialog(this);
+    connect(online_dialog_, &OnlineResolveDialog::confirmed, this,
+            [this](const QString& bvid, qint64 cid, int page) {
+              statusBar()->showMessage(
+                  QStringLiteral("已确认在线视频：%1 · P%2 · cid %3（取流将在 T8.5 接入）")
+                      .arg(bvid)
+                      .arg(page)
+                      .arg(cid),
+                  8000);
+            });
+  }
+  online_dialog_->show();
+  online_dialog_->raise();
+  online_dialog_->activateWindow();
 }
 
 void MainWindow::OpenFile(const QString& path) {
@@ -2709,6 +2745,7 @@ QString MainWindow::ShortcutMapForTest() const {
     }
   };
   add("open", open_action_);
+  add("online", online_action_);
   add("play", play_action_);
   add("goto", goto_action_);
   // T6.2：'+'/'-' 由窗口级事件过滤器处理，不经过 QAction 快捷键。
@@ -3011,6 +3048,10 @@ void MainWindow::ShowOpenError(const QString& message) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+  // T8.1：在线解析中关窗必须取消并 join 工作线程，不能把请求/线程留给析构。
+  if (online_dialog_ != nullptr) {
+    online_dialog_->Shutdown();
+  }
   // T6.3：先把音量/波形落盘；它独立于截图/标记的等待链，失败也不阻止关窗。
   FlushSettings();
   CancelPendingMarkJump();

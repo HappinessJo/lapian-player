@@ -23,3 +23,6 @@ desktop.ini
 
 # 日志
 *.log
+
+# 本地凭据（S2 spike 用，绝不入库）
+/.secrets/

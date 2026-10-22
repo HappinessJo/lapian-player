@@ -33,6 +33,7 @@ class QTimer;
 class GfxWidget;
 class InfoBar;
 class MarkPanel;
+class OnlineResolveDialog;
 class PlaybackController;
 class SnapshotService;
 class TimelineWidget;
@@ -62,6 +63,10 @@ class MainWindow : public QMainWindow {
   explicit MainWindow(QWidget* parent = nullptr,
                       const QString& settings_root = QString());
   ~MainWindow() override;
+
+  // T8.1 在线解析：Ctrl+U 打开的模型对话框；测试入口走同一路径。
+  void OpenOnlineDialogForTest();
+  OnlineResolveDialog* OnlineDialogForTest() const { return online_dialog_; }
 
   // 打开本地文件；成功才替换当前会话，失败保留旧画面。
   void OpenFile(const QString& path);
@@ -244,6 +249,7 @@ class MainWindow : public QMainWindow {
 
  private slots:
   void OpenDialog();
+  void OpenOnlineDialog();
   void ShowGotoDialog();
   void StepBackward();
   void StepForward();
@@ -275,6 +281,7 @@ class MainWindow : public QMainWindow {
 
  private:
   void ShowEmptyState();
+  void ShowOnlineDialog();
   void GoToFrameInternal(std::int64_t frame, lapian::media::FrameCacheMode mode);
   void GoToFrameForStep(std::int64_t frame, bool backward);
   // T7.11.1：把待回拷的后退窗口按块写进 FrameCache（每块 4 帧，0ms 定时器）。
@@ -349,6 +356,7 @@ class MainWindow : public QMainWindow {
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   MarkPanel* mark_panel_ = nullptr;
+  OnlineResolveDialog* online_dialog_ = nullptr;
   QLabel* status_label_ = nullptr;
   QLabel* audio_label_ = nullptr;
   QLabel* speed_label_ = nullptr;
@@ -361,6 +369,7 @@ class MainWindow : public QMainWindow {
   QAction* faster_action_ = nullptr;
   QTimer* audio_status_timer_ = nullptr;
   QAction* open_action_ = nullptr;
+  QAction* online_action_ = nullptr;
   QAction* play_action_ = nullptr;
   QAction* prev_action_ = nullptr;
   QAction* next_action_ = nullptr;

@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -40,9 +41,67 @@
 #include "app/GopBoundaryTestRunner.h"
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
+#include "app/OnlineAuthTestRunner.h"
+#include "app/OnlineHttpSelfCheckRunner.h"
+#include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
 
+namespace {
+
+bool HasArgument(int argc, char* argv[], const char* flag) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], flag) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
+  // T8.2：无 GUI 的 HTTP 栈自检必须在创建 QApplication/MainWindow 之前分流，
+  // 否则会初始化窗口/网络外的东西，违背“无 GUI、本地启动不联网”的自检语义。
+  if (HasArgument(argc, argv, "--online-http-selfcheck")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineHttpSelfCheckOptions options;
+    const QStringList selfcheck_args = QCoreApplication::arguments();
+    for (int i = 1; i < selfcheck_args.size(); ++i) {
+      const QString& arg = selfcheck_args[i];
+      if (arg == QStringLiteral("--http-stack") && i + 1 < selfcheck_args.size()) {
+        options.stack = selfcheck_args[++i];
+      } else if (arg.startsWith(QStringLiteral("--http-stack="))) {
+        options.stack = arg.mid(static_cast<int>(std::strlen("--http-stack=")));
+      } else if (arg == QStringLiteral("--sessdata-file") &&
+                 i + 1 < selfcheck_args.size()) {
+        options.sessdata_file = selfcheck_args[++i];
+      } else if (arg.startsWith(QStringLiteral("--sessdata-file="))) {
+        options.sessdata_file =
+            arg.mid(static_cast<int>(std::strlen("--sessdata-file=")));
+      } else if (arg == QStringLiteral("--timeout-ms") &&
+                 i + 1 < selfcheck_args.size()) {
+        options.timeout_ms = selfcheck_args[++i].toInt();
+      } else if (arg.startsWith(QStringLiteral("--timeout-ms="))) {
+        options.timeout_ms =
+            arg.mid(static_cast<int>(std::strlen("--timeout-ms="))).toInt();
+      } else if (arg == QStringLiteral("--verbose")) {
+        options.verbose = true;
+      }
+    }
+    if (options.timeout_ms < 200) {
+      options.timeout_ms = 200;
+    }
+    if (options.timeout_ms > 10000) {
+      options.timeout_ms = 10000;
+    }
+    return lapian::app::RunOnlineHttpSelfCheck(options);
+  }
+
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。
   const auto startup_process_start = std::chrono::steady_clock::now();
   QApplication app(argc, argv);
@@ -98,6 +157,10 @@ int main(int argc, char* argv[]) {
   QString gop_boundary_tag;
   // T7.5：错误与鲁棒性探针。
   bool robust_test = false;
+  // T8.1：在线解析层探针（OB-1/2/3、OB-5、多P、取消/关窗）。
+  bool online_resolve_test = false;
+  // T8.2：产品路径登录自检探针（凭据 UI、DEC-3 时机、-101/超时/取消）。
+  bool online_auth_test = false;
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -209,6 +272,10 @@ int main(int argc, char* argv[]) {
       gop_boundary_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--robust-test")) {
       robust_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-resolve-test")) {
+      online_resolve_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-auth-test")) {
+      online_auth_test = true;
     } else if (arguments[i] == QStringLiteral("--robust-media") &&
                i + 1 < arguments.size()) {
       robust_media = arguments[++i];
@@ -364,6 +431,11 @@ int main(int argc, char* argv[]) {
     qputenv("LAPIAN_MARK_LOG", "1");
   }
 
+  // T8.1：在线解析探针打开请求日志；产品默认不打印请求细节。
+  if (online_resolve_test) {
+    qputenv("LAPIAN_ONLINE_LOG", "1");
+  }
+
   // T7.1：冷启动埋点。--startup-test 自动开日志；单独设置 LAPIAN_STARTUP_LOG=1
   // 也能在不退出程序的情况下观察分段耗时。
   if (startup_test) {
@@ -386,6 +458,16 @@ int main(int argc, char* argv[]) {
     log_startup_at(stage, std::chrono::steady_clock::now());
   };
   log_startup_at("app_created", app_created_at);
+
+  // T8.2：产品路径登录探针用独立 APPDATA，避免读到本机真实凭据；
+  // 该探针只使用 fake HTTP，不访问网络。
+  if (online_auth_test) {
+    const QString auth_probe_root =
+        QDir::currentPath() + QStringLiteral("/build/t8.2-auth-probe/appdata");
+    QDir(auth_probe_root).removeRecursively();
+    QDir().mkpath(auth_probe_root);
+    qputenv("APPDATA", auth_probe_root.toUtf8());
+  }
 
   const auto process_start = std::chrono::steady_clock::now();
   MainWindow window(nullptr, settings_root);
@@ -482,6 +564,22 @@ int main(int argc, char* argv[]) {
     robust_runner =
         std::make_unique<lapian::app::RobustTestRunner>(&window, options);
     robust_runner->Start();
+  }
+
+  // T8.1：在线解析探针。
+  std::unique_ptr<lapian::app::OnlineResolveTestRunner> online_resolve_runner;
+  if (online_resolve_test) {
+    online_resolve_runner =
+        std::make_unique<lapian::app::OnlineResolveTestRunner>(&window);
+    online_resolve_runner->Start();
+  }
+
+  // T8.2：凭据 UI / DEC-3 时机 / nav 失败继续匿名。
+  std::unique_ptr<lapian::app::OnlineAuthTestRunner> online_auth_runner;
+  if (online_auth_test) {
+    online_auth_runner =
+        std::make_unique<lapian::app::OnlineAuthTestRunner>(&window);
+    online_auth_runner->Start();
   }
 
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。

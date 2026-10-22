@@ -60,6 +60,26 @@ lapian_apply_common_options(lapian_settings)
 target_include_directories(lapian_settings PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 
+# T8.1 在线解析：BV/URL 归一化、匿名 view 元数据、错误映射、可注入 IHttpClient。
+# T8.2 补显式 SESSDATA、nav 自检、DPAPI 凭据；HTTP 实现仍是动态加载 WinHTTP，
+# 自检通过后 T8.16 再决定打包栈（libcurl 只在构建时可选）。
+add_library(lapian_online STATIC
+  online/BiliAuth.cpp
+  online/BiliAuth.h
+  online/BiliResolver.cpp
+  online/BiliResolver.h
+  online/BiliResolveClient.cpp
+  online/BiliResolveClient.h
+  online/CredentialStore.cpp
+  online/CredentialStore.h
+  online/IHttpClient.h
+  online/Sessdata.h
+  online/WinHttpClient.cpp
+  online/WinHttpClient.h)
+lapian_apply_common_options(lapian_online)
+target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lapian_online PUBLIC Qt6::Core PRIVATE crypt32)
+
 # T7.3 长时浸泡：采样趋势/阈值判定，纯 C++，产品与单测共用。
 add_library(lapian_soak STATIC
   app/SoakStats.cpp
@@ -153,6 +173,14 @@ qt_add_executable(lapian WIN32
   app/GopBoundaryTestRunner.h
   app/MemoryTestRunner.cpp
   app/MemoryTestRunner.h
+  app/OnlineAuthTestRunner.cpp
+  app/OnlineAuthTestRunner.h
+  app/OnlineHttpSelfCheckRunner.cpp
+  app/OnlineHttpSelfCheckRunner.h
+  app/OnlineResolveDialog.cpp
+  app/OnlineResolveDialog.h
+  app/OnlineResolveTestRunner.cpp
+  app/OnlineResolveTestRunner.h
   app/RobustTestRunner.cpp
   app/RobustTestRunner.h
   app/PlaybackController.cpp
@@ -167,7 +195,7 @@ target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
                                      lapian_timeline lapian_audio lapian_marks
                                      lapian_mark_ui lapian_snapshot lapian_settings
-                                     lapian_soak
+                                     lapian_soak lapian_online
                                      lapian::ffmpeg
                                      Qt6::Widgets windowscodecs ole32 psapi)
 lapian_copy_ffmpeg_dlls(lapian)
