@@ -1,6 +1,6 @@
 # 给下个 agent 的新会话提示词（可直接复制）
 
-- **版本**：v23（2026-10-22；T7.8 已完成，基线 `892c5ac`；下一步 T7.7，V10 2h 仍待）
+- **版本**：v24（2026-10-22；T7.8 已完成，HEAD `74a4f0b`；下一步 T7.7，V10 2h 仍待）
 - **用法**：复制下面 ```text 代码块整段发给新 agent；它仍应先读文件、跑 ctest，不要只信摘要。
 
 ```text
@@ -22,8 +22,9 @@
 
 第一步核对（不要相信旧对话转述）：
 1. git status --short；git log --oneline -6
-   预期 git log 包含 892c5ac（T7.8 脚本/阈值/基线）；T7.8 文档提交可能在其后，
-   以 git log/tasks.md 为准；工作区应 clean。
+   预期 HEAD 为 74a4f0b（T7.8 文档），其前依次为 71ce5fb（thresholds 说明）、
+   756b4a7（build-release 收尾 exit 0）、892c5ac（T7.8 脚本/阈值/基线）；
+   工作区 clean。
 2. 读 tasks.md 的 T7.8/T7.7/T7.3 行与 AGENTS.md 的“当前状态”。
 3. 跑 ctest（命令见下），确认 22/22。
 4. 确认 dist 25 文件 / 32.63MB；out\package 下有 setup 11.31MB、
@@ -51,6 +52,8 @@
     不掩盖这个单样本）；4K 40 步后退 max 418–427ms 的缓存重填尖峰仍在。
   - 脚本退出码：0 通过；1 spec 失败；2 infra；3 基线漂移；4 诊断（软解）。
     -Quick 只用于调试，不能作为验收证据，也不能写基线。
+  - build-release.ps1 已在成功收尾显式 exit 0；E: 上仍可能打印
+    `Cannot open E:/`（外部工具 stderr 噪声，不是构建失败）。
 - T7.6 已完成（本机安装/卸载边界，不是 T7.7 正式验收）：
   - scripts\package.ps1 + scripts\installer.iss：Inno Setup 6.7.3 每用户安装
     （PrivilegesRequired=lowest，%LOCALAPPDATA%\Programs\拉片软件，无需管理员）。
@@ -132,6 +135,8 @@
 - T7.4：顺序前进/4K 后退窗口/--drag-test；不要为了 P7 降质/丢帧或放宽 150ms。
 - T7.1 异步索引；T7.2 FrameCache；T7.2.1 B=末帧；T7.3 soak 判定。
 - 长 GOP 循环 B→A 148–157ms（F4-A2）留给 T7.7，不要顺手改。
+- build-release.ps1 末尾的 `exit 0` 是 E: 工具 stderr 噪声的收尾处理；
+  不要删掉，也不要把它当成“忽略构建失败”的依据（关键步骤由 Invoke-Tool 检查）。
 - 不要为了安装包体积删 Qt/FFmpeg 必需 DLL 或改技术栈（ADR-001/004）。
 
 判定口径（不要放宽阈值来变绿）：
@@ -166,7 +171,8 @@
 ## 使用说明
 
 - 新 agent 必须先读文件、跑 `ctest`，以 `git log`/`tasks.md` 为准，不要只信这段摘要。
-- 当前基线 `892c5ac`（T7.8 脚本/阈值/基线）；若 HEAD 已前进，以最新提交和
+- 当前 HEAD `74a4f0b`（T7.8 文档）；T7.8 代码/基线 `892c5ac`，构建收尾
+  `756b4a7`，thresholds 说明 `71ce5fb`。若 HEAD 已前进，以最新提交和
   `tasks.md` 为准。
 - T7.8 是开发机基准回归（热缓存、代理素材、非基线机）；T7.5 是合成/模拟证据；
   T7.4 只是 4K proxy；T7.3 的正式收口仍差 V10 2h。
