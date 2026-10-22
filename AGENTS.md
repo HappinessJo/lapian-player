@@ -377,7 +377,8 @@
 | `docs/perf/v2-online-resolve.md` | v1.0 | 2026-10-23 | T8.1 解析层证据：BV/URL、匿名 view、分P、错误矩阵、取消/超时、本地回归、dist 导入表 |
 | `docs/handoff-2026-10-23-t8.1.md` | v1 | 2026-10-23 | 历史交接：T8.1 接口、156 项探针、缺口、T8.2 所需账号/网络/curl 对照 |
 | `docs/perf/v2-online-http-selfcheck.md` | v1.0 | 2026-10-23 | **当前证据**：T8.2 HTTP 栈自检/凭据/DPAPI/DEC-3/脱敏；门 WinHTTP nav 通过（161–202ms、`cookie_sent=1`） |
-| `docs/handoff-2026-10-23-t8.2.md` | v1 | 2026-10-23 | **当前交接**：T8.2 接口、104/0 单测、54/0 产品探针、缺口、T8.3/T8.5 需要 |
+| `docs/handoff-2026-10-23-t8.2.md` | v1 | 2026-10-23 | **当前交接**：T8.2 接口、104/0 单测、54/0 产品探针、缺口、T8.3/T8.5 需要；提交 `0f322b0` |
+| `docs/next-session-prompt-t8.3.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.3 提示词（缓存存储/配额/续传；300MB/20GB、长路径、停止条件） |
 | `docs/next-session-prompt-t8.2.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.2 提示词（HTTP 栈自检、SESSDATA/DPAPI、DEC-3、日志脱敏、门/停止条件） |
 
 **变更记录**
@@ -463,7 +464,7 @@
 - 2026-10-23：完成 **T8.0（S3 收口）**，用户“全部按建议”拍板 DEC-1…5：M1→M2；起播 p95 ≤5s/已缓存 P7 ≤80ms/缓存命中 ≤2.5s/未缓存提示取消 ≤100ms/任务完成率 ≥80%；首次在线打开自检；60fps 横幅+常驻角标；300MB 自动 + 20GB 记账单测。ADR-007 **附条件接受**（T8.2/T8.4 回填；D1–D5 未改）。delta/tasks/plan v2 章节升 v0.3，S3 交接升 v1.2；S4 从 T8.1 开始。本文件升至 v6.11。
 
 - 2026-10-23：完成 **T8.1 解析层**：BV/URL 归一化与本地校验、匿名 `view` 元数据、分P（默认 P1、`?p=`、切P）、错误映射、Ctrl+U 回显确认对话框、`--online-resolve-test`、`lapian_online_resolve_test`。ctest 23/23；产品探针 156/0（dist 同为 156/0）；本地非法 9 类 0ms/0 请求；取消 fake ≤5ms/关窗 ≤7ms、真实 WinHTTP 取消 15ms；P1 277.78ms/P2 334.30ms/P7 2s 67.37ms；dist 32.81MB/25 文件、无 `WINHTTP.DLL` 导入。T8.2/T8.5/缓存/播放未做。证据 [v2-online-resolve.md](docs/perf/v2-online-resolve.md)、交接 [T8.1](docs/handoff-2026-10-23-t8.1.md)；tasks-v2 升 v0.4。本文件升至 v6.12。
-- 2026-10-23：完成 **T8.2 HTTP 栈自检/凭据**：WinHTTP 产品栈 nav `code=0/isLogin=true`（普通用户，5 次 161–202ms，`cookie_sent=1`，`vip_status=0`）；`HttpRequest::sessdata` 只发 `api.bilibili.com:443`、禁 cookie jar/重定向；SESSDATA/DPAPI 凭据 UI、DEC-3 首次提交自检、`-101`/412/429/超时映射、日志脱敏；`--online-http-selfcheck`、`--online-auth-test`、`lapian_online_auth_test`（104/0）。ctest 24/24；产品探针 54/0；T8.1 156/0（dist 同）；本地 P1 267.83ms/P2 324.17ms/P7 2s p95 66.64ms；dist 32.89MB/25 文件；check-imports 无 WinHTTP/TLS/QtNetwork；libcurl 未构建。证据 [v2-online-http-selfcheck.md](docs/perf/v2-online-http-selfcheck.md)、交接 [T8.2](docs/handoff-2026-10-23-t8.2.md)；tasks-v2 升 v0.5。本文件升至 v6.13。
+- 2026-10-23：完成 **T8.2 HTTP 栈自检/凭据**：WinHTTP 产品栈 nav `code=0/isLogin=true`（普通用户，5 次 161–202ms，`cookie_sent=1`，`vip_status=0`）；`HttpRequest::sessdata` 只发 `api.bilibili.com:443`、禁 cookie jar/重定向；SESSDATA/DPAPI 凭据 UI、DEC-3 首次提交自检、`-101`/412/429/超时映射、日志脱敏；`--online-http-selfcheck`、`--online-auth-test`、`lapian_online_auth_test`（104/0）。ctest 24/24；产品探针 54/0；T8.1 156/0（dist 同）；本地 P1 267.83ms/P2 324.17ms/P7 2s p95 66.64ms；dist 32.89MB/25 文件；check-imports 无 WinHTTP/TLS/QtNetwork；libcurl 未构建。证据 [v2-online-http-selfcheck.md](docs/perf/v2-online-http-selfcheck.md)、交接 [T8.2](docs/handoff-2026-10-23-t8.2.md)；tasks-v2 升 v0.5。本文件升至 v6.13。提交 `0f322b0`（v2 S3 + T8.0–T8.2，54 文件；工作树 clean）。
 
 ---
 
@@ -471,4 +472,4 @@
 
 > 完整提示词见 [docs/next-session-prompt.md](docs/next-session-prompt.md)。核心：先读 `AGENTS.md`、`docs/handoff-2026-10-22-t7.7.md`、`docs/preview-release-2026-10-22.md`、`docs/perf/T7.7-acceptance-checklist.md`、`spec.md`、`plan.md`、`tasks.md`、ADR-001–006；T7.7 清单/预检脚本已入库，本机 `verdict=blocked`，P7 2s 复跑 65.33ms；**用户已决定内部预览收口，除非资源到位，不要追正式 T7.7/P14，也不要宣称通过**；以 `git log`/`ctest` 为准，不要重做 T1–T7.11.1（T7.11.1 已修复 P7 边界：2s 64.13ms、1s 27.11ms、1080p60 HEVC 67.31ms）；T7.7 仍需真实 V1–V10、基线机、冷缓存 F1-A1、Explorer 真双击，正式 P14 仍需真实 V10；4K 仍 proxy；T7.5/T7.6 缺口照旧；只做 F1–F8/P1–P14，spec v0.3 冻结；每任务保持 build/ctest/dist 通过并补交接/证据。
 >
-> **v2（在线）走另一条线**：S1/S2 已完成、S3 定稿（T8.0/T8.1/T8.2 完成）；DEC/B 已拍板、ADR-007 附条件接受；T8.1/T8.2 完成，下一步 T8.3（缓存），见 [docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)、[plan.md](plan.md) v2 章节、[tasks-v2.md](tasks-v2.md)、[S3 交接](docs/handoff-2026-10-23-s3.md)、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)。不要用本节的 v1 提示词去做 v2。
+> **v2（在线）走另一条线**：S1/S2 已完成、S3 定稿（T8.0/T8.1/T8.2 完成）；DEC/B 已拍板、ADR-007 附条件接受；T8.1/T8.2 完成，下一步 T8.3（缓存），见 [docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)、[plan.md](plan.md) v2 章节、[tasks-v2.md](tasks-v2.md)、[S3 交接](docs/handoff-2026-10-23-s3.md)、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)、[T8.3 提示词](docs/next-session-prompt-t8.3.md)。不要用本节的 v1 提示词去做 v2。
