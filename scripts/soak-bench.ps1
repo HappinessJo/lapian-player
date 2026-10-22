@@ -20,6 +20,7 @@ param(
   [int]$Seconds = 7200,
   [int]$Interval = 30,
   [switch]$NoLoop,
+  [int]$LoopFrames = 0,
   [string]$Tag = 'soak',
   [string]$Exe = '',
   [string]$SettingsPath = '',
@@ -72,6 +73,9 @@ $arguments = @(
 )
 if ($NoLoop) {
   $arguments += '--memory-no-loop'
+}
+if ($LoopFrames -gt 0) {
+  $arguments += @('--memory-loop-frames', "$LoopFrames")
 }
 Write-Host ("启动 soak：file={0} seconds={1} interval={2} tag={3} loop={4}" -f $asciiPath, $Seconds, $Interval, $Tag, (-not $NoLoop))
 Write-Host ("日志：{0}" -f $log)

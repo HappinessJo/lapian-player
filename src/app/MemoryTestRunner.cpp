@@ -45,7 +45,8 @@ std::int64_t SteadyNowMs() {
 MemoryTestRunner::MemoryTestRunner(MainWindow* window, QString mode, QString tag,
                                    int seconds, int steps, int switch_cycles,
                                    int interval_seconds, bool soak_loop,
-                                   QString file_a, QString file_b, QObject* parent)
+                                   int soak_loop_frames, QString file_a,
+                                   QString file_b, QObject* parent)
     : QObject(parent == nullptr ? window : parent),
       window_(window),
       mode_text_(std::move(mode)),
@@ -55,6 +56,7 @@ MemoryTestRunner::MemoryTestRunner(MainWindow* window, QString mode, QString tag
       switch_cycles_(switch_cycles > 0 ? switch_cycles : 3),
       interval_seconds_(interval_seconds > 0 ? interval_seconds : 30),
       soak_loop_(soak_loop),
+      soak_loop_frames_(soak_loop_frames > 0 ? soak_loop_frames : 0),
       file_a_(std::move(file_a)),
       file_b_(std::move(file_b)) {
   if (!ParseMode(mode_text_)) {
@@ -193,21 +195,25 @@ void MemoryTestRunner::OnReady() {
     // 有限素材用整片 A/B 循环模拟“持续播放”；V10 用 --memory-no-loop
     // 做真正的单文件连续播放。报告中必须区分两者。
     const qint64 last = window_->LastFrameIndexForTest();
+    qint64 loop_out = last;
+    if (soak_loop_ && soak_loop_frames_ > 0) {
+      loop_out = std::min<qint64>(last, soak_loop_frames_ - 1);
+    }
     window_->GoToInputForTest(QStringLiteral("0"));
     if (soak_loop_) {
       window_->SetLoopInForTest();
-      window_->GoToInputForTest(QString::number(last));
+      window_->GoToInputForTest(QString::number(loop_out));
       window_->SetLoopOutForTest();
       window_->ToggleLoopForTest();
       window_->GoToInputForTest(QStringLiteral("0"));
     }
     const QString loop_state = window_->LoopStateForTest();
     std::fprintf(stderr,
-                 "T7.3 soak_setup tag=%s frames=%lld loop_enabled=%d loop=%s "
-                 "rate=%.2f\n",
+                 "T7.3 soak_setup tag=%s frames=%lld loop_enabled=%d "
+                 "loop_out_frame=%lld loop=%s rate=%.2f\n",
                  tag_.toUtf8().constData(), static_cast<long long>(last),
-                 soak_loop_ ? 1 : 0, Utf8(loop_state).c_str(),
-                 window_->SpeedForTest());
+                 soak_loop_ ? 1 : 0, static_cast<long long>(loop_out),
+                 Utf8(loop_state).c_str(), window_->SpeedForTest());
     std::fflush(stderr);
     if (soak_loop_ && !loop_state.contains(QStringLiteral("loop=1"))) {
       Fail(QStringLiteral("soak 循环设置失败：") + loop_state);
