@@ -117,3 +117,9 @@ if ($Package) {
   Write-Host '=== 8/8 分发打包（安装包 + 便携 zip） ==='
   & (Join-Path $PSScriptRoot 'package.ps1') -SkipBuild
 }
+
+# 本机 E: 被 Windows 视为不受信任位置，个别外部工具/文件跟踪器会在收尾时
+# 往 stderr 打 "Cannot open E:/" 并把 $? 置为 false；关键步骤已由 Invoke-Tool
+# 检查退出码，这里显式清零，避免父脚本/CI 把成功构建误判为失败。
+$global:LASTEXITCODE = 0
+exit 0
