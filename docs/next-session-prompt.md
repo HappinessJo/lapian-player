@@ -111,4 +111,5 @@
 
 - 新 agent 必须先读文件、跑 `ctest`，以 `git log`/`tasks.md` 为准，不要只信这段摘要。
 - 若 HEAD 已前进，以最新提交和 `tasks.md` 为准；本提示词只描述 2026-10-22 的状态。
+- T7.6 专用版见 [next-session-prompt-t7.6.md](next-session-prompt-t7.6.md)（打包/关联/许可/体积）。
 - T7.4 只是 4K proxy 证据；T7.5 是开发机合成/模拟证据；T7.3 的正式收口仍差 V10 2h。
