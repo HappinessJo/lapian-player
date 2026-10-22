@@ -44,8 +44,8 @@ std::int64_t SteadyNowMs() {
 
 MemoryTestRunner::MemoryTestRunner(MainWindow* window, QString mode, QString tag,
                                    int seconds, int steps, int switch_cycles,
-                                   int interval_seconds, QString file_a,
-                                   QString file_b, QObject* parent)
+                                   int interval_seconds, bool soak_loop,
+                                   QString file_a, QString file_b, QObject* parent)
     : QObject(parent == nullptr ? window : parent),
       window_(window),
       mode_text_(std::move(mode)),
@@ -54,6 +54,7 @@ MemoryTestRunner::MemoryTestRunner(MainWindow* window, QString mode, QString tag
       steps_(steps > 0 ? steps : 40),
       switch_cycles_(switch_cycles > 0 ? switch_cycles : 3),
       interval_seconds_(interval_seconds > 0 ? interval_seconds : 30),
+      soak_loop_(soak_loop),
       file_a_(std::move(file_a)),
       file_b_(std::move(file_b)) {
   if (!ParseMode(mode_text_)) {
@@ -189,23 +190,31 @@ void MemoryTestRunner::OnReady() {
   Sample(QStringLiteral("steady-start"));
 
   if (mode_ == Mode::kSoak) {
-    // 有限素材用整片 A/B 循环模拟“持续播放”；这不是 2h 连续单文件播放，
-    // 报告中必须明确写成短时探针。
+    // 有限素材用整片 A/B 循环模拟“持续播放”；V10 用 --memory-no-loop
+    // 做真正的单文件连续播放。报告中必须区分两者。
     const qint64 last = window_->LastFrameIndexForTest();
     window_->GoToInputForTest(QStringLiteral("0"));
-    window_->SetLoopInForTest();
-    window_->GoToInputForTest(QString::number(last));
-    window_->SetLoopOutForTest();
-    window_->ToggleLoopForTest();
-    window_->GoToInputForTest(QStringLiteral("0"));
+    if (soak_loop_) {
+      window_->SetLoopInForTest();
+      window_->GoToInputForTest(QString::number(last));
+      window_->SetLoopOutForTest();
+      window_->ToggleLoopForTest();
+      window_->GoToInputForTest(QStringLiteral("0"));
+    }
     const QString loop_state = window_->LoopStateForTest();
     std::fprintf(stderr,
-                 "T7.3 soak_setup tag=%s frames=%lld loop=%s rate=%.2f\n",
+                 "T7.3 soak_setup tag=%s frames=%lld loop_enabled=%d loop=%s "
+                 "rate=%.2f\n",
                  tag_.toUtf8().constData(), static_cast<long long>(last),
-                 Utf8(loop_state).c_str(), window_->SpeedForTest());
+                 soak_loop_ ? 1 : 0, Utf8(loop_state).c_str(),
+                 window_->SpeedForTest());
     std::fflush(stderr);
-    if (!loop_state.contains(QStringLiteral("loop=1"))) {
+    if (soak_loop_ && !loop_state.contains(QStringLiteral("loop=1"))) {
       Fail(QStringLiteral("soak 循环设置失败：") + loop_state);
+      return;
+    }
+    if (!soak_loop_ && loop_state.contains(QStringLiteral("loop=1"))) {
+      Fail(QStringLiteral("soak 无循环设置失败：") + loop_state);
       return;
     }
 
@@ -366,17 +375,17 @@ void MemoryTestRunner::FinishSoak() {
 
   std::fprintf(
       stderr,
-      "T7.3 soak_summary mode=soak tag=%s display=%dx%d duration_s=%.1f "
-      "samples=%zu steady=%zu warmup_s=%.0f limit_mb=%.0f pass=%d "
-      "ws_start_mb=%.1f ws_final_mb=%.1f ws_max_mb=%.1f growth_mb=%.1f "
+      "T7.3 soak_summary mode=soak tag=%s soak_loop=%d display=%dx%d "
+      "duration_s=%.1f samples=%zu steady=%zu warmup_s=%.0f limit_mb=%.0f "
+      "pass=%d ws_start_mb=%.1f ws_final_mb=%.1f ws_max_mb=%.1f growth_mb=%.1f "
       "slope_mb_per_h=%.2f baseline_blocks=%zu baseline_growth_mb=%.1f "
       "baseline_slope_mb_per_h=%.2f private_max_mb=%.1f "
       "handles=%u/%u/%u threads=%u/%u/%u audio_underruns=%llu "
       "loop_jumps=%d cache_max=%d frame_stall_events=%zu "
       "playback_stopped_events=%zu ui_gap_max_ms=%.0f flags=%s\n",
-      tag_.toUtf8().constData(), display.width(), display.height(),
-      a.duration_s, a.total_samples, a.steady_samples, warmup_s,
-      thresholds.memory_limit_mb, a.passed ? 1 : 0, a.ws_start_mb,
+      tag_.toUtf8().constData(), soak_loop_ ? 1 : 0, display.width(),
+      display.height(), a.duration_s, a.total_samples, a.steady_samples,
+      warmup_s, thresholds.memory_limit_mb, a.passed ? 1 : 0, a.ws_start_mb,
       a.ws_final_mb, a.ws_max_mb, a.ws_growth_mb, a.ws_slope_mb_per_hour,
       a.baseline_blocks, a.baseline_growth_mb, a.baseline_slope_mb_per_hour,
       a.private_max_mb, a.handles_start, a.handles_end, a.handles_max,

@@ -19,6 +19,7 @@ param(
   [string]$File,
   [int]$Seconds = 7200,
   [int]$Interval = 30,
+  [switch]$NoLoop,
   [string]$Tag = 'soak',
   [string]$Exe = '',
   [string]$SettingsPath = '',
@@ -69,7 +70,10 @@ $arguments = @(
   '--memory-tag', $Tag,
   '--settings-path', $SettingsPath
 )
-Write-Host ("启动 soak：file={0} seconds={1} interval={2} tag={3}" -f $asciiPath, $Seconds, $Interval, $Tag)
+if ($NoLoop) {
+  $arguments += '--memory-no-loop'
+}
+Write-Host ("启动 soak：file={0} seconds={1} interval={2} tag={3} loop={4}" -f $asciiPath, $Seconds, $Interval, $Tag, (-not $NoLoop))
 Write-Host ("日志：{0}" -f $log)
 
 $process = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru `

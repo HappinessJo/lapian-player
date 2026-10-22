@@ -26,7 +26,8 @@ class MemoryTestRunner : public QObject {
  public:
   MemoryTestRunner(MainWindow* window, QString mode, QString tag, int seconds,
                    int steps, int switch_cycles, int interval_seconds,
-                   QString file_a, QString file_b, QObject* parent = nullptr);
+                   bool soak_loop, QString file_a, QString file_b,
+                   QObject* parent = nullptr);
   ~MemoryTestRunner() override;
 
   void Start();
@@ -71,6 +72,7 @@ class MemoryTestRunner : public QObject {
   int steps_ = 40;
   int switch_cycles_ = 3;
   int interval_seconds_ = 30;
+  bool soak_loop_ = true;
   int switch_done_ = 0;
   QString file_a_;
   QString file_b_;
