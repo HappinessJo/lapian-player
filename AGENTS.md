@@ -311,7 +311,7 @@
 | `docs/handoff-2026-10-22-t7.6.md` | v1 | 2026-10-22 | **当前交接**：T7.6 打包/关联/许可/体积、每用户安装/卸载、F1-A1 预检与缺口 |
 | `docs/perf/T7.5-robustness.md` | v1 | 2026-10-22 | T7.5 坏文件/网络/长路径/只读 ACL/设备丢失/回归与缺口 |
 | `docs/perf/T7.6-packaging.md` | v1 | 2026-10-22 | T7.6 体积/安装/关联/卸载/启动/零网络与限制 |
-| `docs/next-session-prompt.md` | v21 | 2026-10-22 | 给下个 agent 的新会话提示词（T7.6 已完成，下一步 T7.7/T7.8；V10 2h 仍待） |
+| `docs/next-session-prompt.md` | v22 | 2026-10-22 | 给下个 agent 的新会话提示词（T7.6 已完成，下一步 T7.7/T7.8；V10 2h 仍待） |
 | `docs/next-session-prompt-t7.4.md` | v1 | 2026-10-22 | 给下个 agent 的 T7.4 4K 路径提示词（可直接复制） |
 | `docs/perf/T3.1-audio.md` | v1 | 2026-10-20 | T3.1 音频设备/播放/seek/无音轨测量记录 |
 | `docs/perf/T3.2-sync.md` | v1 | 2026-10-20 | T3.2 音频主时钟/QPC 回退/24–60fps 同步测量记录 |
