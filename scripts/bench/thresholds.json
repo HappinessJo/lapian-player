@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "name": "lapian-bench-thresholds",
+  "updated": "2026-10-22",
+  "source": "spec.md v0.3 §4.1（P1–P14）与 §4.5（P12）",
+  "notes": [
+    "阈值只来自 spec；不要为了让回归变绿而改这里。",
+    "P6/P9 以目标帧距前一个关键帧 ≤2s 为前提；drag runner 已按该前提取样。",
+    "P7 用两条产品路径：--drag-test 的 ±1 步进，以及 --memory-test step 的 40 步扫描。",
+    "P1/P2 的冷缓存条件由人执行（重启 + 清 OS 文件缓存）；本脚本只做同机热缓存回归。",
+    "T7.8 只验证同机可复现（±10%），不把结果写成基线机或 T7.7 正式验收。"
+  ],
+  "startup": {
+    "runs": 20,
+    "pass_fraction": 0.95,
+    "p1_limit_ms": 1500,
+    "p2_limit_ms": 2500,
+    "spec": "P1/P2；p95 = 20 次至少 19 次达标（spec §4.1 统计口径）"
+  },
+  "drag": {
+    "samples": 40,
+    "notes": "T7.8 回归 1080p 用 40 样本（两倍于 spec 的 20），让 p95 更稳定；4K 用 20 样本（每次拖动成本更高，且 20 样本 p95 已稳定）；spec 的 20 样本口径仍由 T7.4/T7.7 报告覆盖。",
+    "1080p": {
+      "p4_min_fps": 30,
+      "p6_max_p95_ms": 150,
+      "p7_max_p95_ms": 80,
+      "p8_min_fps": 12,
+      "p9_max_p95_ms": 200
+    },
+    "4k": {
+      "samples": 20,
+      "p4_min_fps": 20,
+      "p6_max_p95_ms": 300,
+      "p7_max_p95_ms": 150,
+      "p8_min_fps": 12,
+      "p9_max_p95_ms": 300
+    },
+    "spec": "P4/P6/P7/P8/P9；4K 为 spec §4.1 放宽档"
+  },
+  "step": {
+    "steps": 40,
+    "1080p": {
+      "p7_max_p95_ms": 80
+    },
+    "4k": {
+      "p7_max_p95_ms": 150
+    },
+    "spec": "P7（-memory-test step 的后退/前进各 40 步 p95）"
+  },
+  "memory": {
+    "empty_seconds": 5,
+    "pause_seconds": 60,
+    "play_seconds": 60,
+    "play4k_seconds": 15,
+    "p10_max_mb": 250,
+    "p11_1080p_max_mb": 800,
+    "p11_4k_max_mb": 1536,
+    "spec": "P10（V1 暂停 60s）与 P11（播放常驻；4K ≤1.5GB）"
+  },
+  "robust": {
+    "min_checks": 75,
+    "max_failures": 0,
+    "max_skips": 1,
+    "max_elapsed_s": 90,
+    "readonly_min_checks": 17,
+    "spec": "T7.5 探针（不是 spec 性能项）；只读目录另跑 robust-readonly.ps1"
+  },
+  "package": {
+    "max_mb": 100,
+    "spec": "P12 分发体积 ≤100MB（dist/setup/zip/stage 各自判断，不相加）"
+  },
+  "baseline": {
+    "tolerance_pct": 10,
+    "notes": [
+      "只比较同一台机器（machine.id 相同）的基线；换机跳过漂移判定，只做 spec 阈值检查。",
+      "abs 是测量噪声下限：P7 的 0.8ms 这类小值无法按 10% 稳定复现；spec 阈值仍然是硬门槛。",
+      "P9 的 spec 门槛用 p95；基线漂移用 p50：20 个随机目标的 p95 尾部在 1080p 代理上会抖动约 10ms，p50 稳定。",
+      "P7 的 spec 门槛用 p95；1080p 拖动 p95 在 0.76–0.92ms（后退）/13–14ms（前进），基线也用 p95。步进的 p95 在亚毫秒级时相对抖动大，基线用 p50；4K 后退 p95 的绝对值更大且稳定，保留 p95。",
+      "P6 1080p p95 在 50–59ms 之间波动（随机拖动目标，约 ±8ms），基线比较给 10ms 噪声下限；spec 阈值仍是 150ms。40 样本已明显收窄该波动。",
+      "基线值由 -UpdateBaseline 从一次全量运行写入；不要把 -Quick 结果写进基线。"
+    ],
+    "metrics": {
+      "startup.p1_p50_ms": { "abs": 5 },
+      "startup.p2_p50_ms": { "abs": 5 },
+      "drag1080.p4_fps": { "abs": 1 },
+      "drag1080.p6_p95_ms": { "abs": 10 },
+      "drag1080.p7_back_p95_ms": { "abs": 5 },
+      "drag1080.p7_fwd_p95_ms": { "abs": 5 },
+      "drag1080.p8_fps": { "abs": 1 },
+      "drag1080.p9_p50_ms": { "abs": 5 },
+      "drag4k.p4_fps": { "abs": 1 },
+      "drag4k.p6_p95_ms": { "abs": 10 },
+      "drag4k.p7_back_p95_ms": { "abs": 5 },
+      "drag4k.p7_fwd_p95_ms": { "abs": 5 },
+      "drag4k.p8_fps": { "abs": 1 },
+      "drag4k.p9_p50_ms": { "abs": 5 },
+      "step1080.back_p50_ms": { "abs": 5 },
+      "step1080.fwd_p50_ms": { "abs": 5 },
+      "step4k.back_p50_ms": { "abs": 5 },
+      "step4k.fwd_p50_ms": { "abs": 5 },
+      "memory.empty.max_ws_mb": { "abs": 10 },
+      "memory.pause1080.final_ws_mb": { "abs": 10 },
+      "memory.play1080.max_ws_mb": { "abs": 10 },
+      "memory.play4k.max_ws_mb": { "abs": 10 },
+      "robust.checks": { "pct": 0, "abs": 0 },
+      "package.dist_mb": { "abs": 1 },
+      "package.setup_mb": { "abs": 1 },
+      "package.zip_mb": { "abs": 1 }
+    }
+  }
+}
