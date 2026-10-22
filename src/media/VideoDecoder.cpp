@@ -3,6 +3,7 @@
 #include <d3d11.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -221,7 +222,10 @@ struct VideoDecoder::Impl {
 
     AVCodecContext* decoder_holder = nullptr;
     bool hardware = false;
-    if (prefer_hardware) {
+    // T7.4：测试专用强制软解开关（--force-software-decode 会设置该环境变量）。
+    // 只影响本次进程打开的解码器；产品默认仍是 D3D11VA 优先、失败回退软解。
+    const bool software_only = std::getenv("LAPIAN_FORCE_SOFTWARE") != nullptr;
+    if (prefer_hardware && !software_only) {
       decoder_holder = create_context(true);
       hardware = decoder_holder != nullptr;
     }

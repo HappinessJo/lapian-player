@@ -67,6 +67,16 @@ class MainWindow : public QMainWindow {
   void OpenFile(const QString& path);
   // 跳到 0 基帧号；成功时画面/信息栏同步。T2.4/T2.6 共用。
   void GoToFrame(std::int64_t frame);
+  // T7.4 4K 性能探针入口：走与真实鼠标/键盘完全相同的产品路径。
+  void ScrubStartForTest(qint64 frame);
+  void ScrubTargetForTest(qint64 frame);
+  void ScrubFinishForTest(qint64 frame);
+  void GoToFrameForTest(qint64 frame);
+  // 目标帧距前关键帧的帧数（P6/P9 的 ≤2s 条件）；索引未就绪返回 -1。
+  qint64 FrameDistanceFromKeyframeForTest(qint64 frame) const;
+  bool HardwareDecodeForTest() const;
+  int PresentedFrameCountForTest() const;
+  double FrameRateForTest() const;
   // T1.5 自动化验证入口，等价于按一次 Space；不改变默认“打开不播放”。
   void StartPlaybackForTest();
   void StepForwardForTest();
@@ -375,6 +385,8 @@ class MainWindow : public QMainWindow {
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::int64_t displayed_frame_index_ = -1;
+  // T7.4：本次会话真正 Present 的视频帧数（P8“每帧呈现”探针）。
+  int presented_frame_count_ = 0;
   int displayed_rotation_ = 0;
   std::uint64_t audio_status_revision_ = 0;
   std::uint64_t waveform_status_revision_ = 0;

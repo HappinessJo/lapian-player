@@ -425,6 +425,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   connect(gfx_, &GfxWidget::deviceError, this, &MainWindow::OnDeviceError, Qt::QueuedConnection);
   // T7.1：把首帧真正 Present 的时刻转给 main 的冷启动埋点。
   connect(gfx_, &GfxWidget::framePresented, this, &MainWindow::framePresented);
+  connect(gfx_, &GfxWidget::framePresented, this,
+          [this]() { ++presented_frame_count_; });
   connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
   connect(gfx_, &GfxWidget::fullScreenToggleRequested, this, &MainWindow::ToggleFullScreen);
@@ -2814,6 +2816,39 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
     std::fflush(stderr);
   }
   statusBar()->showMessage(QStringLiteral("第 %1 帧").arg(target), 2000);
+}
+
+// T7.4：拖动/跳转/步进探针只转发到产品入口，不改变任何语义。
+void MainWindow::ScrubStartForTest(qint64 frame) { OnScrubStarted(frame); }
+
+void MainWindow::ScrubTargetForTest(qint64 frame) { OnScrubTargetChanged(frame); }
+
+void MainWindow::ScrubFinishForTest(qint64 frame) { OnScrubFinished(frame); }
+
+void MainWindow::GoToFrameForTest(qint64 frame) { GoToFrame(frame); }
+
+qint64 MainWindow::FrameDistanceFromKeyframeForTest(qint64 frame) const {
+  if (session_ == nullptr || !session_->index().IsReady() ||
+      session_->index().empty() || frame < 0 ||
+      frame >= static_cast<qint64>(session_->index().size())) {
+    return -1;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  const qint64 keyframe = index.KeyframeAtOrBefore(index.PtsOfFrame(frame));
+  return keyframe < 0 ? frame : frame - keyframe;
+}
+
+bool MainWindow::HardwareDecodeForTest() const {
+  return session_ != nullptr && session_->IsOpen() && session_->first_frame().hardware;
+}
+
+int MainWindow::PresentedFrameCountForTest() const { return presented_frame_count_; }
+
+double MainWindow::FrameRateForTest() const {
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return 0.0;
+  }
+  return session_->info().video.frame_rate.ToDouble();
 }
 
 void MainWindow::OnPlaybackStateChanged(bool playing) {

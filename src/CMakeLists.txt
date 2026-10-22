@@ -145,6 +145,8 @@ qt_add_executable(lapian WIN32
   app/GfxWidget.h
   app/InfoBar.cpp
   app/InfoBar.h
+  app/DragTestRunner.cpp
+  app/DragTestRunner.h
   app/MemoryTestRunner.cpp
   app/MemoryTestRunner.h
   app/PlaybackController.cpp

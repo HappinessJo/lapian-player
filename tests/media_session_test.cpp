@@ -71,6 +71,25 @@ int main() {
     Check(session.info().video.width == 1920, "新会话 1080p");
   }
 
+  // T7.4：前进步进走顺序解码（不再从关键帧重解），必须仍然帧精确；
+  // 后退步进命中/未命中缓存都返回目标帧 PTS。
+  if (session.HasIndex() && session.index().size() > 200) {
+    lapian::media::DecodedFrameInfo info;
+    std::string seek_error;
+    Check(session.SeekToFrame(100, &info, &seek_error), "跳转到第 100 帧");
+    Check(info.pts_us == session.index().PtsOfFrame(100), "第 100 帧 PTS 精确");
+    Check(session.SeekToFrame(101, &info, &seek_error), "顺序前进到第 101 帧");
+    Check(info.pts_us == session.index().PtsOfFrame(101), "顺序前进帧精确");
+    Check(session.SeekToFrame(100, &info, &seek_error,
+                              lapian::media::FrameCacheMode::kBackwardWindow),
+          "后退到第 100 帧（填缓存）");
+    Check(info.pts_us == session.index().PtsOfFrame(100), "后退帧精确");
+    Check(session.SeekToFrame(99, &info, &seek_error,
+                              lapian::media::FrameCacheMode::kBackwardWindow),
+          "后退到第 99 帧（命中缓存）");
+    Check(info.pts_us == session.index().PtsOfFrame(99), "缓存命中帧精确");
+  }
+
   session.Close();
   Check(!session.IsOpen(), "Close 后会话关闭");
 

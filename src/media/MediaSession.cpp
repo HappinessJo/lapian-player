@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -125,6 +127,7 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
   open_ = true;
   // 首帧已解码，解码器下一次 DecodeNextFrame 返回第 1 帧。
   decoder_stale_ = false;
+  sequential_frame_ = 1;
   // T7.2：预算随分辨率/位深固定，不随片长增长。缓存为空时不影响 P10。
   const lapian::media::FrameCacheLimits limits = FrameCache::LimitsForFrame(
       probe_.info.video.width, probe_.info.video.height,
@@ -161,6 +164,7 @@ void MediaSession::InstallIndex(FrameIndex index, double build_ms) {
   // 新索引可能改变帧号/PTS 映射，旧缓存必须丢弃。
   frame_cache_.Clear();
   decoder_stale_ = true;
+  sequential_frame_ = -1;
   index_ = std::move(index);
   last_open_timings_.index_ok = HasIndex();
   last_open_timings_.index_frames = index_.size();
@@ -173,6 +177,9 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
     return false;
   }
   error->clear();
+  // T7.4 诊断：只在设置 LAPIAN_SEEK_LOG 时输出每次 seek 的命中/关键帧距离/分项耗时。
+  const bool seek_log = std::getenv("LAPIAN_SEEK_LOG") != nullptr;
+  const auto seek_started = Clock::now();
   // 上一帧的命中引用只保证到下一次 Seek；先释放，避免调用方看到悬空指针。
   if (last_hit_frame_ != nullptr) {
     av_frame_free(&last_hit_frame_);
@@ -189,6 +196,28 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
   if (frame < 0 || static_cast<std::size_t>(frame) >= index_.size()) {
     *error = "目标帧越界";
     return false;
+  }
+
+  // T7.4：前进步进/精确 seek 后紧接 PgDn：解码器已经停在目标帧上时直接解一帧。
+  // 旧实现每次前进都从最近关键帧重解到目标（4K 2s GOP 约 20–60 帧，p95 >200ms）。
+  if (cache_mode == FrameCacheMode::kNone && sequential_frame_ == frame &&
+      decoder_ != nullptr) {
+    DecodedFrameInfo info;
+    if (decoder_->DecodeNextFrame(&info, error)) {
+      *out = info;
+      sequential_frame_ = frame + 1;
+      decoder_stale_ = false;
+      if (seek_log) {
+        std::fprintf(stderr,
+                     "T7.4 seek_log frame=%lld hit=0 sequential=1 decoded=1 "
+                     "total_ms=%.2f\n",
+                     static_cast<long long>(frame), ElapsedMs(seek_started));
+        std::fflush(stderr);
+      }
+      return true;
+    }
+    // 顺序位置失效（EOF 等）时退回关键帧路径，不改变既有帧精确语义。
+    sequential_frame_ = -1;
   }
 
   if (cache_mode != FrameCacheMode::kNone) {
@@ -212,11 +241,20 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
       out->av_frame = hit;
       // 缓存命中没有移动解码器；起播前必须重新定位。
       decoder_stale_ = true;
+      sequential_frame_ = -1;
+      if (seek_log) {
+        std::fprintf(stderr,
+                     "T7.4 seek_log frame=%lld hit=1 total_ms=%.2f\n",
+                     static_cast<long long>(frame), ElapsedMs(seek_started));
+        std::fflush(stderr);
+      }
       return true;
     }
   }
 
   const std::size_t max_entries = frame_cache_.stats().max_entries;
+  std::int64_t decoded_frames = 0;
+  double cache_ms = 0.0;
   auto decode_range = [&](std::int64_t start_frame) -> bool {
     std::int64_t cache_from = frame + 1;
     if (cache_mode == FrameCacheMode::kBackwardWindow && max_entries > 0) {
@@ -228,13 +266,17 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
       if (!decoder_->DecodeNextFrame(&info, error)) {
         return false;
       }
+      ++decoded_frames;
       if (cache_mode != FrameCacheMode::kNone && index >= cache_from) {
+        const auto cache_started = Clock::now();
         frame_cache_.Put(info.av_frame, index, info.pts, info.pts_us,
                          info.duration_us, info.key_frame);
+        cache_ms += ElapsedMs(cache_started);
       }
       if (index == frame) {
         *out = info;
         decoder_stale_ = false;
+        sequential_frame_ = frame + 1;
         return true;
       }
     }
@@ -242,23 +284,46 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
     return false;
   };
 
+  bool ok = false;
+  std::int64_t keyframe = -1;
+  double seek_ms = 0.0;
+  // 一旦重新 seek，旧顺序位置失效。
+  sequential_frame_ = -1;
   if (index_.IsReliable()) {
     const std::int64_t target_pts = index_.PtsOfFrame(frame);
-    std::int64_t keyframe = index_.KeyframeAtOrBefore(target_pts);
+    keyframe = index_.KeyframeAtOrBefore(target_pts);
     if (keyframe < 0) {
       keyframe = 0;
     }
-    if (decoder_->SeekToPts(index_.PtsOfFrame(keyframe), error) &&
-        decode_range(keyframe)) {
-      return true;
+    const auto seek_start = Clock::now();
+    const bool seek_ok = decoder_->SeekToPts(index_.PtsOfFrame(keyframe), error);
+    seek_ms += ElapsedMs(seek_start);
+    if (seek_ok && decode_range(keyframe)) {
+      ok = true;
     }
   }
 
-  // 索引不可靠或关键帧路径失败：从头解码计数。
-  if (!decoder_->SeekToPts(index_.PtsOfFrame(0), error)) {
-    return false;
+  if (!ok) {
+    // 索引不可靠或关键帧路径失败：从头解码计数。
+    decoded_frames = 0;
+    cache_ms = 0.0;
+    const auto seek_start = Clock::now();
+    const bool seek_ok = decoder_->SeekToPts(index_.PtsOfFrame(0), error);
+    seek_ms += ElapsedMs(seek_start);
+    keyframe = 0;
+    ok = seek_ok && decode_range(0);
   }
-  return decode_range(0);
+  if (seek_log) {
+    std::fprintf(stderr,
+                 "T7.4 seek_log frame=%lld hit=0 keyframe=%lld decoded=%lld "
+                 "seek_ms=%.2f decode_ms=%.2f cache_ms=%.2f total_ms=%.2f ok=%d\n",
+                 static_cast<long long>(frame), static_cast<long long>(keyframe),
+                 static_cast<long long>(decoded_frames), seek_ms,
+                 ElapsedMs(seek_started) - seek_ms - cache_ms, cache_ms,
+                 ElapsedMs(seek_started), ok ? 1 : 0);
+    std::fflush(stderr);
+  }
+  return ok;
 }
 
 bool MediaSession::EnsureSequentialPosition(std::int64_t frame, std::string* error) {
@@ -291,6 +356,7 @@ void MediaSession::Close() {
   }
   frame_cache_.Clear();
   decoder_stale_ = true;
+  sequential_frame_ = -1;
   decoder_.reset();
   index_.Reset();
   probe_ = MediaProbeResult{};

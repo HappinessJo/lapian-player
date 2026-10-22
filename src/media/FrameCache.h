@@ -71,8 +71,8 @@ class FrameCache {
   bool Contains(std::int64_t frame_index) const;
   FrameCacheStats stats() const;
 
-  // 按分辨率/位深给预算：1080p 64MiB/24 帧、4K 96MiB/8 帧、
-  // 720p 及以下 32MiB/24 帧；10-bit（P010）按 3 字节/像素计。
+  // 按分辨率/位深给预算：1080p 64MiB/24 帧、4K 256MiB/20 帧（T7.4 从 96MiB/8
+  // 扩到 20 帧的后退窗口）、720p 及以下 32MiB/24 帧；10-bit（P010）按 3 字节/像素计。
   static FrameCacheLimits LimitsForFrame(int width, int height, int bit_depth);
 
   // 一帧 NV12（8-bit）或 P010（10-bit）的近似字节数；用于预算与日志。

@@ -1,6 +1,9 @@
 #include "media/FrameCache.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <utility>
 
@@ -72,6 +75,9 @@ bool FrameCache::Put(const AVFrame* frame, std::int64_t frame_index, std::int64_
 
   const bool hardware =
       frame->hw_frames_ctx != nullptr || frame->format == AV_PIX_FMT_D3D11;
+  const bool put_log = std::getenv("LAPIAN_PUT_LOG") != nullptr;
+  const auto put_started = std::chrono::steady_clock::now();
+  double transfer_ms = 0.0;
   AVFrame* copy = nullptr;
   if (hardware) {
     // 不长期持有 D3D11VA 解码表面：回拷到系统内存，缓存与驱动池解耦。
@@ -79,10 +85,14 @@ bool FrameCache::Put(const AVFrame* frame, std::int64_t frame_index, std::int64_
     if (copy == nullptr) {
       return false;
     }
+    const auto transfer_started = std::chrono::steady_clock::now();
     if (av_hwframe_transfer_data(copy, frame, 0) < 0) {
       av_frame_free(&copy);
       return false;
     }
+    transfer_ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - transfer_started)
+                      .count();
   } else {
     // 解码器输出是引用计数帧；av_frame_clone 只增加底层 AVBuffer 引用。
     copy = av_frame_clone(frame);
@@ -123,7 +133,21 @@ bool FrameCache::Put(const AVFrame* frame, std::int64_t frame_index, std::int64_
   by_frame_[frame_index] = std::prev(entries_.end());
   bytes_ += bytes;
   ++puts_;
+  const std::uint64_t evictions_before = evictions_;
   EvictUntilWithinLimits();
+  if (put_log) {
+    const double total_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - put_started)
+                                .count();
+    std::fprintf(stderr,
+                 "T7.4 put_log frame=%lld hw=%d bytes=%zu transfer_ms=%.2f "
+                 "total_ms=%.2f evicted=%llu entries=%zu\n",
+                 static_cast<long long>(frame_index), hardware ? 1 : 0, bytes,
+                 transfer_ms, total_ms,
+                 static_cast<unsigned long long>(evictions_ - evictions_before),
+                 entries_.size());
+    std::fflush(stderr);
+  }
   // 新条目本身过大时会被立即淘汰；此时 Put 视为未缓存。
   return by_frame_.find(frame_index) != by_frame_.end();
 }
@@ -194,8 +218,12 @@ FrameCacheLimits FrameCache::LimitsForFrame(int width, int height, int bit_depth
   }
   const std::int64_t pixels = static_cast<std::int64_t>(width) * height;
   if (width >= 3840 || height >= 2160 || pixels >= 3840LL * 2160) {
-    limits.max_bytes = 96 * kMiB;
-    limits.max_entries = 8;
+    // T7.4：4K 后退窗口从 8 帧扩到 20 帧。4K 每帧 NV12 约 11.9MiB，
+    // 一次缓存回拷约 11ms/帧；8 帧窗口在 2s GOP 下每 8 步就重新从关键帧解码
+    // （p95 253ms），20 帧窗口把 40 步扫描的未命中压到 2 次。
+    // 仍只缓存后退步进的软件帧，播放/普通跳转不写缓存，不影响 P11。
+    limits.max_bytes = 256 * kMiB;
+    limits.max_entries = 20;
   } else if (width >= 1920 || height >= 1080 || pixels >= 1920LL * 1080) {
     limits.max_bytes = 64 * kMiB;
     limits.max_entries = 24;

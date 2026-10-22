@@ -561,8 +561,17 @@ void MemoryTestRunner::RunSteps(bool backward, int count, std::function<void()> 
     }
     QElapsedTimer timer;
     timer.start();
+    const qint64 frame_before = window_->CurrentFrameForTest();
     window_->PressKeyForTest(backward ? Qt::Key_PageUp : Qt::Key_PageDown, 0);
-    samples->push_back(static_cast<double>(timer.nsecsElapsed()) / 1.0e6);
+    const double step_ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+    samples->push_back(step_ms);
+    if (qEnvironmentVariableIsSet("LAPIAN_STEP_LOG")) {
+      std::fprintf(stderr, "T7.4 step_log dir=%s frame=%lld->%lld ms=%.2f\n",
+                   backward ? "backward" : "forward",
+                   static_cast<long long>(frame_before),
+                   static_cast<long long>(window_->CurrentFrameForTest()), step_ms);
+      std::fflush(stderr);
+    }
     --(*remaining);
     const int done_steps = count - *remaining;
     if (done_steps % 20 == 0) {

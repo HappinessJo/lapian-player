@@ -68,8 +68,8 @@ int main() {
   Check(hd.max_bytes == 64 * kMiB, "1080p 预算 64MiB");
   Check(hd.max_entries == 24, "1080p 条目上限 24");
   const FrameCacheLimits uhd = FrameCache::LimitsForFrame(3840, 2160, 8);
-  Check(uhd.max_bytes == 96 * kMiB, "4K 预算 96MiB");
-  Check(uhd.max_entries == 8, "4K 条目上限 8");
+  Check(uhd.max_bytes == 256 * kMiB, "4K 预算 256MiB（T7.4）");
+  Check(uhd.max_entries == 20, "4K 条目上限 20（T7.4 后退窗口）");
   const FrameCacheLimits ten_bit = FrameCache::LimitsForFrame(1920, 1080, 10);
   Check(ten_bit.max_bytes == 64 * kMiB, "1080p 10-bit 预算仍为 64MiB");
 
@@ -161,12 +161,15 @@ int main() {
   Check(cache.stats().entries == 0, "超预算帧不占缓存");
 
   // 小于一帧的预算会被提升到一帧，避免预算永远拒绝所有帧。
+  const std::size_t huge_bytes = FrameCache::FrameBytesFor(16384, 8640, 10);
+  const FrameCacheLimits huge = FrameCache::LimitsForFrame(16384, 8640, 10);
+  Check(huge.max_bytes >= huge_bytes, "超大帧预算至少容纳一帧");
+  Check(huge.max_bytes / huge_bytes == 1, "超大帧预算只够一帧");
+  Check(huge.max_entries == 1, "超大帧单帧超预算时条目上限降为 1");
+  // T7.4：4K 档预算扩到 256MiB；8K/10-bit 一帧约 95MiB，仍能放 2 帧。
   const std::size_t eight_k_bytes = FrameCache::FrameBytesFor(7680, 4320, 10);
-  const FrameCacheLimits tiny = FrameCache::LimitsForFrame(7680, 4320, 10);
-  Check(tiny.max_bytes >= eight_k_bytes, "8K/10-bit 预算至少容纳一帧");
-  Check(tiny.max_bytes / eight_k_bytes == 1, "8K/10-bit 预算只够一帧");
-  const FrameCacheLimits tiny2 = FrameCache::LimitsForFrame(8192, 4320, 10);
-  Check(tiny2.max_entries == 1, "8K/10-bit 单帧超预算时条目上限降为 1");
+  const FrameCacheLimits eight_k = FrameCache::LimitsForFrame(7680, 4320, 10);
+  Check(eight_k.max_bytes >= eight_k_bytes * 2, "8K/10-bit 至少容纳 2 帧");
 
   cache.SetLimits(frame_bytes * 4, 4);
   AVFrame* frame = MakeNv12(64, 64, 40);

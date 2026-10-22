@@ -83,6 +83,9 @@ class MediaSession {
   AVFrame* last_hit_frame_ = nullptr;
   // true 表示解码器未必停在“最后返回帧的下一帧”，起播前需要重新定位。
   bool decoder_stale_ = true;
+  // T7.4：解码器顺序位置（下一帧 DecodeNextFrame 会返回的帧号）；-1 表示未知。
+  // 前进步进/精确 seek 后紧接 PgDn 只解一帧，不再从关键帧重解整段。
+  std::int64_t sequential_frame_ = -1;
   bool open_ = false;
 };
 

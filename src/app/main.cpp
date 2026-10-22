@@ -36,6 +36,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include "app/DragTestRunner.h"
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
 
@@ -84,6 +85,11 @@ int main(int argc, char* argv[]) {
   int memory_interval = 30;
   bool memory_soak_loop = true;
   int memory_loop_frames = 0;
+  // T7.4：4K 路径探针（P4/P6/P7/P8/P9）与测试专用强制软解。
+  bool drag_test = false;
+  int drag_samples = 20;
+  QString drag_tag;
+  bool force_software_decode = false;
   QString settings_path_arg;
   QString dpi_tag;
   QString banner_tag;
@@ -170,6 +176,16 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--memory-tag") &&
                i + 1 < arguments.size()) {
       memory_tag = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--drag-test")) {
+      drag_test = true;
+    } else if (arguments[i] == QStringLiteral("--drag-samples") &&
+               i + 1 < arguments.size()) {
+      drag_samples = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--drag-tag") &&
+               i + 1 < arguments.size()) {
+      drag_tag = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--force-software-decode")) {
+      force_software_decode = true;
     } else if (arguments[i] == QStringLiteral("--banner-tag") &&
                i + 1 < arguments.size()) {
       banner_tag = arguments[++i];
@@ -198,6 +214,12 @@ int main(int argc, char* argv[]) {
 
   if (loop_test) {
     qputenv("LAPIAN_LOOP_LOG", "1");
+  }
+  // T7.4：只影响测试路径，产品默认仍是硬解优先 + 失败回退软解。
+  if (force_software_decode) {
+    qputenv("LAPIAN_FORCE_SOFTWARE", "1");
+    std::fprintf(stderr, "T7.4 decode_mode forced=software\n");
+    std::fflush(stderr);
   }
   if (mark_test) {
     qputenv("LAPIAN_MARK_LOG", "1");
@@ -339,6 +361,17 @@ int main(int argc, char* argv[]) {
     memory_runner->Start();
   }
 
+  // T7.4：4K 路径探针；同样走产品异步索引与真实拖动/步进入口。
+  std::unique_ptr<lapian::app::DragTestRunner> drag_runner;
+  if (drag_test) {
+    if (drag_tag.isEmpty()) {
+      drag_tag = force_software_decode ? QStringLiteral("soft") : QStringLiteral("hard");
+    }
+    drag_runner = std::make_unique<lapian::app::DragTestRunner>(
+        &window, file_path, drag_samples, drag_tag);
+    drag_runner->Start();
+  }
+
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
   QTimer::singleShot(0, &window, [&app, &window, startup_test, startup_log, startup_ms,
                                   file_path]() {
@@ -353,7 +386,7 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if (!file_path.isEmpty() && !memory_test) {
+  if (!file_path.isEmpty() && !memory_test && !drag_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
                                     mark_test, note_test,
