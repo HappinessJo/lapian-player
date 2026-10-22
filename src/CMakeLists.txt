@@ -149,6 +149,8 @@ qt_add_executable(lapian WIN32
   app/InfoBar.h
   app/DragTestRunner.cpp
   app/DragTestRunner.h
+  app/GopBoundaryTestRunner.cpp
+  app/GopBoundaryTestRunner.h
   app/MemoryTestRunner.cpp
   app/MemoryTestRunner.h
   app/RobustTestRunner.cpp

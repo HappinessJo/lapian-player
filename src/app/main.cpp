@@ -37,6 +37,7 @@
 #include <psapi.h>
 
 #include "app/DragTestRunner.h"
+#include "app/GopBoundaryTestRunner.h"
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
 #include "app/RobustTestRunner.h"
@@ -91,6 +92,10 @@ int main(int argc, char* argv[]) {
   int drag_samples = 20;
   QString drag_tag;
   bool force_software_decode = false;
+  // T7.11：P7 跨 GOP 边界后退专项（目标为关键帧 → PgUp 到前一 GOP 末帧）。
+  bool gop_boundary_test = false;
+  int gop_boundary_samples = 20;
+  QString gop_boundary_tag;
   // T7.5：错误与鲁棒性探针。
   bool robust_test = false;
   QString robust_media;
@@ -194,6 +199,14 @@ int main(int argc, char* argv[]) {
       drag_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--force-software-decode")) {
       force_software_decode = true;
+    } else if (arguments[i] == QStringLiteral("--gop-boundary-test")) {
+      gop_boundary_test = true;
+    } else if (arguments[i] == QStringLiteral("--gop-boundary-samples") &&
+               i + 1 < arguments.size()) {
+      gop_boundary_samples = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--gop-boundary-tag") &&
+               i + 1 < arguments.size()) {
+      gop_boundary_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--robust-test")) {
       robust_test = true;
     } else if (arguments[i] == QStringLiteral("--robust-media") &&
@@ -251,6 +264,11 @@ int main(int argc, char* argv[]) {
   }
   if (note_test) {
     qputenv("LAPIAN_MARK_LOG", "1");
+  }
+  // T7.11：跨 GOP 边界专项需要 seek_log 证明每个 PgUp 都是从上一个关键帧
+  // 解完整 GOP（hit=0 decoded=60），而不是命中缓存或 handoff。
+  if (gop_boundary_test) {
+    qputenv("LAPIAN_SEEK_LOG", "1");
   }
   // T6.3：--settings-test 用独立根，默认 build/t6.3-settings，避免碰用户配置；
   // --settings-path 可指向 %APPDATA%\拉片软件 做真实默认路径验证。
@@ -439,6 +457,18 @@ int main(int argc, char* argv[]) {
     drag_runner->Start();
   }
 
+  // T7.11：P7 跨 GOP 边界后退专项；与拖动/步进探针共用产品入口。
+  std::unique_ptr<lapian::app::GopBoundaryTestRunner> gop_boundary_runner;
+  if (gop_boundary_test) {
+    if (gop_boundary_tag.isEmpty()) {
+      gop_boundary_tag =
+          force_software_decode ? QStringLiteral("soft") : QStringLiteral("hard");
+    }
+    gop_boundary_runner = std::make_unique<lapian::app::GopBoundaryTestRunner>(
+        &window, file_path, gop_boundary_samples, gop_boundary_tag);
+    gop_boundary_runner->Start();
+  }
+
   // T7.5：错误与鲁棒性探针。
   std::unique_ptr<lapian::app::RobustTestRunner> robust_runner;
   if (robust_test) {
@@ -468,7 +498,8 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if (!file_path.isEmpty() && !memory_test && !drag_test && !robust_test) {
+  if (!file_path.isEmpty() && !memory_test && !drag_test && !robust_test &&
+      !gop_boundary_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
                                     mark_test, note_test,
