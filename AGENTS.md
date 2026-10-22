@@ -306,7 +306,7 @@
 | `docs/handoff-2026-10-20-t7.2.1.md` | v1 | 2026-10-20 | 历史交接：T7.2.1 B=末帧循环/PgUp 画幅热修（`--loop-end-test`、显示尺寸、下一步 T7.3） |
 | `docs/handoff-2026-10-20-t7.3-wip.md` | v1 | 2026-10-20 | 历史 WIP 交接：T7.3 断网中断时的状态 |
 | `docs/handoff-2026-10-21-t7.3.md` | v1 | 2026-10-22 | **当前交接**：T7.3 90min 单文件 + 1h 子区间循环 pass；152s 异常未复现；V10 2h 未做 |
-| `docs/next-session-prompt.md` | v17 | 2026-10-21 | 给下个 agent 的新会话提示词（T7.3 收口/V10 慢漂移 + T7.4，可直接复制） |
+| `docs/next-session-prompt.md` | v18 | 2026-10-22 | 给下个 agent 的新会话提示词（T7.3 只等 V10 2h；可直接复制） |
 | `docs/perf/T3.1-audio.md` | v1 | 2026-10-20 | T3.1 音频设备/播放/seek/无音轨测量记录 |
 | `docs/perf/T3.2-sync.md` | v1 | 2026-10-20 | T3.2 音频主时钟/QPC 回退/24–60fps 同步测量记录 |
 | `docs/perf/T3.3-speed.md` | v1 | 2026-10-20 | T3.3 0.25–2x 重采样/音频推进/2x 同步测量记录 |
