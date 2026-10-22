@@ -175,6 +175,16 @@ struct VideoDecoder::Impl {
       context->pkt_timebase = stream->time_base;
 
       if (hardware) {
+        // T7.11.1：1080p 后退窗口的延后回拷最多同时持有 24 个硬解帧引用。
+        // FFmpeg 的 D3D11VA 静态表面池默认很小（实测持 18 帧就耗尽），
+        // 这里给 1080p 及以下预留窗口大小的额外表面；4K 仍走同步回拷，不加池。
+        if (static_cast<std::int64_t>(parameters->width) * parameters->height <=
+            1920 * 1088) {
+          context->extra_hw_frames = 32;
+        }
+      }
+
+      if (hardware) {
         AVBufferRef* device = nullptr;
         if (shared_d3d11_device != nullptr) {
           device = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);

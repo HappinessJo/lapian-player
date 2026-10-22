@@ -471,6 +471,12 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
           });
   qApp->installEventFilter(this);
 
+  // T7.11.1：跨 GOP 后退第一步先把硬解窗口作为引用保留，目标帧呈现后再按块
+  // 回拷进 FrameCache。0ms 定时器让按键/绘制事件先执行，回拷不进入 P7 计时。
+  cache_fill_timer_ = new QTimer(this);
+  cache_fill_timer_->setInterval(0);
+  connect(cache_fill_timer_, &QTimer::timeout, this, &MainWindow::FillFrameCacheStep);
+
   connect(timeline_, &TimelineWidget::scrubStarted, this, &MainWindow::OnScrubStarted);
   connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
           &MainWindow::OnScrubTargetChanged);
@@ -1131,6 +1137,10 @@ void MainWindow::OpenFile(const QString& path) {
 
   if (playback_ != nullptr) {
     playback_->Pause();
+  }
+  // T7.11.1：旧会话的延后回拷窗口随会话替换作废，定时器不能对着新会话跑。
+  if (cache_fill_timer_ != nullptr) {
+    cache_fill_timer_->stop();
   }
   // 旧文件的截图任务先完成，避免工作线程在会话替换后继续引用旧帧。
   if (snapshots_ != nullptr) {
@@ -2878,6 +2888,12 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
   timeline_->SetCurrentFrame(target);
   playback_->SetPosition(target, info.pts_us);
   current_frame_ = target;
+  // T7.11.1：后退窗口的硬解帧先以引用形式留在会话里；画面已经呈现，回拷放到
+  // 事件循环空闲时做，避免跨 GOP 第一步把 24 帧 GPU→CPU 拷贝算进 UI 延迟。
+  if (mode == lapian::media::FrameCacheMode::kBackwardWindow &&
+      session_->HasPendingCacheWindow() && cache_fill_timer_ != nullptr) {
+    cache_fill_timer_->start();
+  }
   if (qEnvironmentVariableIsSet("LAPIAN_CACHE_LOG")) {
     const lapian::media::FrameCacheStats stats = session_->frame_cache().stats();
     std::fprintf(stderr,
@@ -2892,6 +2908,21 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
     std::fflush(stderr);
   }
   statusBar()->showMessage(QStringLiteral("第 %1 帧").arg(target), 2000);
+}
+
+void MainWindow::FillFrameCacheStep() {
+  if (session_ == nullptr || !session_->IsOpen() ||
+      !session_->HasPendingCacheWindow()) {
+    if (cache_fill_timer_ != nullptr) {
+      cache_fill_timer_->stop();
+    }
+    return;
+  }
+  // 4 帧 ≈ 12ms，留出事件循环给按键/绘制；24 帧窗口约 6 个 tick 填完。
+  const bool more = session_->CopyPendingCacheFrames(4);
+  if (!more && cache_fill_timer_ != nullptr) {
+    cache_fill_timer_->stop();
+  }
 }
 
 // T7.4：拖动/跳转/步进探针只转发到产品入口，不改变任何语义。

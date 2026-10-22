@@ -277,6 +277,8 @@ class MainWindow : public QMainWindow {
   void ShowEmptyState();
   void GoToFrameInternal(std::int64_t frame, lapian::media::FrameCacheMode mode);
   void GoToFrameForStep(std::int64_t frame, bool backward);
+  // T7.11.1：把待回拷的后退窗口按块写进 FrameCache（每块 4 帧，0ms 定时器）。
+  void FillFrameCacheStep();
   bool ApplyGotoText(const QString& text);
   bool IsTextInputFocused() const;
   bool CanEditLoop() const;
@@ -388,6 +390,8 @@ class MainWindow : public QMainWindow {
   QTimer* preview_timer_ = nullptr;
   QTimer* step_repeat_timer_ = nullptr;
   QTimer* settings_save_timer_ = nullptr;
+  // T7.11.1：后退跨 GOP 第一步的硬解窗口延后回拷（呈现后再填缓存）。
+  QTimer* cache_fill_timer_ = nullptr;
   int step_direction_ = 0;
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;

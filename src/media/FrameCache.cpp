@@ -5,7 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <mutex>
 #include <utility>
+
+#include "platform/gfx/D3D11Context.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -86,9 +89,15 @@ bool FrameCache::Put(const AVFrame* frame, std::int64_t frame_index, std::int64_
       return false;
     }
     const auto transfer_started = std::chrono::steady_clock::now();
-    if (av_hwframe_transfer_data(copy, frame, 0) < 0) {
-      av_frame_free(&copy);
-      return false;
+    {
+      // T7.11.1：延后回拷可能和截图线程的回读同时发生；两者共用 D3D11
+      // 立即上下文，沿用 VideoDecoder/SnapshotService 的同一把递归锁。
+      const std::lock_guard<std::recursive_mutex> lock(
+          lapian::gfx::D3D11ContextMutex());
+      if (av_hwframe_transfer_data(copy, frame, 0) < 0) {
+        av_frame_free(&copy);
+        return false;
+      }
     }
     transfer_ms = std::chrono::duration<double, std::milli>(
                       std::chrono::steady_clock::now() - transfer_started)

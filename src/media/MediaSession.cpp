@@ -45,6 +45,10 @@ int BitDepthOfFormat(int format) {
 // 硬解帧不回拷，避免 av_hwframe_transfer_data 等 GPU 队列（实测 70–80ms），
 // 否则会把 P6/P9 的余量吃掉。引用在下一次 seek/Close 时释放。
 
+// T7.11.1：只对 1080p 及以下硬解后退窗口做延后回拷。4K 的 20 帧窗口若持有
+// D3D11 表面约 250MB（显存或共享内存），继续走同步回拷，避免拖坏 4K 路径。
+constexpr int kDeferredCacheMaxPixels = 1920 * 1088;
+
 }  // namespace
 
 MediaSession::MediaSession() = default;
@@ -54,6 +58,7 @@ MediaSession::~MediaSession() {
     av_frame_free(&last_hit_frame_);
   }
   ClearSeekHandoff();
+  CancelPendingCacheWindow();
 }
 
 void MediaSession::ClearSeekHandoff() {
@@ -75,6 +80,7 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
   }
   frame_cache_.Clear();
   ClearSeekHandoff();
+  CancelPendingCacheWindow();
   decoder_stale_ = true;
 
   // T7.1：分段计时只用于冷启动报告；失败路径也记录，便于区分探测/解码/索引。
@@ -178,6 +184,7 @@ void MediaSession::InstallIndex(FrameIndex index, double build_ms) {
   // 新索引可能改变帧号/PTS 映射，旧缓存必须丢弃。
   frame_cache_.Clear();
   ClearSeekHandoff();
+  CancelPendingCacheWindow();
   decoder_stale_ = true;
   sequential_frame_ = -1;
   index_ = std::move(index);
@@ -236,6 +243,39 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
   // 新的 seek 会让上一帧 handoff 失效。
   ClearSeekHandoff();
 
+  // T7.11.1：回拷完成前，连续后退仍从待回拷窗口直接命中。命中只 clone 一次
+  // AVFrame 引用（硬解帧保留纹理引用），不触发 GPU→CPU 回拷。
+  if (cache_mode == FrameCacheMode::kBackwardWindow) {
+    for (auto it = pending_cache_window_.rbegin(); it != pending_cache_window_.rend();
+         ++it) {
+      if (it->frame_index != frame) {
+        continue;
+      }
+      AVFrame* clone = av_frame_clone(it->frame);
+      if (clone != nullptr) {
+        last_hit_frame_ = clone;
+        *out = it->info;
+        out->av_frame = clone;
+        decoder_stale_ = true;
+        sequential_frame_ = -1;
+        if (seek_log) {
+          std::fprintf(stderr,
+                       "T7.4 seek_log frame=%lld hit=3 pending=1 total_ms=%.2f\n",
+                       static_cast<long long>(frame), ElapsedMs(seek_started));
+          std::fflush(stderr);
+        }
+        return true;
+      }
+      break;
+    }
+  }
+
+  // 非后退操作（跳转/前进/起播）不使用后退窗口，进入解码前先释放引用。
+  if (cache_mode != FrameCacheMode::kBackwardWindow &&
+      !pending_cache_window_.empty()) {
+    CancelPendingCacheWindow();
+  }
+
   // T7.4：前进步进/精确 seek 后紧接 PgDn：解码器已经停在目标帧上时直接解一帧。
   // 旧实现每次前进都从最近关键帧重解到目标（4K 2s GOP 约 20–60 帧，p95 >200ms）。
   if (cache_mode == FrameCacheMode::kNone && sequential_frame_ == frame &&
@@ -290,9 +330,18 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
     }
   }
 
+  // 后退窗口和 FrameCache 都没有目标帧，接下来要真正解码；先释放窗口引用，
+  // 避免解码器申请表面时和这 24 帧的引用撞车。
+  if (cache_mode == FrameCacheMode::kBackwardWindow &&
+      !pending_cache_window_.empty()) {
+    CancelPendingCacheWindow();
+  }
+
   const std::size_t max_entries = frame_cache_.stats().max_entries;
   std::int64_t decoded_frames = 0;
+  std::size_t deferred_frames = 0;
   double cache_ms = 0.0;
+  double clone_ms = 0.0;
   auto decode_range = [&](std::int64_t start_frame) -> bool {
     std::int64_t cache_from = frame + 1;
     if (cache_mode == FrameCacheMode::kBackwardWindow && max_entries > 0) {
@@ -311,10 +360,23 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
       }
       ++decoded_frames;
       if (cache_mode != FrameCacheMode::kNone && index >= cache_from) {
-        const auto cache_started = Clock::now();
-        frame_cache_.Put(info.av_frame, index, info.pts, info.pts_us,
-                         info.duration_us, info.key_frame);
-        cache_ms += ElapsedMs(cache_started);
+        // T7.11.1：1080p 硬解后退窗口先保留引用，回拷交给事件循环空闲时分块做。
+        // 目标帧本身也在窗口内，clone 后再返回；调用方呈现完才开始回拷。
+        const bool defer = cache_mode == FrameCacheMode::kBackwardWindow &&
+                           info.hardware &&
+                           static_cast<std::int64_t>(info.width) * info.height <=
+                               kDeferredCacheMaxPixels;
+        const auto clone_started = Clock::now();
+        if (defer && AddPendingCacheFrame(info, index)) {
+          ++deferred_frames;
+          clone_ms += ElapsedMs(clone_started);
+        } else {
+          clone_ms += ElapsedMs(clone_started);
+          const auto cache_started = Clock::now();
+          frame_cache_.Put(info.av_frame, index, info.pts, info.pts_us,
+                           info.duration_us, info.key_frame);
+          cache_ms += ElapsedMs(cache_started);
+        }
       }
       // T7.9：只保留目标前一帧的引用；目标帧本身直接交给调用方呈现。
       if (cache_mode == FrameCacheMode::kSeekHandoff && index == frame - 1) {
@@ -369,8 +431,11 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
 
   if (!ok) {
     // 索引不可靠或关键帧路径失败：从头解码计数。
+    CancelPendingCacheWindow();
+    deferred_frames = 0;
     decoded_frames = 0;
     cache_ms = 0.0;
+    clone_ms = 0.0;
     const auto seek_start = Clock::now();
     const bool seek_ok = decoder_->SeekToPts(index_.PtsOfFrame(0), error);
     seek_ms += ElapsedMs(seek_start);
@@ -380,20 +445,89 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
   if (seek_log) {
     std::fprintf(stderr,
                  "T7.4 seek_log frame=%lld hit=0 keyframe=%lld decoded=%lld "
-                 "seek_ms=%.2f decode_ms=%.2f cache_ms=%.2f total_ms=%.2f ok=%d\n",
+                 "seek_ms=%.2f decode_ms=%.2f clone_ms=%.2f cache_ms=%.2f "
+                 "total_ms=%.2f ok=%d pending=%zu\n",
                  static_cast<long long>(frame), static_cast<long long>(keyframe),
                  static_cast<long long>(decoded_frames), seek_ms,
-                 ElapsedMs(seek_started) - seek_ms - cache_ms, cache_ms,
-                 ElapsedMs(seek_started), ok ? 1 : 0);
+                 ElapsedMs(seek_started) - seek_ms - cache_ms - clone_ms, clone_ms,
+                 cache_ms, ElapsedMs(seek_started), ok ? 1 : 0, deferred_frames);
     std::fflush(stderr);
   }
+  if (!ok) {
+    CancelPendingCacheWindow();
+  }
   return ok;
+}
+
+bool MediaSession::AddPendingCacheFrame(const DecodedFrameInfo& info,
+                                        std::int64_t frame_index) {
+  if (info.av_frame == nullptr) {
+    return false;
+  }
+  AVFrame* clone = av_frame_clone(info.av_frame);
+  if (clone == nullptr) {
+    return false;
+  }
+  PendingCacheFrame pending;
+  pending.frame = clone;
+  pending.frame_index = frame_index;
+  pending.info = info;
+  pending.info.av_frame = nullptr;
+  pending_cache_window_.push_back(std::move(pending));
+  return true;
+}
+
+void MediaSession::CancelPendingCacheWindow() {
+  for (PendingCacheFrame& entry : pending_cache_window_) {
+    if (entry.frame != nullptr) {
+      av_frame_free(&entry.frame);
+    }
+  }
+  pending_cache_window_.clear();
+}
+
+bool MediaSession::CopyPendingCacheFrames(std::size_t max_frames) {
+  if (max_frames == 0) {
+    return !pending_cache_window_.empty();
+  }
+  const bool seek_log = std::getenv("LAPIAN_SEEK_LOG") != nullptr;
+  const auto started = Clock::now();
+  std::size_t copied = 0;
+  // 从窗口头部（更早的帧）开始回拷：FrameCache 的 64MiB 预算实际只能放 21 帧
+  // （24×3.11MB > 64MiB），淘汰的是最早写入的条目；先写旧帧可以把新帧留在
+  // 缓存里，正好覆盖“继续后退”的下一批目标。
+  while (copied < max_frames && !pending_cache_window_.empty()) {
+    PendingCacheFrame entry = std::move(pending_cache_window_.front());
+    pending_cache_window_.erase(pending_cache_window_.begin());
+    if (entry.frame != nullptr) {
+      const bool put_ok =
+          frame_cache_.Put(entry.frame, entry.frame_index, entry.info.pts,
+                           entry.info.pts_us, entry.info.duration_us,
+                           entry.info.key_frame);
+      if (!put_ok && seek_log) {
+        std::fprintf(stderr, "T7.11.1 cache_fill_put_failed frame=%lld\n",
+                     static_cast<long long>(entry.frame_index));
+        std::fflush(stderr);
+      }
+      av_frame_free(&entry.frame);
+    }
+    ++copied;
+  }
+  if (seek_log) {
+    std::fprintf(stderr,
+                 "T7.11.1 cache_fill_slice copied=%zu remaining=%zu total_ms=%.2f\n",
+                 copied, pending_cache_window_.size(), ElapsedMs(started));
+    std::fflush(stderr);
+  }
+  return !pending_cache_window_.empty();
 }
 
 bool MediaSession::EnsureSequentialPosition(std::int64_t frame, std::string* error) {
   if (error != nullptr) {
     error->clear();
   }
+  // T7.11.1：起播要真正解码，先释放待回拷窗口占用的解码表面。
+  CancelPendingCacheWindow();
   if (!open_ || decoder_ == nullptr) {
     if (error != nullptr) {
       *error = "会话未打开";
@@ -420,6 +554,7 @@ void MediaSession::Close() {
   }
   frame_cache_.Clear();
   ClearSeekHandoff();
+  CancelPendingCacheWindow();
   decoder_stale_ = true;
   sequential_frame_ = -1;
   decoder_.reset();

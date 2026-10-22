@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "media/FrameCache.h"
 #include "media/FrameIndex.h"
@@ -56,6 +58,16 @@ class MediaSession {
   // 缓存命中后解码器可能不在目标帧之后；起播前调用一次，必要时真正 seek。
   bool EnsureSequentialPosition(std::int64_t frame, std::string* error);
 
+  // T7.11.1：后退步进跨 GOP 时的延后回拷。窗口内的硬解帧先只保留 AVFrame 引用
+  // （O(1)，不触发 GPU→CPU 拷贝），目标帧立即返回给调用方呈现；调用方在事件循环
+  // 空闲时用 CopyPendingCacheFrames 分块写入 FrameCache。这样“跨 GOP 边界后退
+  // 第一步”不再把 24 帧同步回拷（76–105ms）算进 P7 呈现延迟。
+  bool HasPendingCacheWindow() const { return !pending_cache_window_.empty(); }
+  // 最多回拷 max_frames 帧；返回 true 表示窗口里还有剩余。只在 GUI 线程调用。
+  bool CopyPendingCacheFrames(std::size_t max_frames);
+  // 丢弃尚未回拷的引用（切文件/关窗/开始新的解码前调用，避免占住解码表面）。
+  void CancelPendingCacheWindow();
+
   bool IsOpen() const { return open_; }
   const MediaInfo& info() const { return probe_.info; }
   const MediaProbeResult& probe() const { return probe_; }
@@ -73,6 +85,13 @@ class MediaSession {
 
  private:
   void ClearSeekHandoff();
+  bool AddPendingCacheFrame(const DecodedFrameInfo& info, std::int64_t frame_index);
+
+  struct PendingCacheFrame {
+    AVFrame* frame = nullptr;
+    std::int64_t frame_index = -1;
+    DecodedFrameInfo info;
+  };
 
   MediaProbeResult probe_;
   MediaProbeResult last_attempt_;
@@ -88,6 +107,8 @@ class MediaSession {
   AVFrame* seek_previous_frame_ = nullptr;
   std::int64_t seek_previous_index_ = -1;
   DecodedFrameInfo seek_previous_info_;
+  // T7.11.1：等待回拷的后退窗口帧（硬解帧引用 + 元数据）。只在 GUI 线程访问。
+  std::vector<PendingCacheFrame> pending_cache_window_;
   // true 表示解码器未必停在“最后返回帧的下一帧”，起播前需要重新定位。
   bool decoder_stale_ = true;
   // T7.4：解码器顺序位置（下一帧 DecodeNextFrame 会返回的帧号）；-1 表示未知。
