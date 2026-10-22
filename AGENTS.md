@@ -2,17 +2,17 @@
 
 > 给后续新开对话的 agent：先读本文件，再读 [spec.md](spec.md)、[plan.md](plan.md)、[tasks.md](tasks.md)。
 > 产品决策以 `spec.md` v0.3 为准；技术方案以 `plan.md` + ADR 为准；任务以 `tasks.md` 为准。
-> 最后更新：2026-10-22（v6.3：T7.10 合成 V1–V10 片单已生成，V10 2h soak 进行中/待收口；T7.9 已收口；T7.7 仍待真实片单/基线机）
+> 最后更新：2026-10-22（v6.4：合成 V10 2h soak `pass=1`；V1–V9 冒烟 18/18；P7 跨 GOP 边界 2s GOP p95 145.60ms、1s 收紧档 92.65ms，未过 80ms；T7.7/正式 V10 仍待）
 
 ---
 
 ## 1. 当前状态
 
 - **项目**：拉片软件，Windows 桌面端的帧级参考片审阅器。
-- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；**T7.3 soak 监测代码完成（`188c63e`/`31d0d94`/`852b68a`）；90min 单文件连续播放 `pass=1`（WS 150.9→153.1，+2.1MB），1h 同文件子区间循环也 `pass=1`（156.0→159.9，+3.9MB，23 次 B→A）；152s 循环的 +18.2/+20.8MB 未复现；V10 2h 未做，P14 未通过。T7.4（`40bba7f`）4K 路径：proxy-V4 硬解一轮 P4/P6/P7/P8/P9/P11 达到 4K 放宽档（P7 p95 2ms 级但每约 20 步有 ~410ms 缓存重填尖峰；seek 后 PgUp 单样本 201–213ms 超限，T7.9 已修 4K）；软解 P6/P9 未过**；T7.5 错误与鲁棒性：`--robust-test` 75 项/0 失败（6.84s）、只读目录 ACL 17/17、7 类坏文件 ≤34ms、不可达 UNC 3.03s（修复前 21s）、288 字符长路径 sidecar/截图通过、设备丢失模拟恢复；T7.6 打包/关联/许可/体积：`scripts/package.ps1`/`installer.iss` 每用户安装（非管理员、`%LOCALAPPDATA%\Programs\拉片软件`）、ProgID/4 扩展名 OpenWithProgids（不设默认）、便携 zip 13.65MB/setup 11.31MB、卸载清理且保留 settings/marks/sidecar；T7.8 基准回归：`scripts\bench-regression.ps1` + 阈值/基线，8 套件；T7.9 收口 P7 seek→PgUp（`d1c7369`，60 项/0 失败、30/30 容差、27/30 严格 ±10%；4K 2s GOP spot 206→0.06ms；基线 `dev-2026-10-22-t7.9`）；`ctest` 22/22、`dist` 32.63MB/25 文件；**可达 SMB 共享、物理设备丢失、真实 V8 未验；F1-A1 仅本机热缓存预检；P1/P2 热缓存；1080p 旧 372ms 经查是 10s GOP 关键帧边界（不属 80ms），4K 2s GOP 已修至 0.06ms；跨 GOP 边界专项仍需 T7.7 用真实 V1 记录**；V1–V8 真素材手测待补；T7.10 合成 V1–V10 片单已生成（media/synthetic-suite，V10 2h soak 19:30 启动、待收口）。**新对话先读 [docs/handoff-2026-10-22-t7.10.md](docs/handoff-2026-10-22-t7.10.md)**。
+- **阶段**：实现阶段，**M0 已完成**（T0.1 骨架/依赖锁定、T0.2 素材与测量、T0.3 精确 seek 探针）。T0.3 已按**方案 A** 决策：P7=±1；P6/P9 目标距前关键帧 ≤2s；长 GOP 按可用档。**T1.1–T1.6、T2.1–T2.10 + T2.9.1、T3.1–T3.7、T4.1–T4.2、T5.1–T5.4、T6.1–T6.5、T7.1、T7.2、T7.2.1** 代码完成；M1/M2/M3/M4 代码闭环，M5 标记/备注/截图、M6 全屏/键位/设置/DPI/状态横幅、M7 冷启动/内存与循环/画幅热修完成；**T7.3 soak 监测代码完成（`188c63e`/`31d0d94`/`852b68a`）；90min 单文件连续播放 `pass=1`（WS 150.9→153.1，+2.1MB），1h 同文件子区间循环也 `pass=1`（156.0→159.9，+3.9MB，23 次 B→A）；152s 循环的 +18.2/+20.8MB 未复现；V10 2h 未做，P14 未通过。T7.4（`40bba7f`）4K 路径：proxy-V4 硬解一轮 P4/P6/P7/P8/P9/P11 达到 4K 放宽档（P7 p95 2ms 级但每约 20 步有 ~410ms 缓存重填尖峰；seek 后 PgUp 单样本 201–213ms 超限，T7.9 已修 4K）；软解 P6/P9 未过**；T7.5 错误与鲁棒性：`--robust-test` 75 项/0 失败（6.84s）、只读目录 ACL 17/17、7 类坏文件 ≤34ms、不可达 UNC 3.03s（修复前 21s）、288 字符长路径 sidecar/截图通过、设备丢失模拟恢复；T7.6 打包/关联/许可/体积：`scripts/package.ps1`/`installer.iss` 每用户安装（非管理员、`%LOCALAPPDATA%\Programs\拉片软件`）、ProgID/4 扩展名 OpenWithProgids（不设默认）、便携 zip 13.65MB/setup 11.31MB、卸载清理且保留 settings/marks/sidecar；T7.8 基准回归：`scripts\bench-regression.ps1` + 阈值/基线，8 套件；T7.9 收口 P7 seek→PgUp（`d1c7369`，60 项/0 失败、30/30 容差、27/30 严格 ±10%；4K 2s GOP spot 206→0.06ms；基线 `dev-2026-10-22-t7.9`）；`ctest` 22/22、`dist` 32.65MB/25 文件；**可达 SMB 共享、物理设备丢失、真实 V8 未验；F1-A1 仅本机热缓存预检；P1/P2 热缓存；1080p 旧 372ms 经查是 10s GOP 关键帧边界（不属 80ms），4K 2s GOP 已修至 0.06ms；T7.11 P7 跨 GOP 边界实测：2s GOP p95 145.60ms、1s 收紧档 92.65ms，均超 80ms（根因 24 帧同步缓存回拷 76–105ms），是 T7.7 的 P7 blocker**；V1–V8 真素材手测待补；T7.10 合成 V1–V10 片单已生成，合成 V10 2h soak `v10-synth` `pass=1`（WS 162.4→164.8MB、包络 0.16MB/h、handles 691→675、threads 56→50、frame_stall=0、underruns=0、ui_gap 212ms；替身 P14 稳定性，不是正式 P14）；T7.10 的 V1–V9 冒烟 18/18。**新对话先读 [docs/handoff-2026-10-22-t7.11.md](docs/handoff-2026-10-22-t7.11.md)**。
 - **规格**：[spec.md](spec.md) **v0.3**，首期唯一验收来源。
-- **规划**：[plan.md](plan.md) v0.2（技术方案）、[tasks.md](tasks.md) v0.23（已审核任务）、[docs/adr/](docs/adr/)（架构决策）、[docs/spec-v0.3-delta.md](docs/spec-v0.3-delta.md)（已并入 v0.3）、[spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)（方案 A）。
-- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.63MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/256MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）与 T7.3 长时浸泡监测（`--memory-mode soak`、`SoakStats` 5min 下包络、线程数/UI 心跳/看门狗、`scripts\soak-bench.ps1`；30min/1h 探针触发 `memory_growth`，V10 2h 未做）与 T7.4 4K 路径（前进顺序解码、4K 后退窗口 20 帧、`--drag-test`/`--force-software-decode`、4K proxy 硬解 P4/P6/P7/P8/P9/P11 达标）与 T7.5 错误与鲁棒性（`--robust-test`、网络路径 3s 有界预检、长路径 sidecar、只读 ACL 脚本、设备丢失模拟；75 项/0 失败）与 T7.6 打包/关联/许可/体积（`scripts\package.ps1`/`installer.iss`、每用户安装、ProgID/4 扩展名 OpenWithProgids、便携 zip、setup 11.31MB、卸载清理保留用户数据）与 T7.8 基准回归（`scripts\bench-regression.ps1`、`scripts\bench\thresholds.json`、`baseline-dev.json`，8 套件）及 T7.9 P7 seek→PgUp handoff（60 项、4K spot 0.06ms）已接；`ctest` **22/22**。
+- **规划**：[plan.md](plan.md) v0.2（技术方案）、[tasks.md](tasks.md) v0.25（已审核任务）、[docs/adr/](docs/adr/)（架构决策）、[docs/spec-v0.3-delta.md](docs/spec-v0.3-delta.md)（已并入 v0.3）、[spec-v0.3-p6p7-proposal.md](docs/spec-v0.3-p6p7-proposal.md)（方案 A）。
+- **仓库现状**：源码、构建/打包/测量脚本、seek 探针、媒体探测库/工具、音频与同步链路已入库；`dist` 当前 **32.65MB / 25 文件**，应用已能打开/播放/步进/跳帧/时间轴缩放滚动、点击/拖动定位、拖动预览与松手精确，并已接入第一条音轨的 WASAPI 输出、音量/静音、IAudioClock 主时钟与 QPC 回退、0.25–2x 变速、后台波形生成与时间轴绘制、A/B 入出点/色条/循环播放/A=B 定帧；T5.1 sidecar 存储、T5.2 标记 UI（Ctrl+M、侧栏、时间轴标记、点击跳转、删除确认、存储位置/警告）、T5.3 备注编辑（标签/备注、失焦/Enter/Ctrl+Enter 保存、关窗 flush、焦点隔离）与 T5.4 截图（`S`、当前显示帧、display matrix 旋转、WIC PNG、命名/重名序号、目录回退、后台编码）与 T6.1 全屏（`F`/双击、`Esc` 退出、几何/焦点恢复、交换链跟随 resize、全屏 `S`/时间轴可用）、T6.2 键位/焦点矩阵（全局步进/Home/End、`+`/`-`、文本/模态让位）、T6.3 设置持久化（音量/波形跨会话、循环/速度仅会话、损坏静默回退）、T6.4 DPI/布局（100–200% 响应式侧栏/信息栏、`--dpi-test`）、T6.5 状态横幅（六类提示、唯一横幅、其余进状态栏、`--banner-test`）、T2.9.1 反向拖动预览补丁（只发布目标帧、过期帧丢弃、32 帧缓存）、T6.2.1 长按连发补丁（忽略自动重复 KeyRelease）与 T7.1 启动埋点/后台索引（`--startup-test`/`--index-test`、首帧后扫描、`SetTotal(Scanning→Exact)`）与 T7.2 内存预算/有界帧缓存（`FrameCache` 64/256MiB、`--memory-test`、切文件释放、波形 4h 硬上限）与 T7.2.1 热修（B=末帧循环、PgUp 画幅/显示尺寸、`--loop-end-test`）与 T7.3 长时浸泡监测（`--memory-mode soak`、`SoakStats` 5min 下包络、线程数/UI 心跳/看门狗、`scripts\soak-bench.ps1`；30min/1h 探针触发 `memory_growth`，V10 2h 未做）与 T7.4 4K 路径（前进顺序解码、4K 后退窗口 20 帧、`--drag-test`/`--force-software-decode`、4K proxy 硬解 P4/P6/P7/P8/P9/P11 达标）与 T7.5 错误与鲁棒性（`--robust-test`、网络路径 3s 有界预检、长路径 sidecar、只读 ACL 脚本、设备丢失模拟；75 项/0 失败）与 T7.6 打包/关联/许可/体积（`scripts\package.ps1`/`installer.iss`、每用户安装、ProgID/4 扩展名 OpenWithProgids、便携 zip、setup 11.31MB、卸载清理保留用户数据）与 T7.8 基准回归（`scripts\bench-regression.ps1`、`scripts\bench\thresholds.json`、`baseline-dev.json`，8 套件）及 T7.9 P7 seek→PgUp handoff（60 项、4K spot 0.06ms）与 T7.10 合成 V1–V10 片单/合成 V10 2h soak（`pass=1`，替身 P14）及 T7.11 P7 跨 GOP 边界探针已接；`ctest` **22/22**。
 - **本文件**：给新对话 agent 的项目上下文，不替代 spec 的验收条款。
 
 **规格与规划的差异**：`spec.md` v0.3 已应用；plan/tasks 已按 v0.3 同步。实现以 tasks.md 为准；后续只允许通过 spec 版本记录修正验收口径，不静默改。
@@ -39,8 +39,8 @@
 |---|---|
 | 平台 | Windows 10 21H2+ / Windows 11 x64；不做 macOS / Linux / 网页 / 移动 |
 | 技术栈 | C++20 + Qt 6 Widgets + FFmpeg LGPL 动态链接 + D3D11 + WASAPI（ADR-001/004） |
-| 当前阶段 | 实现阶段；M0 完成；M1–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5、T7.1–T7.9 代码/脚本完成；T7.3 90min 单文件 + 1h 子区间循环 pass，P14/V10 未通过；T7.4 4K proxy 硬解一轮达标（T7.9 已修 seek 后 PgUp）；T7.5 鲁棒性 75 项/只读 17 项通过（可达 SMB/物理设备丢失/真实 V8 未验）；T7.6 每用户安装/ProgID/便携 zip/卸载本机通过（F1-A1 未正式验收）；T7.8 基准回归 + T7.9 P7 收口：60 项/0 失败、30/30 容差内（P1/P2 热缓存） |
-| 规划/任务 | `plan.md` v0.2（技术方案）、`tasks.md` v0.23（T0.1–T7.9）、`docs/adr/ADR-001`–`006` |
+| 当前阶段 | 实现阶段；M0 完成；M1–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5、T7.1–T7.9 代码/脚本完成；T7.3 90min 单文件 + 1h 子区间循环 pass，P14/V10 未通过；T7.4 4K proxy 硬解一轮达标（T7.9 已修 seek 后 PgUp）；T7.5 鲁棒性 75 项/只读 17 项通过（可达 SMB/物理设备丢失/真实 V8 未验）；T7.6 每用户安装/ProgID/便携 zip/卸载本机通过（F1-A1 未正式验收）；T7.8 基准回归 + T7.9 P7 收口：60 项/0 失败、30/30 容差内（P1/P2 热缓存）；T7.10 合成 V10 2h soak `pass=1`、V1–V9 冒烟 18/18；T7.11 P7 跨 GOP 边界 2s GOP p95 145.60ms / 1s 收紧档 92.65ms，未过 80ms |
+| 规划/任务 | `plan.md` v0.2（技术方案）、`tasks.md` v0.25（T0.1–T7.11）、`docs/adr/ADR-001`–`006` |
 | 帧号 | 0 基“显示帧序号”；CFR 精确；VFR 按显示帧计数并提示；等距帧格；`HH:MM:SS:FF` 时间码辅助 |
 | 保证档 | 1080p，H.264/H.265，8-bit SDR，≤60fps，MP4/MOV/MKV；保证档要求 D3D11 + 硬解 |
 | 可用档 | 4K ≤30fps；VP9/AV1/WebM 能播则播；H.265 4K60；长 GOP 帧精确但性能按可用档 |
@@ -126,7 +126,7 @@
 | B 站 | 首期不做；零网络请求；进候选待定 | 帧精确访问仍需本地缓存，“免下载”不成立；接口/风控/合规风险高 |
 | 未提及项 | 一律按 AE 习惯处理 | 用户明确指示：0 基、点击/拖动时间轴即暂停、打开不自动播放 |
 | 候选池 | 只记一句话价值 + 触发条件；不写验收 | 防止范围膨胀；B 站/分镜/吸管标“待定” |
-| 当前阶段 | 实现阶段；M0 完成；M1–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5、T7.1–T7.9 代码/脚本完成；T7.3 90min 单文件 + 1h 循环 pass，P14/V10 未通过；T7.4 4K proxy 硬解一轮达标；T7.5 鲁棒性通过（缺口见交接）；T7.6 每用户安装/关联/便携 zip/卸载本机通过（F1-A1 待 T7.7）；T7.8 基准回归 + T7.9 P7 收口：60 项/0 失败、30/30 容差内（P1/P2 热缓存；4K seek 后 PgUp 0.06ms） | 规划已完成；spec v0.3 冻结；不重开已拍板决策 |
+| 当前阶段 | 实现阶段；M0 完成；M1–M4（含 T2.9.1）、T5.1–T5.4、T6.1–T6.5、T7.1–T7.9 代码/脚本完成；T7.3 90min 单文件 + 1h 循环 pass，P14/V10 未通过；T7.4 4K proxy 硬解一轮达标；T7.5 鲁棒性通过（缺口见交接）；T7.6 每用户安装/关联/便携 zip/卸载本机通过（F1-A1 待 T7.7）；T7.8 基准回归 + T7.9 P7 收口：60 项/0 失败、30/30 容差内（P1/P2 热缓存；4K seek 后 PgUp 0.06ms）；T7.10 合成 V10 soak pass / V1–V9 冒烟 18/18；T7.11 P7 边界 2s 145.60ms / 1s 92.65ms 未过 80ms | 规划已完成；spec v0.3 冻结；不重开已拍板决策 |
 | 验收片单 | `spec.md` §8 的 V1–V10 | 固定片单才能复现性能验收 |
 
 **规划阶段新增拍板（2026-10-19，详见 plan.md 与 docs/spec-v0.3-delta.md）**
@@ -254,7 +254,7 @@
 2. **`spec.md` v0.3 是验收基础**；历史回补与 P6/P7 方案 A 已并入。冲突时先指出，按 §9 版本记录处理，不静默选。
 3. **不重开 §6 已拍板项。** 用户要改时，先列出受影响的验收条款，再等确认；不要直接改。
 4. **不自行加需求。** 新想法先放候选池，一句话价值 + 触发条件，不写验收；优先级不明标“待定”。
-5. **当前阶段是实现阶段**：按 `tasks.md` 的 M0→M7 顺序做；一个任务 = 一次可审查变更；不跳任务、不顺带加功能。T0.3 已决策方案 A；M1/M2/M3（T1.1–T3.7）、M4（T4.1–T4.2）、T5.1–T5.4、T6.1–T6.5、T2.9.1、T6.2.1、T7.1–T7.2.1 代码完成；T7.3 90min 单文件 + 1h 子区间循环均 pass，无可复现持续增长，P14/V10 未通过；T7.4 4K proxy 硬解一轮 P4/P6/P7/P8/P9/P11 达标（软解 P6/P9 未过）；T7.5 错误与鲁棒性代码完成（75 项/0 失败、只读 ACL 17/17；可达 SMB/物理设备丢失/真实 V8 未验）；T7.6 打包/关联/许可/体积代码/脚本完成（每用户安装、ProgID/4 扩展名、便携 zip、卸载清理；F1-A1 仅预检）；T7.8 基准回归脚本/阈值/基线完成；T7.9 P7 seek→PgUp 收口（60 项/0 失败、30/30 容差，4K spot 0.06ms，基线 dev-2026-10-22-t7.9；1080p 旧 372ms 是 10s GOP 关键帧边界，不属 80ms；跨 GOP 边界专项仍待 T7.7）；下一步 T7.7，V10 2h 仍待。
+5. **当前阶段是实现阶段**：按 `tasks.md` 的 M0→M7 顺序做；一个任务 = 一次可审查变更；不跳任务、不顺带加功能。T0.3 已决策方案 A；M1/M2/M3（T1.1–T3.7）、M4（T4.1–T4.2）、T5.1–T5.4、T6.1–T6.5、T2.9.1、T6.2.1、T7.1–T7.2.1 代码完成；T7.3 90min 单文件 + 1h 子区间循环均 pass，无可复现持续增长，P14/V10 未通过；T7.4 4K proxy 硬解一轮 P4/P6/P7/P8/P9/P11 达标（软解 P6/P9 未过）；T7.5 错误与鲁棒性代码完成（75 项/0 失败、只读 ACL 17/17；可达 SMB/物理设备丢失/真实 V8 未验）；T7.6 打包/关联/许可/体积代码/脚本完成（每用户安装、ProgID/4 扩展名、便携 zip、卸载清理；F1-A1 仅预检）；T7.8 基准回归脚本/阈值/基线完成；T7.9 P7 seek→PgUp 收口（60 项/0 失败、30/30 容差，4K spot 0.06ms，基线 dev-2026-10-22-t7.9；1080p 旧 372ms 是 10s GOP 关键帧边界，不属 80ms）；T7.10 合成 V10 2h soak `pass=1`、V1–V9 冒烟 18/18；T7.11 P7 跨 GOP 边界专项实测 2s GOP p95 145.60ms、1s 收紧档 92.65ms，均超 80ms（缓存回拷主因），是 T7.7 的 P7 blocker；下一步 P7 边界修复/T7.7，正式 V10 2h 仍待。
 6. **有歧义先问。** 用户偏好“给建议默认值 + 理由”，方便快速拍板；不要用“都可以”回避取舍。
 7. **未提及的交互默认按 AE 习惯**；但涉及验收口径的，仍要在 spec 里写清楚。
 8. **性能数字只能引用 `spec.md` §4.1 或 v0.3 已拍板口径**；没有片单不要编新指标，也不要把“感觉流畅”当验收。
@@ -272,9 +272,9 @@
 | 文档 | 版本 | 日期 | 状态 |
 |---|---|---|---|
 | `spec.md` | v0.3 | 2026-10-19 | 首期范围冻结；已应用回补 + P6/P7 方案 A |
-| `AGENTS.md` | v6.3 | 2026-10-22 | 项目上下文；T7.10 合成 V1–V10 片单/V10 soak 待收口，T7.7 待真实片单/基线机 |
+| `AGENTS.md` | v6.4 | 2026-10-22 | 项目上下文；合成 V10 soak pass、V1–V9 冒烟、P7 边界 2s/1s 未过 80ms，T7.7/正式 V10 待 |
 | `plan.md` | v0.2 | 2026-10-19 | 技术规划；已同步 v0.3 |
-| `tasks.md` | v0.24 | 2026-10-22 | 任务清单；T7.10 合成 V1–V10 片单/V10 soak 待收口，T7.7 待真实片单/基线机 |
+| `tasks.md` | v0.25 | 2026-10-22 | 任务清单；T7.10 soak pass/冒烟、T7.11 P7 边界未过，T7.7/正式 V10 待 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
 | `docs/spec-v0.3-p6p7-proposal.md` | v1.0 | 2026-10-19 | P6/P7 方案 A 提案，已拍板并应用 |
 | `docs/adr/ADR-001`–`006` | v1 | 2026-10-19 | 已接受 |
@@ -311,13 +311,15 @@
 | `docs/handoff-2026-10-22-t7.6.md` | v1 | 2026-10-22 | 历史交接：T7.6 打包/关联/许可/体积、每用户安装/卸载、F1-A1 预检与缺口 |
 | `docs/handoff-2026-10-22-t7.8.md` | v1 | 2026-10-22 | 历史交接：T7.8 基准回归、26 项漂移；P7 seek 后 PgUp 缺口已由 T7.9 收口/更正 |
 | `docs/handoff-2026-10-22-t7.9.md` | v1 | 2026-10-22 | 历史交接：P7 seek 后 PgUp handoff、1080p 10s GOP 边界更正、60 项/30 项基线 |
-| `docs/handoff-2026-10-22-t7.10.md` | v1 | 2026-10-22 | **当前交接**：合成 V1–V10 片单、V10 2h soak 进行中/待收口 |
+| `docs/handoff-2026-10-22-t7.10.md` | v1 | 2026-10-22 | 历史交接：合成 V1–V10 片单、V10 soak 启动/采样；收口见 T7.11 |
+| `docs/handoff-2026-10-22-t7.11.md` | v1 | 2026-10-22 | **当前交接**：合成 V10 soak 收口、V1–V9 冒烟、P7 跨 GOP 边界专项未过 80ms |
 | `docs/perf/T7.5-robustness.md` | v1 | 2026-10-22 | T7.5 坏文件/网络/长路径/只读 ACL/设备丢失/回归与缺口 |
 | `docs/perf/T7.6-packaging.md` | v1 | 2026-10-22 | T7.6 体积/安装/关联/卸载/启动/零网络与限制 |
 | `docs/perf/T7.8-bench.md` | v1 | 2026-10-22 | T7.8 8 套件/54 项、26 项同机漂移、P12 哈希、缺口与维护规则；T7.9 更正 1080p 10s GOP 边界 |
 | `docs/perf/T7.9-p7-seek-handoff.md` | v1 | 2026-10-22 | T7.9 seek handoff 前后数字、P6/P9 回归、60 项/30 项基线与口径更正 |
-| `docs/perf/T7.10-synthetic-suite.md` | v1 | 2026-10-22 | 合成 V1–V10 规格/生成方法/V8 探测/V10 soak 采样与边界 |
-| `docs/next-session-prompt.md` | v26 | 2026-10-22 | 给下个 agent 的新会话提示词（T7.10 合成片单/V10 soak 待收口，HEAD `69e8c61`） |
+| `docs/perf/T7.10-synthetic-suite.md` | v2 | 2026-10-22 | 合成 V1–V10 规格/生成方法/V8 探测；V10 2h soak 收口、V1–V9 冒烟 |
+| `docs/perf/T7.11-gop-boundary.md` | v1 | 2026-10-22 | P7 跨 GOP 边界：2s 145.60ms/1s 92.65ms 未过 80ms、缓存回拷分项、长 GOP/4K 诊断 |
+| `docs/next-session-prompt.md` | v27 | 2026-10-22 | 给下个 agent 的新会话提示词（合成 V10 soak pass、P7 边界未过；代码 `4516d53`） |
 | `docs/next-session-prompt-t7.4.md` | v1 | 2026-10-22 | 给下个 agent 的 T7.4 4K 路径提示词（可直接复制） |
 | `docs/perf/T3.1-audio.md` | v1 | 2026-10-20 | T3.1 音频设备/播放/seek/无音轨测量记录 |
 | `docs/perf/T3.2-sync.md` | v1 | 2026-10-20 | T3.2 音频主时钟/QPC 回退/24–60fps 同步测量记录 |
@@ -423,10 +425,12 @@
 
 - 2026-10-22：完成 T7.10 合成 V1–V10 片单（辅助素材，不是正式片单）。`media/synthetic-suite/`：V1 1080p24 6:01、V2 1080p30 152s、V3 1080p HEVC60 20s（proxy）、V4 4K30 15s（proxy）、V5 VFR 41.9s（stts 改写，VFR_SUSPECT=1）、V6 12min、V7 无音频、V8 5 个坏文件（全部 OK=0）、V9 click+白闪、V10 2h/7200.11s/5.23GB。V10 2h soak `v10-synth` 于 19:30:18 启动，19:41:51 t=690s 时 WS 164.9MB/handles 687/playing=1/underruns=0；尚无 `T7.3 soak_summary`，不写 P14 通过。未改产品代码/阈值/基线。证据 [T7.10](docs/handoff-2026-10-22-t7.10.md)、[perf](docs/perf/T7.10-synthetic-suite.md)。
 
-**下一步**：T7.7 全量验收（V1–V10/基线机/冷缓存 F1-A1）；T7.3 收口只等 V10 2h 单文件（`-NoLoop`，7200s）；T7.9 已收口 P7 seek 后 PgUp（4K 2s GOP 0.06ms；1080p 旧 372ms 是 10s GOP 关键帧边界，不属 80ms），基线已更新为 `dev-2026-10-22-t7.9`；跨 GOP 边界专项仍需 T7.7 用真实 V1 记录。不要把 90min 当 2h，也不要因为单文件/循环都通过就写 P14 通过；不要把 T7.4 的 4K proxy 当正式 V4；不要把 T7.5 的合成坏文件/模拟设备丢失当成 V8 实物与物理设备验收；不要把 T7.6 的热缓存预检当成 F1-A1 通过；不要把 T7.8 的热缓存 P1/P2 当成冷启动验收；不要用普通 seek 后单步的 0.06ms 代替跨 GOP 边界专项。
+- 2026-10-22：完成 T7.11 合成 V10 soak 收口 + V1–V9 冒烟 + P7 跨 GOP 边界专项（`4516d53`）。合成 V10 `v10-synth` 7200s `pass=1`（WS 162.4→164.8MB、包络 0.16MB/h、handles 691→675、threads 56→50、frame_stall=0、underruns=0、ui_gap 212ms）；V1–V9 冒烟 18/18（V8 错误对话框 0.31–0.35s、V9 click ±1 帧）；新增 `--gop-boundary-test`/`scripts\gop-boundary-bench.ps1`，用 `LAPIAN_SEEK_LOG` 证明每个 PgUp 都是 `hit=0 decoded=GOP`。结果：2s GOP 1080p p95 **145.60ms**（20/20 超 80）、1s GOP 收紧档 **92.65ms**（仍超）、长 GOP proxy-V1 340.78ms（单列）、4K proxy-V4 451.53ms（诊断）；分项 cache 回拷 76–105ms、解码 12–42ms。`ctest` 22/22、`dist` 32.65MB/25。**P7 边界未通过；T7.7 blocker，需异步/延后回拷或 spec 决策**。证据 [T7.11 交接](docs/handoff-2026-10-22-t7.11.md)、[perf](docs/perf/T7.11-gop-boundary.md)。
+
+**下一步**：先修 P7 跨 GOP 边界缺口（2s 145.60ms / 1s 92.65ms 超 80ms；根因是后退第一步同步回拷 24 帧 FrameCache，解码只占 12–42ms；可选异步/延后回拷，或走 spec §9 版本记录改验收口径，不能静默放宽 80），再 T7.7 全量验收（真实 V1–V10/基线机/冷缓存 F1-A1/Explorer 真双击）；T7.3 合成 V10 2h `pass=1` 只算替身，正式 P14 仍需真实 V10；T7.9 的普通 seek 后 PgUp 0.06ms 不等于跨 GOP 边界专项（已实测未过）。不要把 90min 当 2h，也不要因为单文件/循环/合成 soak 都通过就写 P14 通过；不要把 T7.4 的 4K proxy 当正式 V4；不要把 T7.5 的合成坏文件/模拟设备丢失当成 V8 实物与物理设备验收；不要把 T7.6 的热缓存预检当成 F1-A1 通过；不要把 T7.8 的热缓存 P1/P2 当成冷启动验收。
 
 ---
 
 ## 13. 新对话开场（可直接复制）
 
-> 完整提示词见 [docs/next-session-prompt.md](docs/next-session-prompt.md)。核心：先读 `AGENTS.md`、`docs/handoff-2026-10-22-t7.10.md`、`spec.md`、`plan.md`、`tasks.md`、ADR-001–006；以 `git log`/`ctest` 为准，不要重做 T1–T7.9（T2.9.1、T6.2.1、T6.5、T7.1、T7.2、T7.2.1、T7.4、T7.5、T7.6、T7.8、T7.9 已完成）；T7.10 合成片单只是预检；M0–M4、T5.1–T6.5、T7.1–T7.8 代码/脚本完成但正式 V1–V8/V10、基线机、冷缓存 P1/P2、2h soak、物理设备丢失、可达 SMB、真实 V8、波形/听感/截图/输入法真人验收仍待；长 GOP 循环跳转 148–157ms 未达 F4-A2，列入 T7。T7.3 90min 单文件 + 1h 子区间循环均 pass（+2.1/+3.9MB），P14/V10 仍待；T7.4 4K proxy 硬解一轮达标（P7 p95 2ms 级、~410ms 尖峰、软解 P6/P9 未过）；T7.5 鲁棒性 75 项/0 失败、只读 17/17，但可达 SMB/物理设备丢失/真实 V8 未验；T7.6 每用户安装/ProgID/便携 zip/卸载本机通过，F1-A1 只有热缓存预检（窗口 359ms、首帧 359–400ms），未用 Explorer 真双击/冷缓存；T7.8/T7.9 基准回归 `scripts\bench-regression.ps1` + 阈值/基线 JSON：8 套件/60 项/0 失败、30/30 容差内（P1/P2 仍热缓存；4K 2s GOP seek 后 PgUp 0.06ms，1080p 旧 372ms 是 10s GOP 关键帧边界、不属 80ms；跨 GOP 边界专项仍待 T7.7）；下一步 T7.7，V10 2h 仍待；只做 F1–F8/P1–P14，spec v0.3 冻结，不改技术栈；每任务保持 build/ctest/dist 通过并补交接/证据。上下文过长时先告诉用户开新会话。
+> 完整提示词见 [docs/next-session-prompt.md](docs/next-session-prompt.md)。核心：先读 `AGENTS.md`、`docs/handoff-2026-10-22-t7.11.md`、`spec.md`、`plan.md`、`tasks.md`、ADR-001–006；以 `git log`/`ctest` 为准，不要重做 T1–T7.11（T2.9.1、T6.2.1、T6.5、T7.1、T7.2、T7.2.1、T7.4、T7.5、T7.6、T7.8、T7.9 已完成）；T7.10 合成片单只是预检；M0–M4、T5.1–T6.5、T7.1–T7.8 代码/脚本完成但正式 V1–V8/V10、基线机、冷缓存 P1/P2、2h soak、物理设备丢失、可达 SMB、真实 V8、波形/听感/截图/输入法真人验收仍待；长 GOP 循环跳转 148–157ms 未达 F4-A2，列入 T7。合成 V10 2h soak `pass=1`（替身 P14，非正式）；T7.11 P7 跨 GOP 边界 2s 145.60ms / 1s 92.65ms 未过 80ms（缓存回拷主因），是 T7.7 blocker；T7.4 4K proxy 硬解一轮达标（P7 p95 2ms 级、~410ms 尖峰、软解 P6/P9 未过）；T7.5 鲁棒性 75 项/0 失败、只读 17/17，但可达 SMB/物理设备丢失/真实 V8 未验；T7.6 每用户安装/ProgID/便携 zip/卸载本机通过，F1-A1 只有热缓存预检（窗口 359ms、首帧 359–400ms），未用 Explorer 真双击/冷缓存；T7.8/T7.9 基准回归 `scripts\bench-regression.ps1` + 阈值/基线 JSON：8 套件/60 项/0 失败、30/30 容差内（P1/P2 仍热缓存；4K 2s GOP seek 后 PgUp 0.06ms，1080p 旧 372ms 是 10s GOP 关键帧边界、不属 80ms）；下一步 P7 边界修复/T7.7，正式 V10 2h 仍待；只做 F1–F8/P1–P14，spec v0.3 冻结，不改技术栈；每任务保持 build/ctest/dist 通过并补交接/证据。上下文过长时先告诉用户开新会话。
