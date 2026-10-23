@@ -1,7 +1,7 @@
-# T8.5 证据：durl 取流（2026-10-23）
+# T8.5/T8.8 证据：durl 取流与 M1 门（2026-10-23）
 
-- **状态**：**T8.5 实现完成**（playurl → durl → CacheStore → 顺序下载/Range 续传/3 备份/重试/URL 过期刷新 → GrowingSource.Publish → 关闭写句柄后 MarkComplete）。
-- **M1 3/3 判定**：**blocked**（T8.5 请求参数下）。登录样本 OB-2（`BV1mA411m7pS` / cid `1004967230`）的 `durl` 实际只给 **360P（qn=16）**，请求 qn=64/80/112 均返回 16；OB-1/OB-3 为 720P（qn=64）。因此 **3/3 720P 不成立**，本文件不写“M1 3/3 通过”。M1 门仍由 T8.8 判定。
+- **状态**：**T8.5 实现完成**（playurl → durl → CacheStore → 顺序下载/Range 续传/3 备份/重试/URL 过期刷新 → GrowingSource.Publish → 关闭写句柄后 MarkComplete）；**T8.8 于 2026-10-23 判定 M1 通过**（3/3 durl ≥720P、OP1/OP2/OP3/OP5、失败矩阵、续传、DEC-5、本地 O9 全达标；证据见 §11–§17）。
+- **M1 3/3 判定**：**T8.5 为 blocked、T8.8 复核后为 pass**。T8.5 请求参数下登录样本 OB-2（`BV1mA411m7pS` / cid `1004967230`）的 `durl` 实际只给 **360P（qn=16）**；T8.8 的 qn/fourk 矩阵证明这是**请求档位差异**：`qn=64` → 16，`qn=80/112/120` → 80（1080P），`fourk` 对实际档位无影响。T8.8 已做最小产品修正（M1 durl 请求 qn 64→80、fourk 保持 0），3/3 复测通过。**未改 M1/M2 门与验收数字**。
 - **T8.8 复核注（2026-10-23）**：S2 §2.2 记录登录后 `durl qn=120 + fourk=1` 时 S-2（即 OB-2）实际为 **80（1080p）**；T8.5 产品固定 qn=64、`BuildPlayUrlUrl` 写死 `fourk=0`，`--qn-1080` 只映射 80。故 OB-2 的 360P 可能是**请求参数差异**，T8.8 必须先做 qn=64/80/112/120 × fourk=0/1 矩阵，再决定修取流或最终 blocked；不要把本文件的历史 blocked 直接当最终结论。
 - **样本/凭据**：`.secrets/bilibili_sessdata.txt`（普通用户，未打印、未提交）；三样本来自 T8.1 证据。日志只保留 host/path/状态/耗时，不含 SESSDATA/签名 URL。
 - **代码**：`src/online/PlayUrl.*`、`DownloadTransport.h`、`WinHttpDownloadTransport.cpp`、`DownloadJob.*`、`WinHttpApi.h`；`tests/online_fetch_test.cpp`；`src/app/OnlineFetchTestRunner.*`；`--online-fetch-test`。
@@ -230,3 +230,305 @@ build\release\bin\lapian.exe --online-fetch-test --real --bvid BV1GJ411x7h7 --ci
 ## 10. T8.6 后续（2026-10-23）
 
 T8.6 已把本文件的下载/读层接入真实窗口 UI，证据见 [v2-online-session.md](v2-online-session.md)。T8.6 的 3 条真实 E2E 中 OB-1/OB-3 为 720P、**OB-2 仍为 360P（qn=16）**；因此本文件的 M1 3/3 blocked 结论不变，T8.6 不写 M1 通过。
+
+---
+
+# T8.8 M1 门审计（2026-10-23）
+
+> 本节是 T8.8 新增；§1–§10 的 T8.5 历史数字与 blocked 结论**原样保留**，不覆盖。
+> 结论：**M1 通过**（3/3 + OP1/OP2/OP3/OP5 + 失败矩阵 + 续传 + DEC-5 + 本地 O9）。
+> M1/M2 门、验收数字与样本定义**未改**；未进入 M2。
+
+## 11. 先做请求矩阵：OB-2 的 360P 是 qn 差异，不是资源限制
+
+### 11.1 方法
+
+- 同一份普通用户 SESSDATA、同一 cid；走**产品 `FetchPlayUrl` + WinHTTP**，不引入 curl。
+- 探针只加测试用参数 `--qn` / `--fourk`；每个矩阵单元独立缓存根，`--cancel-after-first-frame`（首帧后取消，不整片下载），记录 `request_qn/fourk/quality/format/size/durl_count/首帧分辨率/fps`。
+- 不打印/不提交 SESSDATA、Cookie、签名 URL；日志只有 host/path/状态/耗时。
+- 环境：2026-10-23 23:2x，开发机（6C/12T/31.6GB/RTX 4060），非基线机；单次观测，未限速对照。
+
+命令示例（OB-2；OB-1/OB-3 只做 qn=64/80/120 × fourk=0/1 对照）：
+
+```powershell
+build\release\bin\lapian.exe --online-fetch-test --real `
+  --bvid BV1mA411m7pS --cid 1004967230 `
+  --sessdata-file .secrets\bilibili_sessdata.txt `
+  --qn 80 --fourk 1 --cancel-after-first-frame `
+  --fetch-root build\t8.8-probe\ob2-qn80-f1 --timeout-ms 20000
+```
+
+### 11.2 矩阵结果（20 个单元，全部 HTTP 200）
+
+| 样本 | 请求 qn | fourk | 服务端 quality | 档位 | format | size（字节） | durl_count | 首帧分辨率 | fps |
+|---|---:|---:|---:|---|---|---:|---:|---|---:|
+| OB-2 | 64 | 0 | **16** | **360P** | mp4 | 4,121,631 | 1 | 640×360 | 30.000 |
+| OB-2 | 64 | 1 | **16** | **360P** | mp4 | 4,121,631 | 1 | 640×360 | 30.000 |
+| OB-2 | 80 | 0 | **80** | **1080P** | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-2 | 80 | 1 | **80** | **1080P** | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-2 | 112 | 0 | 80 | 1080P | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-2 | 112 | 1 | 80 | 1080P | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-2 | 120 | 0 | 80 | 1080P | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-2 | 120 | 1 | 80 | 1080P | mp4 | 26,682,935 | 1 | 1920×1080 | 30.000 |
+| OB-1 | 64 | 0 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-1 | 64 | 1 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-1 | 80 | 0 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-1 | 80 | 1 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-1 | 120 | 0 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-1 | 120 | 1 | 64 | 720P | mp4720 | 14,330,392 | 1 | 1280×720 | 30.000 |
+| OB-3 | 64 | 0 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+| OB-3 | 64 | 1 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+| OB-3 | 80 | 0 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+| OB-3 | 80 | 1 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+| OB-3 | 120 | 0 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+| OB-3 | 120 | 1 | 64 | 720P | mp4720 | 51,973,319 | 1 | 1280×720 | 25.000 |
+
+### 11.3 结论
+
+1. **OB-2 的瓶颈是请求 qn，不是 `fourk`**：qn=64（含 fourk=0/1）→ 360P；qn≥80（含 fourk=0/1）→ 1080P。`fourk` 在 20 个单元里对实际档位**没有任何影响**。
+2. **S2 §2.2 的“OB-2 qn=120 → 80”复现成功**，但`fourk=1`不是必要条件；qn=80 已足够。
+3. T8.5 的“OB-2 只有 360P”是**产品固定 qn=64 造成的测量差异**，不是外部资源限制。T8.5 历史 blocked 记录保留，不篡改。
+4. OB-1/OB-3 请求 qn≥80 仍由服务端降为 64（720P）；durl 1080P 不是保证，仍符合 S2“durl 2080p 只有 1/3 样本”的结论。
+
+---
+
+## 12. 最小产品修正（只改请求档位，不做 DASH/4K）
+
+### 12.1 改动
+
+| 文件 | 改动 |
+|---|---|
+| `src/online/PlayUrl.h` | 新增 `kM1RequestQn = 80`（M1 统一“请求 1080P 上限”）；`BuildPlayUrlUrl` 增加 `fourk` 参数并透传；`PlayUrlFetchOptions.fourk` |
+| `src/online/PlayUrl.cpp` | `fourk` 真正写入 URL（默认仍 0）；`FetchPlayUrl` 使用 `options.fourk` |
+| `src/app/OnlineSession.cpp` | 初次 playurl 与**刷新回调**都从 64 改为 `kM1RequestQn`；刷新与初始同档，避免刷新后计划档位漂移 |
+| `src/app/OnlineFetchTestRunner.*`、`src/app/main.cpp` | 仅测试用 `--qn N` / `--fourk 0/1`；报告 `request_qn/fourk/durl_count`；刷新沿用同一组参数 |
+| `src/app/OnlineM1TestRunner.*`、`src/app/main.cpp` | 测试用 `--uncached-landing`（OP3 落点）；E2E 显式激活窗口 + `window_active` 检查（见 §17.2） |
+| `tests/online_fetch_test.cpp` | 断言 qn=120/fourk=1 进入 URL、默认 fourk=0、`FetchPlayUrl` 透传 fourk、durl_count 解析 |
+
+### 12.2 为什么 fourk 保持 0
+
+- 矩阵已证明 `fourk=0/1` 对三个样本、qn=64/80/112/120 的实际档位**完全一致**。
+- M1 的约束是“不超过 1080P、避免 4K”：请求 `qn=80` 本身就把服务端可选档封顶在 1080P；再保持 `fourk=0`，不把 4K 请求放行给服务端。这是**请求侧封顶**，不依赖返回后拦截。
+- 没有走“qn=120 + fourk=1 + 事后拒绝 >1080P”的方案：那会先把 4K 请求发给服务端，正是要避免的。
+
+### 12.3 验证
+
+| 项 | 结果 |
+|---|---|
+| `lapian_online_fetch_test` | **104 / 0**（新增 10 项 qn/fourk/durl_count 断言） |
+| `--online-fetch-test`（build / dist） | **46 / 0**，`verdict=pass` |
+| `ctest` | **30 / 30** |
+| 产品 E2E（`--online-m1-test`）OB-1/2/3 | qn=64 / **80** / 64；`gate=m1-720p`；29/0 pass（OB-2 首次以 1080P 跑通真实窗口） |
+
+> `--online-fetch-test` 的默认请求仍是 `qn=64`（保留 T8.5 历史命令可复现）；M1 证据都显式带 `--qn 80`。产品路径不经过探针默认值。
+
+---
+
+## 13. 3/3 真实样本（产品请求 qn=80）
+
+每条独立缓存根，完整下载 + 首帧 + ffprobe；SESSDATA 只从 `.secrets` 读取：
+
+```powershell
+build\release\bin\lapian.exe --online-fetch-test --real --bvid <BV> --cid <cid> `
+  --sessdata-file .secrets\bilibili_sessdata.txt --qn 80 --fourk 0 `
+  --fetch-root build\t8.8-m1\ob<N>-cache
+```
+
+| 样本 | 实际 qn | 档位 | format | size（字节） | 视频 | fps | 下载耗时 | 下行 | ffprobe | mp4 sha256（前 16） |
+|---|---:|---|---|---:|---|---:|---:|---:|---|---|
+| OB-1 | 64 | 720P | mp4720 | 14,330,392 | 1280×720/h264 | 30.000 | 10,682ms | 1.34MB/s | pass | `82ff7407a615f9e4` |
+| OB-2 | **80** | **1080P** | mp4 | 26,682,935 | 1920×1080/h264 | 30.000 | 13,145ms | 2.03MB/s | pass | `37fe59c0dece9afe` |
+| OB-3 | 64 | 720P | mp4720 | 51,973,319 | 1280×720/h264 | 25.000 | 25,492ms | 2.04MB/s | pass | `7dc42c7d9e040406` |
+
+- 三条均为 `durl_count=1`、`durl_backups=2`、`http_200=0`、`range_ignored=0`；最终 `.mp4` 大小 == 服务端 `size`。
+- **3/3 实际 quality ≥64**，产物可播、ffprobe 通过。OB-2 实际为 1080P（不是 720P），仍满足 M1“≥720P”，按“实际 durl 档”记录；**不据此写 1080P 保证**。
+- OB-2 的 1080P 是 29.4/30fps 流（非源片 60fps），不影响 M1；O6/DEC-4 的降帧提示仍属 T8.12。
+
+### 13.1 真实窗口 E2E（3/3，含未缓存落点）
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\lapian-t86\lapian.exe" --online-m1-test `
+  --bvid <BV> --cid <cid> --tag <obN> --timeout-ms 120000 --uncached-landing `
+  --online-cache-root build\t8.8-m1\e2e-ob<N>\cache `
+  --online-pictures build\t8.8-m1\e2e-ob<N>\pics `
+  --online-records-root build\t8.8-m1\e2e-ob<N>\records
+```
+
+| 样本 | 首帧 | qn | P7 n=20 p50/p95 | 已缓存 seek n=20 p50/p95 | 未缓存提示/取消 | 未缓存落点（目标帧 = 显示帧） | 检查 |
+|---|---:|---:|---|---|---|---|---|
+| OB-1 | 619ms | 64 | 13 / **18ms** | 25 / 74ms | 0ms / 0ms | 3194 = 3194（7,801ms） | **29/0 pass** |
+| OB-2 | 557ms | **80** | 30 / **32ms** | 79 / 137ms | 0ms / 0ms | 2747 = 2747（9,520ms） | **29/0 pass** |
+| OB-3 | 552ms | 64 | 13 / **19ms** | 30 / 64ms | 0ms / 0ms | 5186 = 5186（22,423ms） | **29/0 pass** |
+
+- `--uncached-landing` 只在 OP3 证据里开启；20 次冷启动测量不带它（避免整片下载拖慢）。
+- OB-2 的 1080P 已缓存 seek p95 137ms 不是 OP2 门槛（OP2 是 ±1 步进，p95 32ms）；未缓存 seek 不承诺毫秒数，只要求提示/取消/落点。
+
+---
+
+## 14. OP1/OP2/OP3/OP5
+
+### 14.1 OP1 在线起播（每条清缓存 20 次）
+
+- 口径：用户点确认 → `online_ready`（首帧呈现且可交互）；不含 view 解析。
+- 每次先删除该条缓存根，再跑完整 E2E（含 Space/步进/seek/未缓存提示/标记/截图/关窗），解析 `online_m1_first_frame`。
+- 60/60 次 `verdict=pass`。
+
+| 样本 | n | min | p50 | p95 | max | ≤5s | 判定 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| OB-1 | 20 | 617 | **630** | **648** | 663 | 20/20 | pass |
+| OB-2（1080P） | 20 | 426 | **452** | **532** | 539 | 20/20 | pass |
+| OB-3 | 20 | 423 | **445** | **527** | 540 | 20/20 | pass |
+
+- DEC-2 要求每条 p95 ≤5s、19/20；三条均 20/20。
+- 下行采样：1MB Range（含 playurl 121ms）**750ms → 1.59MB/s**；同时段完整下载 1.34–2.04MB/s，满足“≥1MB/s”。
+- 记录：`build\t8.8-m1\op1-summary.csv`（不入库）。
+
+### 14.2 OP2 已缓存区单帧步进（±1，20 次）
+
+- 用完整缓存命中路径（`CacheHit` 直接打开 `data.mp4`，本地全量索引），距缓存边界远大于 2s；每样本 20 次 PgUp/PgDn，严格 ±1。
+- 这是产品在“整片已缓存”时的真实路径；T8.6 的“边下边播已缓存区”P7 为 20/20/25ms，仍保留。
+
+| 样本 | 实际档 | n | 失败 | p50 | p95 | ≤80ms | 缓存命中首帧 |
+|---|---:|---:|---:|---:|---:|---|---:|
+| OB-1 | 720P | 20 | 0 | 2 | **34ms** | 20/20 | 68ms |
+| OB-2 | 1080P | 20 | 0 | 3 | **51ms** | 20/20 | 74ms |
+| OB-3 | 720P | 20 | 0 | 2 | **34ms** | 20/20 | 72ms |
+
+- 三次缓存命中 E2E 均 **24/0 pass**（跳过“未缓存区”专项，符合缓存命中语义）。
+- **不把 1080P 当 M1 门的 OP2 口径**：M1 只要求“实际 durl 档”；1080P30 的 OP2 口径留 M2。
+
+### 14.3 OP3 未缓存 seek（提示/取消/落点）
+
+| 样本 | “缓冲中（目标帧 N）” | 旧等待取消 UI | 落点误差 | 结果 |
+|---|---|---:|---|---|
+| OB-1 | 0ms（目标帧 3194） | 0ms | 3194 = 3194（0 帧） | pass |
+| OB-2 | 0ms（目标帧 2747） | 0ms | 2747 = 2747（0 帧） | pass |
+| OB-3 | 0ms（目标帧 5186） | 0ms | 5186 = 5186（0 帧） | pass |
+
+- 取消后回到已缓存目标 `back_to_cached_exact` 3/3 通过。
+- 未缓存等待的进度/速率口径沿用 T8.4/T8.6（2073ms vs 预期 1750ms，+18.5%）；本任务不新增毫秒承诺。
+
+### 14.4 OP5 缓存命中（断网模型，20 次）
+
+- 默认 AppData 路径、Medium 副本（`%LOCALAPPDATA%\Programs\lapian-t86\lapian.exe`）；真实缓存条目 OB-1 720P（14,330,392B）。
+- 每次注入**永不成功的 HTTP 客户端**（计数 0 才算过），打开同 BV；首帧 ≤2.5s，且 `playurl=0/http=0`。
+- 20/20 `verdict=pass`，检查 31/0 ×20。
+
+| n | min | p50 | p95 | max | ≤2.5s | playurl | HTTP 调用 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20 | 73 | **85** | **95** | 109 | 20/20 | 0 | **0** |
+
+- 断网模型：注入客户端 + T8.7 的 `netstat` 0 TCP/UDP/模块证据（本轮本地零网络另测，见 §16）；不是物理拔网。
+
+---
+
+## 15. 失败矩阵、续传、缓存/记录、DEC-5
+
+### 15.1 O1/O7 失败矩阵
+
+| 场景 | 证据 | 结果 |
+|---|---|---|
+| 本地非法输入 | `--online-resolve-test`（干净 LOCALAPPDATA/APPDATA） | 156/0；max_local_invalid_ms=0；0 网络 |
+| BV 不存在 `-404` | 同上 OB-5 样本 | 5s 内可读；不崩 |
+| 不可见/私密 `62002` | 同上 | 42ms 可读“稿件不可见”；不崩；confirm 关闭 |
+| 未登录 | 匿名 view 成功 + “未登录，清晰度受限”提示（T8.1/T8.2） | 通过；不伪造登录态 |
+| 断网/网络失败 | `--online-offline-test` 注入失败客户端；`cache_miss_goes_network` | 首帧不呈现、错误可读、`.part` 不创建、进程不崩 |
+| 403/URL 过期 | `--online-fetch-test --real --break-urls all`（OB-1） | 3 URL 注入过期；backup_switches=2、retries=3、refreshes=1；10.9s 完成，hash 与正常下载一致 |
+| 磁盘满/超配额 | `lapian_online_cache_test` 366/0 + `--online-cache-test` 32/0（Reserve 预检 0.082–0.115ms） | 可读错误、不崩；未真填满磁盘（见 §17.3） |
+| 缓存损坏 | `--online-cache-test` 8 类损坏 + `--online-offline-test` 45/0（截断/meta/大小/记录损坏） | 检测/重建/备份；不冒充可播放 |
+| 下载中杀进程 | 见 §15.2 | `.part` 续传、无重复字节 |
+| UI 线程停顿 | 三次 E2E `ui_gap_le_200ms` | max 60–66ms；0 次 >200ms |
+
+- `--online-resolve-test` 在默认 AppData 有该 BV 缓存时会触发 T8.7 的“缓存命中”预检，导致 fake-cancel 步骤短路（见 §17.2）；用干净 LOCALAPPDATA/APPDATA 复跑 156/0。产品行为正确，是探针环境依赖。
+
+### 15.2 杀进程续传（OB-2 1080P）
+
+```powershell
+# 进程在发布 5,242,880B 时 _Exit(0)，不清理 .part
+... --online-fetch-test --real --qn 80 --exit-after-bytes 5000000 --fetch-root build\t8.8-m1\resume-ob2
+# 同缓存根续传
+... --online-fetch-test --real --qn 80 --fetch-root build\t8.8-m1\resume-ob2
+```
+
+| 项 | 结果 |
+|---|---|
+| 杀进程时 `.part` | 5,242,880B（`existing_at_exit=0`） |
+| 续传 | `existing_bytes=5,242,880`、`downloaded_bytes=21,440,055`、206×2、200×0 |
+| 最终 | 26,682,935B；ffprobe pass；sha256 `37fe59c0dece9afe…` == 一次完整下载 |
+| 判定 | **无重复/损坏字节；续传通过** |
+
+### 15.3 清缓存保留记录 / 重建 / 损坏记录
+
+`--online-offline-test` 全量（真实 OB-1 媒体，workspace 根）：**45/0 pass**。
+
+- `clear_cache` 删除 14,330,719B；`clear_record_kept=1`、`clear_snapshot_kept=1`。
+- 清缓存后 `cache_miss_goes_network=1`（注入客户端被调用 1 次），记录仍在。
+- `reseed_cache` 后 `rebuild_ready=1`、`rebuild_record_restored=1`（mark frame 100）。
+- 损坏记录 `.bak` 备份；`corrupt_record_not_blocking=1`（首帧仍出，marks=0）。
+- 默认路径 OP5 的 20 次运行同样每次校验 `record`/`index.jsonl` 恢复。
+
+### 15.4 DEC-5 配额（引用已拍板口径，不真填满 20GB）
+
+| 项 | 结果 |
+|---|---|
+| 300MB LRU（`--online-cache-test`） | 配额 314,572,800B；占用 283,116,589 → **188,744,706B**；淘汰最旧 `aa1/101/64-7`，保留当前/最新 |
+| 20GB 记账（`lapian_online_cache_test`） | `quota_20gb=21,474,836,480`；`usage_after=10,737,418,599` ≤ 配额 |
+| 单元/探针 | **366/0**、**32/0（verdict=pass）** |
+| 边界 | 未真填满 20GB / 未真写满磁盘；按 DEC-5-A“300MB + 20GB 记账单测”执行 |
+
+---
+
+## 16. 本地 O9 与回归（dist / Medium 副本）
+
+| 项 | 结果 |
+|---|---|
+| 零网络（本地打开 proxy-V1，3s，6 次 `Get-NetTCPConnection/Get-NetUDPEndpoint`） | **0 TCP / 0 UDP**；进程未加载 `winhttp/wininet/urlmon/Qt6Network/libcurl` |
+| P1 冷启动（dist，20 次） | p50 **286.68ms** / p95 **342.92ms**，20/20 ≤1500ms |
+| P2 打开首帧（dist，20 次） | p50 **346.84ms** / p95 **376.14ms**，20/20 ≤2500ms |
+| P7 跨 GOP（2s，20 次，dist） | p50 **58.77ms** / p95 **64.79ms** / max 67.19 / over 0 / `verdict=pass` |
+| 本地 1080p 内存（pause 15s） | max WS **94.9MB**，pass=1（上限 250MB） |
+| `ctest` | **30 / 30** |
+| `--robust-test` | **75 checks / 0 failures / 1 skip**；6.88s；exit 0 |
+| `--key-test`（`media\测试.mp4`） | **77 checks / 0 failures**；exit 0 |
+| `--online-fetch-test`（dist） | **46 / 0**，pass |
+| `check-imports` | 20 文件通过；无 QtNetwork/TLS/winhttp/wininet/urlmon（Qt6Core→WS2_32 为已知） |
+| `dist` | **33.69MB / 25 文件**（P12 余量 66.31MB） |
+
+- P1/P2 命令：`powershell -File scripts\startup-bench.ps1 -Exe dist\lapian.exe -File media\proxy\proxy-V1.mp4 -Runs 20 -OutDir build\t8.8-m1\bench-startup`。
+- P7 命令：`dist\lapian.exe --gop-boundary-test --file build\test-media\real-gop2s-full.mp4 --gop-boundary-samples 20 --gop-boundary-tag t88-p7`。
+- 零网络轮询不是 ProcMon/ETW；与 T7.6/T8.6/T8.7 口径一致（40–500ms 轮询 + 模块检查 + 计数 HTTP 客户端）。
+
+---
+
+## 17. 缺陷、证据边界与结论
+
+### 17.1 缺陷
+
+- **无 P0/P1**。T8.8 修复的是取流请求档位（产品）与测试前置条件（非产品）。
+- P2（记录，不阻塞 M1）：
+  1. OB-2 现在下载 1080P（26.68MB/96s，约 2.1Mbps），比 360P 更占缓存/带宽；这是“可用最高”的代价，M1 不承诺 1080P。
+  2. durl 档位仍由服务端决定：OB-1/OB-3 请求 80 仍返回 64；不得把“请求 80”写成“保证 1080P”。
+- P3：
+  1. `--online-resolve-test` 依赖干净 AppData（T8.7 缓存预检会短路 fake-cancel 步骤）；产品正确，探针需在干净 `LOCALAPPDATA/APPDATA` 下跑。
+  2. `--online-m1-test` 从后台进程启动时窗口可能拿不到前台，`QAction` 的 `WindowShortcut` 会吞掉 Space/Ctrl+M/S；已加测试侧显式激活 + `window_active` 检查（**不是产品缺陷**，见 §17.2）。
+  3. 真实磁盘满/物理断网仍未做；用预检单测 + 注入客户端 + 真实 403 覆盖。
+
+### 17.2 测试前置条件修复（非产品）
+
+首轮 E2E 出现 5 项失败（space/ctrl_m/snapshot），诊断输出 `online_m1_focus widget=null active=0`：窗口未被激活时，Qt 的 `WindowShortcut` 不派发。测试 runner 现在在首帧后 `raise()+activateWindow()+FocusVideoForTest()`，并等 `isActiveWindow()`（≤1.5s）后再按第一个键；之后 3/3 样本 29/0。产品代码未改键位语义。
+
+### 17.3 证据边界
+
+1. 网络为单时段观测，未跨时段/限速；OP1 是 20 次/条，不是跨天统计。
+2. “断网”是注入失败客户端 + 零网络监控，不是物理拔网；真实 403/刷新已用签名 deadline 注入。
+3. 磁盘满只到 `CacheStore::Reserve` 预检与 8 类损坏单测，未真填满磁盘。
+4. 未做真实扫码（T8.2.2 非门，仍“未验证”）。
+5. 未进入 M2：DASH/1080P30/60fps/4K/清晰度菜单、T8.6.1a/b、T8.3.1 均未做。
+6. M1/M2 门、验收数字、OB 样本定义未改；ADR-007 的“附条件接受”评审记录保留，D1–D5 未改。
+
+### 17.4 结论
+
+- **M1 通过**：3/3 durl 实际 quality ≥64（OB-2 为 1080P）、产物可播/ffprobe 通过；OP1 p95 527–648ms（20/20×3）、OP2 p95 34/51/34ms（20/20×3）、OP3 提示/取消 0ms + 落点 0（3/3）、OP5 p95 95ms + 0 请求（20/20）；失败矩阵、杀进程续传、清缓存保留记录、DEC-5、本地 O9 均达标。
+- 触发修复的根因是**产品请求 qn=64**；最小修正为 qn=80、fourk=0，并在刷新路径保持一致。
+- **M2 未开始**；按流程等用户确认后再进 T8.9。
+

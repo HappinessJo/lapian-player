@@ -664,13 +664,16 @@ int RunReal(const OnlineFetchTestOptions& options) {
   lapian::online::PlayUrlFetchOptions fetch_options;
   fetch_options.timeout_ms = options.timeout_ms;
   fetch_options.sessdata = secret.sessdata;
-  const int request_qn = options.qn_1080 ? 80 : 64;
+  fetch_options.fourk = options.fourk > 0 ? 1 : 0;
+  const int request_qn =
+      options.qn > 0 ? options.qn : (options.qn_1080 ? 80 : 64);
   const lapian::online::PlayUrlFetchResult fetched =
       lapian::online::FetchPlayUrl(&http, options.bvid, options.cid, request_qn,
                                    fetch_options, cancel);
   lapian::online::ClearSecret(&fetch_options.sessdata);
   PrintKV("tag", tag);
   PrintKV("request_qn", Num(request_qn));
+  PrintKV("fourk", Num(fetch_options.fourk));
   PrintKV("playurl_requests", Num(fetched.http_requests));
   PrintKV("playurl_http_status", Num(fetched.http_status));
   PrintKV("playurl_elapsed_ms", Num(fetched.elapsed_ms));
@@ -692,6 +695,7 @@ int RunReal(const OnlineFetchTestOptions& options) {
   PrintKV("codecid", Num(codecid));
   PrintKV("size", Num(total));
   PrintKV("length_ms", Num(data.timelength_ms));
+  PrintKV("durl_count", Num(data.durls.size()));
   PrintKV("durl_backups", Num(data.durls.first().backup_urls.size()));
   PrintKV("m1_720p", actual_qn >= 64 ? QStringLiteral("1") : QStringLiteral("0"));
 
@@ -746,6 +750,7 @@ int RunReal(const OnlineFetchTestOptions& options) {
         lapian::online::PlayUrlFetchOptions refresh_options;
         refresh_options.timeout_ms = options.timeout_ms;
         refresh_options.sessdata = secret.sessdata;
+        refresh_options.fourk = options.fourk > 0 ? 1 : 0;
         const lapian::online::PlayUrlFetchResult again =
             lapian::online::FetchPlayUrl(&http, options.bvid, options.cid,
                                          request_qn, refresh_options,

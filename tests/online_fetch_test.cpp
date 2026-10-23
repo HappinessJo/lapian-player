@@ -400,6 +400,28 @@ QByteArray LoadSample() {
   return {};
 }
 
+// T8.8：只用于验证 FetchPlayUrl 把 qn/fourk 透传到 playurl 请求。
+class CapturingHttp final : public lapian::online::IHttpClient {
+ public:
+  QString last_url;
+  int calls = 0;
+
+  lapian::online::HttpResponse Get(
+      const lapian::online::HttpRequest& request,
+      const lapian::online::HttpCancelToken&) override {
+    ++calls;
+    last_url = request.url;
+    lapian::online::HttpResponse response;
+    response.ok = true;
+    response.http_status = 200;
+    response.body = R"({"code":0,"data":{"quality":80,"format":"mp4",
+      "timelength":96000,"video_codecid":7,
+      "durl":[{"order":1,"length":96000,"size":25165824,
+      "url":"https://cdn.example/video.mp4","backup_url":[]}]}})";
+    return response;
+  }
+};
+
 }  // namespace
 
 int main() {
@@ -417,6 +439,35 @@ int main() {
           "playurl invalid bvid -> empty");
     Check(lapian::online::BuildPlayUrlUrl(QStringLiteral("BV1BMnv6jE5S"), 0, 64).isEmpty(),
           "playurl invalid cid -> empty");
+
+    // T8.8：请求档位/fourk 只是输入，必须原样出现在 URL；默认仍 fourk=0。
+    const QString url_120 = lapian::online::BuildPlayUrlUrl(
+        QStringLiteral("BV1mA411m7pS"), 1004967230LL, 120, 1);
+    Check(url_120.contains(QStringLiteral("qn=120")), "playurl qn=120");
+    Check(url_120.contains(QStringLiteral("fourk=1")), "playurl fourk=1");
+    Check(url.contains(QStringLiteral("fourk=0")), "playurl default fourk=0");
+    Check(lapian::online::BuildPlayUrlUrl(QStringLiteral("BV1mA411m7pS"),
+                                          1004967230LL, 80, 0)
+              .contains(QStringLiteral("fourk=0")),
+          "playurl explicit fourk=0");
+
+    // FetchPlayUrl 必须把 options.fourk 透传给请求，而不是自己写死 0。
+    CapturingHttp capturing;
+    lapian::online::PlayUrlFetchOptions probe_options;
+    probe_options.fourk = 1;
+    lapian::online::HttpCancelToken probe_cancel;
+    const lapian::online::PlayUrlFetchResult probed =
+        lapian::online::FetchPlayUrl(&capturing, QStringLiteral("BV1mA411m7pS"),
+                                     1004967230LL, 120, probe_options,
+                                     probe_cancel);
+    Check(probed.error.ok(), "fetch playurl ok");
+    CheckEqI64(capturing.calls, 1, "fetch playurl one request");
+    Check(capturing.last_url.contains(QStringLiteral("qn=120")),
+          "fetch playurl sends qn=120");
+    Check(capturing.last_url.contains(QStringLiteral("fourk=1")),
+          "fetch playurl sends fourk=1");
+    CheckEqI64(probed.data.quality, 80, "fetch playurl records actual qn");
+    CheckEqI64(probed.data.durls.size(), 1, "fetch playurl durl_count");
 
     const QByteArray good = R"({
       "code": 0, "message": "0",

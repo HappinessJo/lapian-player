@@ -210,8 +210,12 @@ void OnlineSession::StartPlayUrlWorker(std::uint64_t generation) {
       lapian::online::PlayUrlFetchOptions options;
       options.timeout_ms = 6000;
       options.sessdata = sessdata;
+      // T8.8：M1 durl 请求“可用最高（≤1080P）”。qn=64 时 OB-2 被服务端降成
+      // 360P；qn=80 起返回 1080P，且不请求 4K（fourk=0）。
       lapian::online::PlayUrlFetchResult result =
-          lapian::online::FetchPlayUrl(http, bvid, cid, 64, options, *cancel);
+          lapian::online::FetchPlayUrl(http, bvid, cid,
+                                       lapian::online::kM1RequestQn, options,
+                                       *cancel);
       {
         std::lock_guard<std::mutex> lock(outcome->mutex);
         outcome->done = true;
@@ -484,8 +488,10 @@ void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
     lapian::online::PlayUrlFetchOptions fetch_options;
     fetch_options.timeout_ms = 6000;
     fetch_options.sessdata = request_.sessdata;
+    // 刷新必须与初始请求同一档位，否则可能换回更低档并改变 plan.qn。
     lapian::online::PlayUrlFetchResult result = lapian::online::FetchPlayUrl(
-        http, request_.bvid, request_.cid, 64, fetch_options, cancel);
+        http, request_.bvid, request_.cid, lapian::online::kM1RequestQn,
+        fetch_options, cancel);
     if (!result.error.ok()) {
       *refresh_error = result.error.message.isEmpty()
                            ? QStringLiteral("刷新取流失败")

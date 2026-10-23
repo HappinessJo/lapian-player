@@ -237,6 +237,22 @@ int main(int argc, char* argv[]) {
         options.cancel_after_first_frame = true;
       } else if (arg == QStringLiteral("--qn-1080")) {
         options.qn_1080 = true;
+      } else if (arg == QStringLiteral("--qn")) {
+        QString value;
+        if (take_value(&value)) {
+          options.qn = value.toInt();
+        }
+      } else if (arg.startsWith(QStringLiteral("--qn="))) {
+        options.qn =
+            arg.mid(static_cast<int>(std::strlen("--qn="))).toInt();
+      } else if (arg == QStringLiteral("--fourk")) {
+        QString value;
+        if (take_value(&value)) {
+          options.fourk = value.toInt();
+        }
+      } else if (arg.startsWith(QStringLiteral("--fourk="))) {
+        options.fourk =
+            arg.mid(static_cast<int>(std::strlen("--fourk="))).toInt();
       } else if (arg == QStringLiteral("--break-urls")) {
         take_value(&options.break_urls);
       } else if (arg.startsWith(QStringLiteral("--break-urls="))) {
@@ -374,6 +390,7 @@ int main(int argc, char* argv[]) {
   qint64 online_m1_cid = 0;
   int online_m1_timeout_ms = 20000;
   bool online_m1_cancel_only = false;
+  bool online_m1_uncached_landing = false;
   // T8.7：完整缓存命中/断网/在线记录 E2E。
   bool online_offline_test = false;
   QString online_offline_media;
@@ -503,6 +520,8 @@ int main(int argc, char* argv[]) {
       online_m1_test = true;
     } else if (arguments[i] == QStringLiteral("--cancel-only")) {
       online_m1_cancel_only = true;
+    } else if (arguments[i] == QStringLiteral("--uncached-landing")) {
+      online_m1_uncached_landing = true;
     } else if (arguments[i] == QStringLiteral("--online-buffer-test")) {
       online_buffer_test = true;
     } else if (arguments[i] == QStringLiteral("--online-offline-test")) {
@@ -975,6 +994,7 @@ int main(int argc, char* argv[]) {
     options.timeout_ms = online_m1_timeout_ms;
     options.pictures_root = online_m1_pictures;
     options.cancel_only = online_m1_cancel_only;
+    options.uncached_landing = online_m1_uncached_landing;
     online_m1_runner =
         std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
     online_m1_runner->Start();

@@ -18,6 +18,9 @@ struct OnlineM1TestOptions {
   QString cache_root;
   QString pictures_root;
   bool cancel_only = false;
+  // T8.8 OP3：未缓存 seek 后等下载追上，验证落点误差 0（默认不等，避免
+  // 20 次冷启动测量被整片下载拖慢）。
+  bool uncached_landing = false;
 };
 
 // T8.6 真实窗口 E2E：输入 BV → 解析确认 → 首帧 → Space → PgUp/PgDn → seek →

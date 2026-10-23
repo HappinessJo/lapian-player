@@ -1,7 +1,7 @@
 # 拉片软件 v2 在线模式任务拆分（tasks-v2.md）
 
-- **版本**：v0.14（2026-10-23 T8.7 完成；下一任务 T8.8；M1/M2 门与数字未改）
-- **状态**：**S3 定稿**；**T8.1/T8.2/T8.2.2/T8.3/T8.4/T8.5/T8.6/T8.7 完成**（T8.5/T8.6/T8.7 M1 3/3 仍 blocked）；下一任务 **T8.8（M1 门）**；新增 **T8.6.1a/T8.6.1b/T8.3.1 非门后续**；DEC-1…**6** 已拍板；M1/M2 已锁定；B 条件验收保留（非 MVP 门）。
+- **版本**：v0.15（2026-10-23 T8.8 完成；**M1 通过**；下一任务 T8.9，需用户确认；M1/M2 门与数字未改）
+- **状态**：**S3 定稿**；**T8.1/T8.2/T8.2.2/T8.3/T8.4/T8.5/T8.6/T8.7/T8.8 完成**；**M1 门已通过**（T8.8：3/3 durl 实际 ≥720P、OP1/OP2/OP3/OP5、失败矩阵、续传、DEC-5、本地 O9）；下一任务 **T8.9（M2，等用户确认）**；新增 **T8.6.1a/T8.6.1b/T8.3.1 非门后续**；DEC-1…**6** 已拍板；M1/M2 已锁定；B 条件验收保留（非 MVP 门）。
 - **依据**：[spec-v1.0-delta.md](docs/spec-v1.0-delta.md) v0.4、[plan.md](plan.md) v2 章节、[ADR-007](docs/adr/ADR-007-bilibili-online.md)、[v2-online-spike.md](docs/perf/v2-online-spike.md)、[product-v2-vision.md](docs/product-v2-vision.md)、[T8.1 证据](docs/perf/v2-online-resolve.md)、[T8.3 证据](docs/perf/v2-online-cache.md)、[T8.4 证据](docs/perf/v2-online-growing.md)、[T8.5 证据](docs/perf/v2-online-m1.md)、[T8.2.2 证据](docs/perf/v2-online-qr.md)、[T8.7 证据](docs/perf/v2-online-cache-hit.md)
 - **范围**：只覆盖在线模式。v1 任务台账 `tasks.md` **只读**；本文件不重复 T0–T7，不改 v1 验收值。
 - **硬约束**：4K / 1080P60 / 720P60 **不进任何 M1/M2 验收项**；B 另设 T8.15 独立条件验收（非门）；未缓存区不承诺 P7/P9；本地模式零网络不退化；Cookie 不入库/不回显/不写日志。
@@ -24,7 +24,7 @@
 
 - T8.2 与 T8.3 可并行；T8.4 只依赖 T8.3；T8.5 依赖 T8.2（HTTP）与 T8.4（写入/发布）。
 - **T8.2.2（扫码登录，DEC-6）不在 M1/M2 门内**：只依赖 T8.2（已完成），排在 T8.4 之后、T8.6 之前（可与 T8.5 并行）；失败不得影响 M1/M2 判定。
-- T8.6 是第一次“真实窗口跑通”；T8.7 补缓存命中与记录；T8.8 是 M1 门。
+- T8.6 是第一次“真实窗口跑通”；T8.7 补缓存命中与记录；T8.8 是 M1 门（已完成，**M1 通过**，见下）。
 - **T8.6.1a/T8.6.1b/T8.3.1 不在 M1/M2 门内**：它们是 T8.6 后根据真实使用反馈补的非门任务，排在 M1 后（T8.6.1b 依赖 T8.11），不得挤进 T8.7/T8.8 验收或推迟 M1。
 
 **M2**：
@@ -55,7 +55,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | **T8.5**（完成 2026-10-23；M1 3/3 blocked） | durl 取流：`playurl(fnval=0)`；M1 档位（720p/可用最高）；顺序下载；Range 续传；3 备份 URL；重试/退避；URL 过期刷新；吞吐统计；暂停/取消；完成改名 | T8.2、T8.4 | 3/3 登录样本 720p；首 0.3MB 出首帧；断网 5s 后续传；杀进程后续传；模拟 403/过期刷新；备份切换；无重复/损坏字节；产物可被 ffprobe 正常打开。**结果**：OB-1/OB-3=720P（qn=64）；**OB-2 实际 360P（qn=16；qn=64/80/112 均为 16）→ 3/3 720P blocked，不写通过**；三样本均完成下载+首帧（8–9/10–14ms）+ffprobe；真实取消 7ms、`.part` 续传 206、`_Exit` 后 5,242,880B 续传；真实 403 故障注入：备份切换 1 次 / 刷新 1 次均完成且 hash 一致；`lapian_online_fetch_test` 94/0、`--online-fetch-test` 46/0、`ctest` 27/27 | `docs/perf/v2-online-m1.md`；`docs/handoff-2026-10-23-t8.5.md`；故障日志 | durl 档位不可预期；Range 被忽略；CDN 限速；120min 过期；M1 3/3 前提未复现 |
 | **T8.6**（完成 2026-10-23；M1 3/3 仍 blocked） | 在线会话集成：`OnlineSession` 状态机；缓冲 UI/进度/取消；已缓存 seek/步进；未缓存等待；波形渐进；错误提示；关闭；**本地路径不动** | T8.4、T8.5 | E2E 3 条：输入→确认→首帧→Space→PgUp/PgDn→seek→波形→Ctrl+M→S→关窗；已缓存 P7 p95 ≤80ms（DEC-2 已拍板）；未缓存显示等待并可取消；UI 停顿 >200ms = 0；本地零网络 + P1/P2/P7 不退化。**结果**：3 条真实 E2E 全过（OB-2 qn=16 → quality=blocked）；P7 p95 20/20/25ms；seek p95 79/59/97ms；UI gap 60/61/62ms；冷缓存首帧 20 次×3 条 p95 624/725/459ms，20/20≤5s；缓冲取消 19ms、缓冲耗尽自动暂停/恢复 pass；关窗 18–645ms；`ctest` 29/29；本地 P1/P2 290.68/347.43ms、P7 66.59ms；dist 33.57MB/25；M1 3/3 720P 仍 blocked（OB-2 360P），本任务不判 M1 | `--online-m1-test`；`--online-buffer-test`；`lapian_online_m1_test`（48/0）；`docs/perf/v2-online-session.md`；`docs/handoff-2026-10-23-t8.6.md`；截图 `build/t8.6-online-pictures/snapshots/` | 引擎 EOF/seek 假设；路径-only 媒体层；部分索引；UI 线程阻塞；完成改名 vs reader；波形阻塞 |
 | **T8.7**（完成 2026-10-23；M1 3/3 仍 blocked） | 缓存命中 + 在线记录：断网按缓存打开（0 请求）；`lapian-online-1` 标记/备注；截图目录/命名/`index.jsonl`；清缓存保留记录；换档映射 | T8.3、T8.6 | 断网打开同 BV：0 TCP/UDP、首帧 ≤2.5s（DEC-2 已拍板）；标记/备注/截图恢复；清缓存后记录仍在；重建缓存后记录可回访；损坏记录不阻塞播放。**结果**：`OnlineSession` 命中 `CacheStore::OpenComplete` 直接打开 `data.mp4`（0 playurl/CDN/`.part`）；`lapian-online-1` 存 `%APPDATA%\拉片软件\online\<bvid>-<cid>.lapian.json`；截图 `Pictures\拉片软件\<bvid>\` + `index.jsonl`；`--online-offline-test` workspace 45/0、真实缓存 44/0、Medium 默认 AppData 31/0×3（首帧 74–84ms，netstat 0 TCP/UDP，无 winhttp/wininet/urlmon）；`lapian_online_records_test` 52/0；M1 3/3 720P 仍 blocked（OB-2 360P），本任务不判 M1 | `--online-offline-test`；`lapian_online_records_test`；`docs/perf/v2-online-cache-hit.md`；`docs/handoff-2026-10-23-t8.7.md` | 隐式 API 调用；目录权限；截图命名冲突 |
-| **T8.8** | **M1 门**：全量验收 + 报告 + 交接；决定是否进 M2 | T8.1–T8.7 | 3/3 720p；OP1/OP2/OP3/OP5 按 DEC-2 已拍板值达标；失败矩阵（O1/O7）通过；缓存配额按 DEC-5 已拍板；本地 O9 全过；无 P0/P1 缺陷；ADR-007 附条件接受已记录 | `docs/perf/v2-online-m1.md`；`docs/handoff-*-m1.md` | 网络方差；样本不足；durl 720p 需登录样本 3/3 |
+| **T8.8**（完成 2026-10-23；**M1 通过**） | **M1 门**：全量验收 + 报告 + 交接；决定是否进 M2 | T8.1–T8.7 | 3/3 720p；OP1/OP2/OP3/OP5 按 DEC-2 已拍板值达标；失败矩阵（O1/O7）通过；缓存配额按 DEC-5 已拍板；本地 O9 全过；无 P0/P1 缺陷；ADR-007 附条件接受已记录。**结果**：请求矩阵证明 OB-2 的 360P 是 qn=64 导致（qn=80/112/120 → 80/1080P，fourk 无影响）；最小修正 M1 durl 请求 qn 64→80、fourk=0、刷新同档；3/3 实际 quality=64/**80**/64，产物 ffprobe pass；E2E 29/0×3；OP1 p95 648/532/527ms（20/20×3）、OP2 p95 34/51/34ms（20/20×3）、OP3 提示/取消 0ms + 落点 0（3/3）、OP5 p95 95ms + 0 请求（20/20）；杀进程续传 5,242,880B/hash 一致；清缓存保留记录 45/0；DEC-5 300MB→188,744,706B、20GB 记账 10,737,418,599 ≤ 21,474,836,480；本地零网络、P1 342.92/P2 376.14/P7 64.79ms、`ctest` 30/30、dist 33.69MB/25；**未进 M2** | `docs/perf/v2-online-m1.md` §11–§17；`docs/handoff-2026-10-23-t8.8-m1.md` | 网络方差；durl 档位不可预期；不得写 1080P 保证 |
 
 **M1 门（硬条件）**：
 
@@ -70,6 +70,8 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 > **2026-10-23 T8.5 复测记录（不改本门）**：OB-2（`BV1mA411m7pS`/cid `1004967230`）的 `durl` 在请求 qn=64/80/112 时实际都返回 `quality=16`（360P）；OB-1/OB-3 为 720P。因此第 1 条“3/3 720p”的 S2 前提本次未复现，T8.5 如实写 **blocked**，不伪造；是否调整 M1 门由 T8.8/用户决定，本文件未改门与数字。
 >
 > **2026-10-23 T8.6 复测记录（不改本门）**：真实窗口 3 条 E2E 均通过；OB-2 仍为 qn=16/640×360，因此 T8.6 仍写 **M1 3/3 720P blocked**，不把“能播/能操作”当 M1 通过。T8.6 的冷缓存首帧、P7/seek、缓冲/取消、关窗等数字见 `docs/perf/v2-online-session.md`；M1 门仍由 T8.8 判。
+>
+> **2026-10-23 T8.8 门审计（本门通过；门/数字/样本未改）**：qn/fourk 矩阵 20 单元证明 OB-2 的 360P 来自请求 `qn=64`：`qn=64`（fourk=0/1）→16，`qn=80/112/120`（fourk=0/1）→80（1080P）；`fourk` 无影响。最小修正为 M1 durl 请求 `qn=80`、`fourk=0`、刷新同档。复测：OB-1/2/3 实际 qn=64/**80**/64、ffprobe pass；OP1 冷缓存 p95 **648/532/527ms**（20/20×3）、OP2 已缓存 ±1 p95 **34/51/34ms**（20/20×3）、OP3 提示/取消 0ms + 落点 0（3/3）、OP5 断网模型 p95 **95ms** + 0 请求（20/20）；失败矩阵、杀进程续传、清缓存保留记录、DEC-5、本地 O9 通过。**判定 M1 通过**；未把 durl 1080P 写成保证，未进 M2。
 
 ---
 
@@ -196,3 +198,4 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | v0.12 | 2026-10-23 | T8.6 完成：`OnlineSession` + MainWindow 在线入口、`OpenGrowing`/`OpenWithFormat`/`ProbeFormat`、部分索引/异步 seek/未缓存等待、波形渐进、Ctrl+M/S、defer finalize/关窗；真实 3 条 E2E、冷缓存首帧 20×3（p95 624/725/459ms）、P7 p95 20/20/25ms、seek p95 79/59/97ms、UI gap 60/61/62ms、缓冲耗尽/取消/错误通过；`ctest` 29/29；本地 P1/P2 290.68/347.43ms、P7 66.59ms；dist 33.57MB/25；**OB-2 仍 360P，M1 3/3 720P blocked，不判 M1**；证据 `docs/perf/v2-online-session.md`、交接 `docs/handoff-2026-10-23-t8.6.md`；M1/M2 门与验收数字未改 |
 | v0.13 | 2026-10-23 | T8.6 真实使用反馈收口：新增非门后续 **T8.6.1a 在线长按步进**、**T8.6.1b 在线拖动预览**（依赖 T8.11）、**T8.3.1 缓存管理 UI/清空/孤儿清理**；T8.12 补“按账号允许档位列档、实际 qn 以服务端为准”；T8.16 补“安装到 `%LOCALAPPDATA%\Programs` 后直接双击、不依赖 Low integrity 工作区”；M1/M2 门、T8.7/T8.8 顺序与全部验收数字未改；下一任务仍 T8.7 |
 | v0.14 | 2026-10-23 | T8.7 完成：完整缓存命中 `OpenComplete` 直接打开 `data.mp4`（0 playurl/CDN/`.part`）；`lapian-online-1` 记录（bvid+cid、逐条 fps/qn/codecid、原子写/损坏备份/空删除）；截图 `Pictures\拉片软件\<bvid>\` + `index.jsonl`；清缓存保留记录、重建回访、损坏不阻塞、换档按 PTS 映射；`lapian_online_records_test` 52/0；`--online-offline-test` workspace 45/0、真实缓存 44/0、Medium 默认 AppData 31/0×3（首帧 74–84ms、0 TCP/UDP、无 winhttp/wininet/urlmon）；`ctest` 30/30；本地 P1/P2 296.81/345.40ms、P7 跨 GOP 66.56ms；dist 33.68MB/25；**OB-2 仍 360P，M1 3/3 720P blocked，不判 M1**；证据 `docs/perf/v2-online-cache-hit.md`、交接 `docs/handoff-2026-10-23-t8.7.md`；M1/M2 门与验收数字未改；下一任务 T8.8 |
+| v0.15 | 2026-10-23 | T8.8 完成、**M1 通过**：qn/fourk 矩阵（20 单元）证明 OB-2 的 360P 是请求 qn=64 导致（qn=80/112/120 → 80/1080P，fourk 无影响）；最小产品修正 M1 durl 请求 qn 64→80、fourk=0、刷新同档（`kM1RequestQn`）；3/3 实际 qn=64/80/64、ffprobe pass；E2E 29/0×3；OP1 p95 648/532/527ms（20/20×3）、OP2 p95 34/51/34ms（20/20×3）、OP3 提示/取消 0ms + 落点 0（3/3）、OP5 p95 95ms + 0 请求（20/20）；杀进程续传 5,242,880B/hash 一致、清缓存保留记录 45/0；DEC-5 300MB→188,744,706B、20GB 记账 10,737,418,599 ≤ 21,474,836,480；本地零网络、P1 342.92/P2 376.14/P7 64.79ms、`ctest` 30/30、dist 33.69MB/25；证据 `docs/perf/v2-online-m1.md` §11–§17、交接 `docs/handoff-2026-10-23-t8.8-m1.md`；**M1/M2 门、验收数字、OB 样本未改；未进 M2**；下一任务 T8.9（等用户确认） |

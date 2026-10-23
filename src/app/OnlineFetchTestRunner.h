@@ -27,6 +27,10 @@ struct OnlineFetchTestOptions {
   qint64 exit_after_bytes = 0;
   bool cancel_after_first_frame = false;
   bool qn_1080 = false;
+  // 测试用参数矩阵（T8.8）：qn>0 覆盖旧 --qn-1080 映射；fourk 透传 playurl。
+  // 只有探针使用；产品路径不受影响。
+  int qn = 0;
+  int fourk = 0;
   // 真实故障注入（测试用）：把主 URL / 全部 URL 的 deadline 改坏，触发 403。
   // 不打印 URL；刷新回调会重新取流得到合法地址。
   QString break_urls;  // "" / "primary" / "all"

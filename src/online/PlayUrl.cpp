@@ -140,7 +140,7 @@ qint64 PlayUrlData::TotalBytes() const {
   return durls.first().size;
 }
 
-QString BuildPlayUrlUrl(const QString& bvid, qint64 cid, int qn) {
+QString BuildPlayUrlUrl(const QString& bvid, qint64 cid, int qn, int fourk) {
   if (!IsValidBvid(bvid) || cid <= 0) {
     return QString();
   }
@@ -152,7 +152,8 @@ QString BuildPlayUrlUrl(const QString& bvid, qint64 cid, int qn) {
   query.addQueryItem(QStringLiteral("qn"), QString::number(quality));
   query.addQueryItem(QStringLiteral("fnval"), QStringLiteral("0"));
   query.addQueryItem(QStringLiteral("fnver"), QStringLiteral("0"));
-  query.addQueryItem(QStringLiteral("fourk"), QStringLiteral("0"));
+  query.addQueryItem(QStringLiteral("fourk"), fourk > 0 ? QStringLiteral("1")
+                                                       : QStringLiteral("0"));
   url.setQuery(query);
   return url.toString();
 }
@@ -301,7 +302,7 @@ PlayUrlFetchResult FetchPlayUrl(IHttpClient* http, const QString& bvid, qint64 c
 
   ++result.http_requests;
   HttpRequest request;
-  request.url = BuildPlayUrlUrl(bvid, cid, qn);
+  request.url = BuildPlayUrlUrl(bvid, cid, qn, options.fourk);
   request.timeout_ms = options.timeout_ms > 0 ? options.timeout_ms : 6000;
   request.sessdata = options.sessdata;
   const HttpResponse response = http->Get(request, cancel);

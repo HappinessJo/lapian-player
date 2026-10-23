@@ -47,7 +47,10 @@ struct PlayUrlData {
 
 // https://api.bilibili.com/x/player/playurl?bvid=...&cid=...&qn=64&fnval=0&fnver=0&fourk=0
 // bvid 非法或 cid<=0 时返回空串（调用方不应发请求）。
-QString BuildPlayUrlUrl(const QString& bvid, qint64 cid, int qn = 64);
+// qn 是“请求档位”，服务端可能降档；实际档位看 PlayUrlData::quality。
+// fourk=1 只是把 4K 请求放行给服务端，不保证返回 4K（普通用户仍拿不到）。
+QString BuildPlayUrlUrl(const QString& bvid, qint64 cid, int qn = 64,
+                        int fourk = 0);
 
 // 解析 playurl JSON。成功 → error.ok()；API 错误按 MapApiError 映射。
 // 特例：data.durl 为空（只有 DASH）时 error.kind=kParse 且 detail="no-durl"，
@@ -59,10 +62,19 @@ QString QualityName(int qn);
 // M1 门要求 720P：qn>=64。只用于报告，不影响下载。
 bool IsM1Quality(int qn);
 
+// M1 产品路径统一“请求 1080P 上限”：qn=80，fourk=0。
+// 实测（T8.8 矩阵）：OB-2 在 qn=64 时服务端只给 16（360P），qn=80/112/120 都给 80
+// （1080P）；fourk=0/1 对实际档位无影响。请求 80 既拿到可用最高，又天然封顶
+// 1080P（不请求 4K），普通用户/大会员账号都不会误触发 4K 下载。
+// 服务端仍可能降档（OB-1/OB-3 给 64）；实际档位只信 PlayUrlData::quality。
+inline constexpr int kM1RequestQn = 80;
+
 struct PlayUrlFetchOptions {
   int timeout_ms = 6000;
   // 可选 SESSDATA；非空时由 WinHttpClient 只发 api.bilibili.com。
   QString sessdata;
+  // 透传给 playurl 的 fourk；0 保持 M1 旧行为（不请求 4K）。
+  int fourk = 0;
 };
 
 struct PlayUrlFetchResult {

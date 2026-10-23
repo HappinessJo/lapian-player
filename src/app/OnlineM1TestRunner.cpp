@@ -1,5 +1,6 @@
 #include "app/OnlineM1TestRunner.h"
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
@@ -81,7 +82,15 @@ void OnlineM1TestRunner::Run() {
             .arg(options_.tag, options_.bvid)
             .arg(options_.cid)
             .arg(options_.page));
-  window_->FocusVideoForTest();
+  // 键位自动化需要真实“激活窗口 + 视频区焦点”：QAction 的 WindowShortcut
+  // 只在激活窗口生效。交付机/CI 从后台进程启动 GUI 时窗口可能拿不到前台，
+  // 这里显式激活（等价于用户点一下窗口），否则 Space/Ctrl+M/S 会被吞掉。
+  auto activate_window = [this]() {
+    window_->raise();
+    window_->activateWindow();
+    window_->FocusVideoForTest();
+  };
+  activate_window();
   window_->OpenOnlineDialogForTest();
   OnlineResolveDialog* dialog = window_->OnlineDialogForTest();
   if (dialog == nullptr) {
@@ -194,6 +203,23 @@ void OnlineM1TestRunner::Run() {
   Print(QStringLiteral("online_m1_cache_hit cache_hit=%1 path=%2")
             .arg(cache_hit ? 1 : 0)
             .arg(window_->OnlineCachePathForTest()));
+  {
+    // 键位自动化的前置条件：窗口是激活窗口，且焦点不在文本框里；否则
+    // QAction 快捷键（Space/Ctrl+M/S）会被窗口/文本让位规则吞掉。
+    // activateWindow() 是异步的：从后台进程启动时，必须让事件循环跑一拍，
+    // 等 Qt 真正收到激活事件后再按第一个键（否则第一下 Space 会丢）。
+    activate_window();
+    const bool window_active =
+        WaitUntil([this]() { return window_->isActiveWindow(); }, 1500,
+                  "window_active");
+    check("window_active", window_active);
+    QWidget* focus = QApplication::focusWidget();
+    Print(QStringLiteral("online_m1_focus widget=%1 active=%2")
+              .arg(focus == nullptr
+                       ? QStringLiteral("null")
+                       : QString::fromLatin1(focus->metaObject()->className()))
+              .arg(window_->isActiveWindow() ? 1 : 0));
+  }
   check("default_paused", !window_->IsPlayingForTest());
   check("frontend_quality", quality_ > 0,
         QStringLiteral("qn=%1").arg(quality_));
@@ -356,6 +382,29 @@ void OnlineM1TestRunner::Run() {
     Print(QStringLiteral("online_m1_cancel_wait ui_ms=%1 back_ok=%2")
               .arg(cancel_ui_ms)
               .arg(back_cached ? 1 : 0));
+
+    // OP3 落点：再跳一次未缓存目标，等下载追上，验证“目标帧 == 显示帧”（误差 0）。
+    // 只在 --uncached-landing 时执行，避免 20 次冷启动测量被整片下载拖慢。
+    if (options_.uncached_landing) {
+      window_->GoToFrameForTest(uncached_target);
+      QElapsedTimer landing_timer;
+      landing_timer.start();
+      const bool landed =
+          WaitUntil([this, uncached_target]() {
+            return window_->OnlineSeekIdleForTest() &&
+                   window_->CurrentFrameForTest() == uncached_target;
+          }, options_.timeout_ms, "uncached_landing");
+      Print(QStringLiteral(
+                "online_m1_uncached_landing target=%1 frame=%2 ms=%3 ok=%4")
+                .arg(uncached_target)
+                .arg(window_->CurrentFrameForTest())
+                .arg(landing_timer.elapsed())
+                .arg(landed ? 1 : 0));
+      check("uncached_landing_exact", landed,
+            QStringLiteral("target=%1 frame=%2")
+                .arg(uncached_target)
+                .arg(window_->CurrentFrameForTest()));
+    }
   }
 
   // 波形状态：有音频时至少 running/ready；不阻塞步进（上面已测）。
