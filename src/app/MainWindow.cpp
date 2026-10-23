@@ -510,6 +510,25 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
     if (step_repeat_timer_->interval() != 70) {
       step_repeat_timer_->setInterval(70);
     }
+    // T8.6.1a：在线 seek 是异步的，不能用 current_frame_ == before 判边界；
+    // 状态机自己判断边界/排队，这里只负责按 tick 推进并在边界停连发。
+    if (OnlineStepEligible()) {
+      const bool keep_going = ApplyOnlineStep(step_direction_);
+      if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+        std::fprintf(stderr,
+                     "T8.6.1a online_step_tick dir=%d desired=%lld frame=%lld "
+                     "keep=%d active=%d\n",
+                     step_direction_,
+                     static_cast<long long>(online_step_.desired),
+                     static_cast<long long>(current_frame_), keep_going ? 1 : 0,
+                     step_repeat_timer_->isActive() ? 1 : 0);
+        std::fflush(stderr);
+      }
+      if (!keep_going) {
+        StopStepRepeat();
+      }
+      return;
+    }
     const std::int64_t before = current_frame_;
     GoToFrameForStep(before + step_direction_, step_direction_ < 0);
     if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
@@ -1321,6 +1340,10 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_last_error_.clear();
   online_buffer_event_count_ = 0;
   online_gate_last_ = true;
+  // T8.6.1a：新会话从干净的步进状态开始。
+  online_step_ = OnlineStepState{};
+  online_seek_target_ = -1;
+  online_status_detail_.clear();
   online_gate_published_ = 0;
   online_gate_readpos_ = 0;
   if (online_cancel_action_ != nullptr) {
@@ -1493,6 +1516,9 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   online_index_complete_ = false;
   online_spans_.clear();
   online_last_error_.clear();
+  online_step_ = OnlineStepState{};
+  online_seek_target_ = -1;
+  online_status_detail_.clear();
 
   const lapian::media::MediaInfo& media = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -1524,6 +1550,8 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
         12000);
   }
   status_label_->setText(base_info_ + online_detail);
+  // T8.6.1a：seek 落地后用它把状态栏从“缓冲中（目标帧 N）”恢复成档位/帧率。
+  online_status_detail_ = online_detail;
   statusBar()->showMessage(QStringLiteral("在线首帧已呈现，默认暂停"), 6000);
   play_action_->setEnabled(true);
   if (snapshot_action_ != nullptr) {
@@ -1983,6 +2011,189 @@ bool MainWindow::OnlineFrameCached(std::int64_t frame) const {
          need_end + 64 * 1024 <= session_->GrowingPublished();
 }
 
+bool MainWindow::OnlineStepEligible() const {
+  // 缓存命中走本地全量索引/同步 seek，不能套用在线状态机；只有正在增长的
+  // GrowingSource 会话才需要异步步进。
+  return online_mode_ && online_ready_ && !online_cache_hit_ &&
+         session_ != nullptr && session_->IsOpen() && session_->IsGrowing();
+}
+
+std::int64_t MainWindow::OnlineLastFrame() const {
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return -1;
+  }
+  // 与 T8.6 GoToFrameInternal 的边界口径完全一致：完整索引优先，其次容器
+  // 总帧数，最后退回部分索引稳定帧数。不要在这里另造一套“缓存边界”。
+  if (online_index_complete_ && online_stable_frames_ > 0) {
+    return static_cast<std::int64_t>(online_stable_frames_) - 1;
+  }
+  const lapian::core::TotalFrameCount container = ContainerTotal();
+  if (container.has_value()) {
+    return container.value() - 1;
+  }
+  if (online_stable_frames_ > 0) {
+    return static_cast<std::int64_t>(online_stable_frames_) - 1;
+  }
+  return -1;
+}
+
+void MainWindow::ShowOnlineWaitPrompt(std::int64_t target) {
+  statusBar()->showMessage(
+      QStringLiteral("缓冲中（目标帧 %1）").arg(target), 8000);
+  if (status_label_ != nullptr) {
+    status_label_->setText(
+        base_info_ +
+        QStringLiteral(" · 在线：缓冲中（目标帧 %1）").arg(target));
+  }
+}
+
+void MainWindow::ResetOnlineStepState() {
+  online_step_.has_desired = false;
+  online_step_.desired = 0;
+  online_step_.inflight = false;
+  online_step_.inflight_target = -1;
+  online_step_.inflight_cached = false;
+  online_step_.queued = false;
+  online_step_.queued_target = -1;
+  online_step_.queued_cached = false;
+  online_step_.queued_direction = 0;
+}
+
+void MainWindow::IssueOnlineStepSeek(std::int64_t target, bool cached) {
+  online_step_.has_desired = true;
+  online_step_.desired = target;
+  online_step_.inflight = true;
+  online_step_.inflight_target = target;
+  online_step_.inflight_cached = cached;
+  ++online_step_.seeks;
+  const bool exact = session_ != nullptr && session_->index().IsReady() &&
+                     !session_->index().empty() &&
+                     target <
+                         static_cast<std::int64_t>(session_->index().size());
+  if (cached) {
+    statusBar()->showMessage(
+        QStringLiteral("第 %1 帧（已缓存）").arg(target), 1200);
+  } else {
+    ShowOnlineWaitPrompt(target);
+  }
+  RequestOnlineSeek(target, lapian::media::FrameCacheMode::kSeekHandoff,
+                    exact);
+  if (!online_seek_running_) {
+    // 线程没起来（错误已由 RequestOnlineSeek 提示）：不要在途状态卡住步进。
+    online_step_.inflight = false;
+    online_step_.queued = false;
+    online_step_.queued_direction = 0;
+  }
+}
+
+bool MainWindow::ApplyOnlineStep(int direction) {
+  if (direction == 0 || !OnlineStepEligible()) {
+    return false;
+  }
+  const std::int64_t last = OnlineLastFrame();
+  if (last < 0) {
+    statusBar()->showMessage(
+        QStringLiteral("在线索引扫描中，目标帧尚不可定位"), 3000);
+    return false;  // 调用方停止连发
+  }
+  const bool step_seek_running = online_step_.inflight && online_seek_running_;
+  const bool foreign_seek_running = online_seek_running_ && !step_seek_running;
+  if (foreign_seek_running) {
+    // 时间轴/Home/End/标记跳转在途：按“已请求的目标帧”±1（状态栏显示的是
+    // 目标帧，用户预期从它开始），而不是从旧画面开始。
+    ResetOnlineStepState();
+  }
+
+  std::int64_t base = current_frame_;
+  if (online_step_.inflight) {
+    base = online_step_.queued ? online_step_.queued_target
+                               : online_step_.inflight_target;
+  } else if (foreign_seek_running && online_seek_target_ >= 0) {
+    base = online_seek_target_;
+  }
+  const std::int64_t delta = direction > 0 ? 1 : -1;
+  const std::int64_t next = base + delta;
+  if (next < 0 || next > last) {
+    ++online_step_.boundary_stops;
+    if (!online_step_.inflight) {
+      statusBar()->showMessage(
+          direction > 0 ? QStringLiteral("已是最后一帧")
+                        : QStringLiteral("已是第一帧"),
+          3000);
+    }
+    // 在途的一步仍会落地；不再排新目标，调用方停止连发。
+    return false;
+  }
+
+  if (!online_step_.inflight) {
+    ResetOnlineStepState();  // 清掉上次序列的排队/在途残留
+    const bool cached = OnlineFrameCached(next);
+    IssueOnlineStepSeek(next, cached);
+    return true;
+  }
+
+  const bool next_cached = OnlineFrameCached(next);
+  if (online_step_.queued) {
+    // 队列只有一格：同向 tick 丢弃（不跳帧）；反向 tick 若走回在途目标则
+    // 直接抵消，否则替换队列。
+    if (next == online_step_.inflight_target) {
+      online_step_.queued = false;
+      online_step_.queued_target = -1;
+      online_step_.queued_direction = 0;
+      return true;
+    }
+    if (online_step_.queued_direction != direction) {
+      online_step_.queued_target = next;
+      online_step_.queued_cached = next_cached;
+      online_step_.queued_direction = direction;
+    }
+    return true;
+  }
+
+  if (!online_step_.inflight_cached && !next_cached) {
+    // 未缓存区：不承诺逐帧呈现（OP3），只保留最新目标；重定向 = 取消旧等待。
+    online_step_.inflight_target = next;
+    online_step_.inflight_cached = false;
+    ++online_step_.retargets;
+    IssueOnlineStepSeek(next, false);
+    return true;
+  }
+
+  // 已缓存区：目标先排队，等当前帧落地后再走一步，保证屏幕逐帧连续。
+  online_step_.queued = true;
+  online_step_.queued_target = next;
+  online_step_.queued_cached = next_cached;
+  online_step_.queued_direction = direction;
+  return true;
+}
+
+void MainWindow::OnOnlineStepLanded(std::int64_t target) {
+  if (!online_step_.inflight || online_step_.inflight_target != target) {
+    return;  // 非步进 seek 或已被新目标取代
+  }
+  online_step_.inflight = false;
+  if (online_step_.trace.size() < 512) {
+    online_step_.trace.push_back(target);
+  }
+  if (!online_step_.queued) {
+    return;
+  }
+  const std::int64_t next = online_step_.queued_target;
+  online_step_.queued = false;
+  online_step_.queued_target = -1;
+  online_step_.queued_direction = 0;
+  // 落地时重新判断缓存状态：排队期间下载可能已经追上。
+  IssueOnlineStepSeek(next, OnlineFrameCached(next));
+}
+
+void MainWindow::OnOnlineStepFailed(std::int64_t target) {
+  if (!online_step_.inflight || online_step_.inflight_target != target) {
+    return;
+  }
+  ResetOnlineStepState();
+  StopStepRepeat();  // 失败后不要继续按 70ms 重试
+}
+
 void MainWindow::RequestOnlineSeek(std::int64_t target,
                                    lapian::media::FrameCacheMode mode,
                                    bool exact_index_covered) {
@@ -2017,11 +2228,18 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
   const bool needs_new_session = online_session_poisoned_;
   const bool exact = exact_index_covered && session_->index().IsReady() &&
                      target < static_cast<std::int64_t>(session_->index().size());
+  // T8.6.1a：重建会话时总是带上当前部分索引（不只 exact 目标）。否则中断一个
+  // 未缓存等待后，新会话没有索引，CanStepFrames/OnlineFrameCached 会短暂失效，
+  // 在线长按会停在重建窗口里。
   lapian::media::FrameIndex index_copy =
-      exact ? session_->index() : lapian::media::FrameIndex{};
+      (needs_new_session && session_->index().IsReady() &&
+       !session_->index().empty())
+          ? session_->index()
+          : lapian::media::FrameIndex{};
   ID3D11Device* device = gfx_ != nullptr ? gfx_->d3d_device() : nullptr;
   const lapian::media::VideoStreamInfo video = session_->info().video;
   online_seek_running_ = true;
+  online_seek_target_ = target;
 
   try {
     online_seek_thread_ = std::thread(
@@ -2059,7 +2277,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                   Qt::QueuedConnection);
               return;
             }
-            if (exact && index_copy.IsReady() && !index_copy.empty()) {
+            if (index_copy.IsReady() && !index_copy.empty()) {
               candidate->InstallOnlineIndex(index_copy, 0.0);
             }
             use = candidate;
@@ -2106,7 +2324,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
             }
             QMetaObject::invokeMethod(
                 this,
-                [this, generation, result, use]() {
+                [this, generation, result, use, target]() {
                   if (generation != online_seek_generation_ || !online_mode_) {
                     return;
                   }
@@ -2115,6 +2333,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                   online_last_error_ = result->error;
                   statusBar()->showMessage(
                       QStringLiteral("跳帧失败：%1").arg(result->error), 6000);
+                  OnOnlineStepFailed(target);
                 },
                 Qt::QueuedConnection);
             return;
@@ -2165,8 +2384,13 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 current_frame_ = target;
                 current_pts_us_ = result->info.pts_us;
                 last_navigation_error_.clear();
+                // T8.6.1a：落地后撤掉“缓冲中（目标帧 N）”，状态栏恢复档位/帧率。
+                if (status_label_ != nullptr && !online_status_detail_.isEmpty()) {
+                  status_label_->setText(base_info_ + online_status_detail_);
+                }
                 statusBar()->showMessage(
                     QStringLiteral("第 %1 帧（在线）").arg(target), 2000);
+                OnOnlineStepLanded(target);
               },
               Qt::QueuedConnection);
         });
@@ -2276,6 +2500,10 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_display_path_.clear();
   online_published_bytes_ = 0;
   online_total_bytes_ = 0;
+  // T8.6.1a：会话结束时丢弃步进请求/在途标记；seek worker 已在上面 join。
+  online_step_ = OnlineStepState{};
+  online_seek_target_ = -1;
+  online_status_detail_.clear();
   mark("end");
 }
 
@@ -3130,6 +3358,54 @@ QString MainWindow::OnlineGateDebugForTest() const {
       .arg(online_buffer_event_count_);
 }
 
+std::int64_t MainWindow::OnlineLastFrameForTest() const {
+  return OnlineLastFrame();
+}
+
+bool MainWindow::OnlineFrameCachedForTest(qint64 frame) const {
+  return OnlineFrameCached(frame);
+}
+
+bool MainWindow::OnlineStepIdleForTest() const {
+  return !online_seek_running_ && !online_step_.inflight && !online_step_.queued;
+}
+
+QString MainWindow::OnlineStepStateForTest() const {
+  return QStringLiteral(
+             "dir=%1 desired=%2 inflight=%3 target=%4 cached=%5 queued=%6 "
+             "qtarget=%7 seeks=%8 retargets=%9 boundary=%10 trace=%11")
+      .arg(step_direction_)
+      .arg(online_step_.desired)
+      .arg(online_step_.inflight ? 1 : 0)
+      .arg(online_step_.inflight_target)
+      .arg(online_step_.inflight_cached ? 1 : 0)
+      .arg(online_step_.queued ? 1 : 0)
+      .arg(online_step_.queued_target)
+      .arg(online_step_.seeks)
+      .arg(online_step_.retargets)
+      .arg(online_step_.boundary_stops)
+      .arg(static_cast<qint64>(online_step_.trace.size()));
+}
+
+std::vector<qint64> MainWindow::OnlineStepTraceForTest() const {
+  std::vector<qint64> out;
+  out.reserve(online_step_.trace.size());
+  for (const std::int64_t frame : online_step_.trace) {
+    out.push_back(static_cast<qint64>(frame));
+  }
+  return out;
+}
+
+void MainWindow::ResetOnlineStepTraceForTest() { online_step_.trace.clear(); }
+
+int MainWindow::OnlineStepBoundaryStopsForTest() const {
+  return online_step_.boundary_stops;
+}
+
+int MainWindow::OnlineStepRetargetCountForTest() const {
+  return online_step_.retargets;
+}
+
 QString MainWindow::WaveformStateForTest() const {
   if (!waveform_) {
     return QStringLiteral("none");
@@ -3960,6 +4236,16 @@ void MainWindow::StartStepRepeat(int delta) {
     return;
   }
   step_direction_ = delta;
+  // T8.6.1a：在线步进的目标/在途/排队由状态机维护；这里不能用 current_frame_
+  // 的同步变化判断“是否走了一帧”，否则第一步还没落地就误判为边界。
+  if (OnlineStepEligible()) {
+    if (!ApplyOnlineStep(delta)) {
+      StopStepRepeat();  // 已在边界（或索引尚不可定位）：不启动连发
+      return;
+    }
+    step_repeat_timer_->start(300);
+    return;
+  }
   const std::int64_t before = current_frame_;
   // T7.2：后退键先预热最近一窗帧，后续连发可直接命中缓存。
   GoToFrameForStep(before + delta, delta < 0);
@@ -4334,6 +4620,12 @@ void MainWindow::GoToFrame(std::int64_t frame) {
 }
 
 void MainWindow::GoToFrameForStep(std::int64_t frame, bool backward) {
+  // T8.6.1a：在线步进统一走异步状态机；frame 参数在在线分支不使用（目标由
+  // 已请求帧/排队帧推导），保留参数以兼容本地同步路径与既有探针。
+  if (OnlineStepEligible()) {
+    ApplyOnlineStep(backward ? -1 : 1);
+    return;
+  }
   // 后退步进预热一窗帧；前进步进顺序解码本身不命中缓存，写缓存只会增加拷贝。
   GoToFrameInternal(frame, backward ? lapian::media::FrameCacheMode::kBackwardWindow
                                     : lapian::media::FrameCacheMode::kNone);
@@ -4345,15 +4637,10 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
     return;
   }
   if (online_ready_ && !online_cache_hit_) {
-    const lapian::core::TotalFrameCount container = ContainerTotal();
-    std::int64_t last_frame = -1;
-    if (online_index_complete_ && online_stable_frames_ > 0) {
-      last_frame = online_stable_frames_ - 1;
-    } else if (container.has_value()) {
-      last_frame = container.value() - 1;
-    } else if (online_stable_frames_ > 0) {
-      last_frame = online_stable_frames_ - 1;
-    }
+    // T8.6.1a：这是非步进导航（时间轴/Home/End/标记/输入帧号），清掉步进状态，
+    // 避免在途步进完成后再补一步造成方向错乱。
+    ResetOnlineStepState();
+    const std::int64_t last_frame = OnlineLastFrame();
     if (last_frame < 0) {
       statusBar()->showMessage(
           QStringLiteral("在线索引扫描中，目标帧尚不可定位"), 3000);
@@ -4371,11 +4658,7 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
       statusBar()->showMessage(
           QStringLiteral("第 %1 帧（已缓存）").arg(target), 1200);
     } else {
-      statusBar()->showMessage(
-          QStringLiteral("缓冲中（目标帧 %1）").arg(target), 8000);
-      status_label_->setText(
-          base_info_ +
-          QStringLiteral(" · 在线：缓冲中（目标帧 %1）").arg(target));
+      ShowOnlineWaitPrompt(target);
     }
     // 在线 seek 不复用 v1 的 kBackwardWindow：那会写入 FrameCache 并持有
     // 多帧硬解表面；在线 reader/缓存由 OnlineSession 管理，统一走 handoff。

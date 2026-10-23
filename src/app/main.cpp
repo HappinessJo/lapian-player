@@ -47,6 +47,7 @@
 #include "app/OnlineBufferTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
+#include "app/OnlineLongPressTestRunner.h"
 #include "app/OnlineM1TestRunner.h"
 #include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
@@ -381,6 +382,10 @@ int main(int argc, char* argv[]) {
   // T8.2：产品路径登录自检探针（凭据 UI、DEC-3 时机、-101/超时/取消）。
   bool online_auth_test = false;
   bool online_m1_test = false;
+  // T8.6.1a：在线长按 PgUp/PgDn 异步步进探针。
+  bool online_longpress_test = false;
+  int online_longpress_hold_ms = 2000;
+  bool online_longpress_fresh_cache = false;
   QString online_m1_bvid;
   QString online_m1_cid_text;
   QString online_m1_tag;
@@ -518,6 +523,13 @@ int main(int argc, char* argv[]) {
       online_auth_test = true;
     } else if (arguments[i] == QStringLiteral("--online-m1-test")) {
       online_m1_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-longpress-test")) {
+      online_longpress_test = true;
+    } else if (arguments[i] == QStringLiteral("--longpress-hold-ms") &&
+               i + 1 < arguments.size()) {
+      online_longpress_hold_ms = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--longpress-fresh-cache")) {
+      online_longpress_fresh_cache = true;
     } else if (arguments[i] == QStringLiteral("--cancel-only")) {
       online_m1_cancel_only = true;
     } else if (arguments[i] == QStringLiteral("--uncached-landing")) {
@@ -604,7 +616,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (online_m1_test || online_offline_test) {
+  if (online_m1_test || online_offline_test || online_longpress_test) {
     bool cid_ok = false;
     online_m1_cid = online_m1_cid_text.toLongLong(&cid_ok);
     if (!cid_ok) {
@@ -623,13 +635,21 @@ int main(int argc, char* argv[]) {
       online_m1_tag = online_m1_bvid;
     }
     if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
+      const char* name = online_offline_test ? "offline"
+                          : online_longpress_test ? "longpress"
+                                                  : "m1";
       std::fprintf(stderr,
                    "online_%s_fail reason=missing_bvid_cid usage=--online-%s-test "
                    "--bvid BV... --cid 123\n",
-                   online_offline_test ? "offline" : "m1",
-                   online_offline_test ? "offline" : "m1");
+                   name, name);
       std::fflush(stderr);
       return 2;
+    }
+    if (online_longpress_hold_ms < 500) {
+      online_longpress_hold_ms = 500;
+    }
+    if (online_longpress_hold_ms > 10000) {
+      online_longpress_hold_ms = 10000;
     }
     qputenv("LAPIAN_ONLINE_LOG", "1");
     qputenv("LAPIAN_SNAPSHOT_LOG", "1");
@@ -659,7 +679,7 @@ int main(int argc, char* argv[]) {
   // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
-       online_buffer_test || online_offline_test) &&
+       online_longpress_test || online_buffer_test || online_offline_test) &&
       settings_root.isEmpty()) {
     settings_root =
         QDir::currentPath() +
@@ -668,7 +688,9 @@ int main(int argc, char* argv[]) {
                                                   ? QStringLiteral("/build/t6.5-settings")
                                                   : (online_offline_test
                                                          ? QStringLiteral("/build/t8.7-settings")
-                                                         : QStringLiteral("/build/t8.6-settings"))));
+                                                         : (online_longpress_test
+                                                                ? QStringLiteral("/build/t8.6.1a-settings")
+                                                                : QStringLiteral("/build/t8.6-settings")))));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
@@ -805,22 +827,32 @@ int main(int argc, char* argv[]) {
   if (legacy_gui_test) {
     window.SetIndexSynchronousForTest(true);
   }
-  if (online_m1_test ||
+  if (online_m1_test || online_longpress_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
       online_m1_cache_root =
           QDir::currentPath() +
-          (online_offline_test ? QStringLiteral("/build/t8.7-online-cache")
-                               : QStringLiteral("/build/t8.6-online-cache"));
+          (online_offline_test
+               ? QStringLiteral("/build/t8.7-online-cache")
+               : (online_longpress_test
+                      ? QStringLiteral("/build/t8.6.1a-online-cache")
+                      : QStringLiteral("/build/t8.6-online-cache")));
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
+    // T8.6.1a 可选：长按探针要求增长中的会话（缓存命中会走本地同步步进）。
+    if (online_longpress_test && online_longpress_fresh_cache) {
+      QDir(online_m1_cache_root).removeRecursively();
+    }
     QDir().mkpath(online_m1_cache_root);
     window.SetOnlineCacheRootForTest(online_m1_cache_root);
     if (online_m1_pictures.isEmpty()) {
       online_m1_pictures =
           QDir::currentPath() +
-          (online_offline_test ? QStringLiteral("/build/t8.7-online-pictures")
-                               : QStringLiteral("/build/t8.6-online-pictures"));
+          (online_offline_test
+               ? QStringLiteral("/build/t8.7-online-pictures")
+               : (online_longpress_test
+                      ? QStringLiteral("/build/t8.6.1a-online-pictures")
+                      : QStringLiteral("/build/t8.6-online-pictures")));
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
@@ -846,12 +878,15 @@ int main(int argc, char* argv[]) {
       QDir().mkpath(online_records_root);
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
-  } else if (online_m1_test) {
+  } else if (online_m1_test || online_longpress_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
       online_records_root =
-          QDir::currentPath() + QStringLiteral("/build/t8.7-online-records-m1");
+          QDir::currentPath() +
+          (online_longpress_test
+               ? QStringLiteral("/build/t8.6.1a-online-records")
+               : QStringLiteral("/build/t8.7-online-records-m1"));
     }
     online_records_root = QFileInfo(online_records_root).absoluteFilePath();
     QDir(online_records_root).removeRecursively();
@@ -998,6 +1033,21 @@ int main(int argc, char* argv[]) {
     online_m1_runner =
         std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
     online_m1_runner->Start();
+  }
+
+  // T8.6.1a：在线长按 PgUp/PgDn（异步步进队列/边界/未缓存提示）。
+  std::unique_ptr<lapian::app::OnlineLongPressTestRunner> online_longpress_runner;
+  if (online_longpress_test) {
+    lapian::app::OnlineLongPressTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.page = online_m1_page;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.hold_ms = online_longpress_hold_ms;
+    online_longpress_runner =
+        std::make_unique<lapian::app::OnlineLongPressTestRunner>(&window, options);
+    online_longpress_runner->Start();
   }
 
   std::unique_ptr<lapian::app::OnlineOfflineTestRunner> online_offline_runner;

@@ -291,6 +291,15 @@ class MainWindow : public QMainWindow {
   bool IsOnlineBufferingForTest() const;
   int OnlineBufferEventCountForTest() const { return online_buffer_event_count_; }
   QString OnlineGateDebugForTest() const;
+  // T8.6.1a 在线长按步进：可见状态与落地轨迹，供 --online-longpress-test 断言。
+  std::int64_t OnlineLastFrameForTest() const;
+  bool OnlineFrameCachedForTest(qint64 frame) const;
+  bool OnlineStepIdleForTest() const;
+  QString OnlineStepStateForTest() const;
+  std::vector<qint64> OnlineStepTraceForTest() const;
+  void ResetOnlineStepTraceForTest();
+  int OnlineStepBoundaryStopsForTest() const;
+  int OnlineStepRetargetCountForTest() const;
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
@@ -368,6 +377,31 @@ class MainWindow : public QMainWindow {
   void CancelOnlineLoading();
   void StopOnlineIndexBuild();
   void StopOnlineSeekWorker();
+  // T8.6.1a：在线步进不走同步 current_frame_ 检查，改为“目标帧 → 异步 seek →
+  // 落地后再走下一步”的状态机；本地模式仍用原同步路径。
+  struct OnlineStepState {
+    bool has_desired = false;
+    std::int64_t desired = 0;
+    bool inflight = false;
+    std::int64_t inflight_target = -1;
+    bool inflight_cached = false;
+    bool queued = false;
+    std::int64_t queued_target = -1;
+    bool queued_cached = false;
+    int queued_direction = 0;
+    int seeks = 0;
+    int retargets = 0;
+    int boundary_stops = 0;
+    std::vector<std::int64_t> trace;
+  };
+  bool OnlineStepEligible() const;
+  std::int64_t OnlineLastFrame() const;
+  bool ApplyOnlineStep(int direction);
+  void IssueOnlineStepSeek(std::int64_t target, bool cached);
+  void OnOnlineStepLanded(std::int64_t target);
+  void OnOnlineStepFailed(std::int64_t target);
+  void ResetOnlineStepState();
+  void ShowOnlineWaitPrompt(std::int64_t target);
   void RequestOnlineSeek(std::int64_t target, lapian::media::FrameCacheMode mode,
                          bool exact_index_covered);
   bool OnlineFrameCached(std::int64_t frame) const;
@@ -566,6 +600,10 @@ class MainWindow : public QMainWindow {
   std::uint64_t online_seek_generation_ = 0;
   bool online_seek_running_ = false;
   bool online_session_poisoned_ = false;
+  // T8.6.1a：最近一次在线 seek 目标（未落地时步进从该目标 ±1，而不是从旧画面）。
+  std::int64_t online_seek_target_ = -1;
+  OnlineStepState online_step_;
+  QString online_status_detail_;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;
