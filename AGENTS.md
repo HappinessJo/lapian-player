@@ -2,7 +2,7 @@
 
 > 给后续新开对话的 agent：先读本文件，再读 [spec.md](spec.md)、[plan.md](plan.md)、[tasks.md](tasks.md)。
 > 产品决策以 `spec.md` v0.3 为准；技术方案以 `plan.md` + ADR 为准；v1 任务以 `tasks.md` 为准，**v2 以 [tasks-v2.md](tasks-v2.md) 为准**。
-> 最后更新：2026-10-24（v6.28：**T8.3.1 缓存管理完成（非门）**；设置页自选目录/配额/清空/孤儿清理，Medium 默认 AppData 101/0；下一任务 **T8.9（M2）**；M1/M2 门与数字未改；v1 仍内部预览收口，T7.7/P14 正式验收暂缓）
+> 最后更新：2026-10-24（v6.29：**T8.3.1 缓存管理完成（非门）**；T8.3.1 交接后刷新 T8.9 提示词到 v2（基线 `cbab29b`）；下一任务 **T8.9（M2）**；M1/M2 门与数字未改；v1 仍内部预览收口，T7.7/P14 正式验收暂缓）
 
 ---
 
@@ -279,7 +279,7 @@
 | 文档 | 版本 | 日期 | 状态 |
 |---|---|---|---|
 | `spec.md` | v0.3 | 2026-10-19 | 首期范围冻结；已应用回补 + P6/P7 方案 A |
-| `AGENTS.md` | v6.28 | 2026-10-24 | 项目上下文；v2 在线 S1/S2/S3 完成（T8.0–T8.8 + T8.6.1a + **T8.3.1 缓存管理**）、DEC-1…6 已拍板（DEC-6 扫码登录并入，T8.2.2 非门）、ADR-007 附条件接受；**T8.8 M1 门通过**；**T8.3.1 非门完成**：设置页目录/配额/打开目录/清空/孤儿清理，清空保留当前会话/记录/截图，Medium 默认 AppData 101/0、ctest 31/31、dist 33.87MB/25；**tasks-v2 v0.19**；下一任务 **T8.9（M2）**，见 [T8.9 提示词](docs/next-session-prompt-t8.9.md)；v1 仍内部预览收口、T7.7/P14 正式验收暂缓 |
+| `AGENTS.md` | v6.29 | 2026-10-24 | 项目上下文；v2 在线 S1/S2/S3 完成（T8.0–T8.8 + T8.6.1a + **T8.3.1 缓存管理**）、DEC-1…6 已拍板（DEC-6 扫码登录并入，T8.2.2 非门）、ADR-007 附条件接受；**T8.8 M1 门通过**；**T8.3.1 非门完成**：设置页目录/配额/打开目录/清空/孤儿清理，清空保留当前会话/记录/截图，Medium 默认 AppData 101/0、ctest 31/31、dist 33.87MB/25；**tasks-v2 v0.19**；下一任务 **T8.9（M2）**，见 [T8.9 提示词](docs/next-session-prompt-t8.9.md)；v1 仍内部预览收口、T7.7/P14 正式验收暂缓 |
 | `plan.md` | v0.2 + v2 章节 v0.3 | 2026-10-19 / 2026-10-23 | v1 技术规划（已同步 v0.3）+ v2 在线增量章节（定稿） |
 | `tasks.md` | v0.28 | 2026-10-22 | 任务清单；T7.7 清单/预检、内部预览收口；正式 T7.7/P14 暂缓 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
@@ -395,7 +395,7 @@
 | `docs/handoff-2026-10-24-t8.6.1a.md` | v1.2 | 2026-10-24 | **当前交接**：T8.6.1a 接口/状态机 + hotfix + 用户实机确认；首次 open 已量（44MB 首帧 634ms/512KB）；下一步 T8.9（M2，已确认）；未改 M1/M2 门与数字 |
 | `docs/perf/v2-online-cache-manage.md` | v1.0 | 2026-10-24 | **当前证据**：T8.3.1 缓存管理（设置页目录/配额/打开目录/清空/启动+6h 孤儿清理）；workspace 72/0（无 UI）/98/0（UI）、Medium 默认 AppData **101/0**（integrity=medium）、只读 ACL 75/0、磁盘满 0.116–0.291ms；真实 AppData 与备份逐字节一致 |
 | `docs/handoff-2026-10-24-t8.3.1.md` | v1 | 2026-10-24 | **当前交接**：T8.3.1 `CacheManager`/设置对话框/清空保留当前会话/启动+6h 清理/只读与磁盘满可读错误；接口、数字、决定、缺口、T8.9 起点；非门；一个 commit |
-| `docs/next-session-prompt-t8.9.md` | v1 | 2026-10-24 | **当前提示词**：新会话 T8.9（M2 DASH 解析/档位）；边界、验收、代码入口、工作区测试、停止条件 |
+| `docs/next-session-prompt-t8.9.md` | v2 | 2026-10-24 | **当前提示词**：T8.3.1 后刷新，基线 `cbab29b`；新会话 T8.9（M2 DASH 解析/档位）；边界、验收、代码入口、工作区/默认路径约束、停止条件 |
 | `docs/next-session-prompt-t8.8.md` | v1 | 2026-10-23 | **当前提示词**：下一个 agent 的 T8.8（先做 durl qn/fourk 矩阵，再决定最小取流修正/blocked；3/3、OP1–OP5、失败矩阵、O9、停止条件） |
 | `docs/perf/v2-online-qr.md` | v1.0 | 2026-10-23 | **当前证据**：T8.2.2 扫码登录；官方 passport generate/poll、本地 QR（v4/33 modules/246px）、4 态/180s/取消 16ms、SESSDATA-only/DPAPI/nav 门；115/0、19/0（UI 21/0，dist 同）；**真实扫码未验证**；非门 |
 | `docs/handoff-2026-10-23-t8.2.2.md` | v1 | 2026-10-23 | **当前交接**：T8.2.2 接口/状态机/数字/缺口/回退；真实扫码未验证；非门；一个 commit |
@@ -508,6 +508,7 @@
 - 2026-10-24：完成 **T8.6.1a 实机回归 hotfix**（非门）：实机首次在线播放长按只走 1 帧、慢拖只变帧号。根因：未缓存每 70ms tick 取消在途 seek，慢 seek 永远落不了地（1 帧 starvation）；Qt/Windows 在物理键仍按住时可能补非 autoRepeat `KeyRelease`，焦点变化也停连发；`OnScrubFinished` 用部分索引长度 clamp。修复：未缓存改单格排队（retargets=0）、`GetAsyncKeyState` 伪 release 守卫、auto-repeat 恢复、`StopStepRepeat(reason)`/`step_start`/`focus_changed` 日志、拖动 clamp/提示。验证：用户样本 720P `BV1PAnt6qEga`/cid 42971761157 **54/0**（前进/后退 30→56/56→30 各 26 帧、bad=0；伪 release 8 帧、真正 keyup 停止；auto-repeat 保持）；`ctest` 30/30、本地 key-test 77/0；**慢拖预览仍 T8.6.1b；首次 open 已量（44MB 首帧 634ms/512KB 返回），不是主因，长等待是下载/播放缓冲；M1/M2 门与数字未改；未进 T8.9/M2**。证据 [v2-online-interaction.md](docs/perf/v2-online-interaction.md) v1.1、交接 [T8.6.1a](docs/handoff-2026-10-24-t8.6.1a.md) v1.1；tasks-v2 升 v0.17。**验证陷阱**：用户 Start Menu `lapian.lnk` 曾指向 `dist\lapian.exe`（2026-10-23 23:30，早于 T8.6.1a 01:10），实际测的是旧 T8.6 同步代码；已重指安装路径并替换 dist exe，此后手动验收先核对 `Get-Process lapian | Select Path,StartTime`。本文件升至 v6.26。
 - 2026-10-24：**T8.6.1a 验收闭环**：用户确认 C 盘安装版 PgUp/PgDn 长按正常；结合 54/0、ctest 30/30、本地 key-test 77/0，T8.6.1a 收口。首次 open 实测 44MB 首帧 634ms/512KB，不是 open 阻塞。新增 [T8.9 提示词](docs/next-session-prompt-t8.9.md)；下一任务 **T8.9（M2）已确认**；tasks-v2 升 v0.18、perf/交接升 v1.2。M1/M2 门与数字未改。本文件升至 v6.27。
 - 2026-10-24：**T8.3.1 缓存管理完成（非门）**：新增 `CacheManager`（摘要/记录/目录配额/清空/孤儿清理）+ 设置对话框（状态栏“设置”/Ctrl+,）；`CacheStore::ClearAll` 支持 bvid+cid 部分键保护当前会话，`CleanupOrphans` 返回条目数，`CheckDirectoryWritable` 可读只读错误；启动 3s + 每 6h 清理并回收配额；`--online-cache-manage-test` workspace 72/0（无 UI）/98/0（`--ui`）、Medium 默认 AppData **101/0**（integrity=medium，真实 AppData 与备份逐字节一致）、`lapian_online_cache_manage_test` 73/0、只读 ACL 75/0、`ctest` 31/31、dist 33.87MB/25；M1/M2 门与数字未改；tasks-v2 升 v0.19。本文件升至 v6.28。
+- 2026-10-24：T8.3.1 交接后刷新 **T8.9 提示词到 v2**（基线 `cbab29b`；加入 T8.3.1 缓存管理语义、默认路径 Medium 约束、T8.9 边界/停止条件）；文档表同步。tasks-v2 仍 v0.19，M1/M2 门与数字未改。本文件升至 v6.29。
 
 ---
 
