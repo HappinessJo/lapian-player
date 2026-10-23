@@ -230,6 +230,12 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 修复前的 50/0 只覆盖“合成 KeyDown + 已缓存区”，不覆盖“慢 seek 未缓存长按”和
 “伪 release”；这两项是实机 1 帧的根因，现已加入探针。
 
+**验证陷阱**：用户前两次手动复现用的是 Start Menu `lapian.lnk`，目标为
+`dist\lapian.exe`（2026-10-23 23:30），**早于 T8.6.1a commit（2026-10-24 01:10）**，
+即旧 T8.6 同步步进代码；因此“改完仍 1 帧”是启动错二进制，不是本次 hotfix 无效。
+已重指安装路径并用 `c7e063d` exe 替换 `dist\lapian.exe`。此后所有手动验收先核对
+`Get-Process lapian | Select Path,StartTime`。
+
 ---
 
 ## 4. 逐项对照 T8.6.1a 验收
