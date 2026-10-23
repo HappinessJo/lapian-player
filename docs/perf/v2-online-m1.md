@@ -1,7 +1,8 @@
 # T8.5 证据：durl 取流（2026-10-23）
 
 - **状态**：**T8.5 实现完成**（playurl → durl → CacheStore → 顺序下载/Range 续传/3 备份/重试/URL 过期刷新 → GrowingSource.Publish → 关闭写句柄后 MarkComplete）。
-- **M1 3/3 判定**：**blocked**。登录样本 OB-2（`BV1mA411m7pS` / cid `1004967230`）的 `durl` 实际只给 **360P（qn=16）**，请求 qn=64/80/112 均返回 16；OB-1/OB-3 为 720P（qn=64）。因此 **3/3 720P 不成立**，本文件不写“M1 3/3 通过”。M1 门仍由 T8.8 判定。
+- **M1 3/3 判定**：**blocked**（T8.5 请求参数下）。登录样本 OB-2（`BV1mA411m7pS` / cid `1004967230`）的 `durl` 实际只给 **360P（qn=16）**，请求 qn=64/80/112 均返回 16；OB-1/OB-3 为 720P（qn=64）。因此 **3/3 720P 不成立**，本文件不写“M1 3/3 通过”。M1 门仍由 T8.8 判定。
+- **T8.8 复核注（2026-10-23）**：S2 §2.2 记录登录后 `durl qn=120 + fourk=1` 时 S-2（即 OB-2）实际为 **80（1080p）**；T8.5 产品固定 qn=64、`BuildPlayUrlUrl` 写死 `fourk=0`，`--qn-1080` 只映射 80。故 OB-2 的 360P 可能是**请求参数差异**，T8.8 必须先做 qn=64/80/112/120 × fourk=0/1 矩阵，再决定修取流或最终 blocked；不要把本文件的历史 blocked 直接当最终结论。
 - **样本/凭据**：`.secrets/bilibili_sessdata.txt`（普通用户，未打印、未提交）；三样本来自 T8.1 证据。日志只保留 host/path/状态/耗时，不含 SESSDATA/签名 URL。
 - **代码**：`src/online/PlayUrl.*`、`DownloadTransport.h`、`WinHttpDownloadTransport.cpp`、`DownloadJob.*`、`WinHttpApi.h`；`tests/online_fetch_test.cpp`；`src/app/OnlineFetchTestRunner.*`；`--online-fetch-test`。
 - **边界**：不接 UI（T8.6）、不做 DASH（T8.9/T8.10）、不做扫码（T8.2.2）、不做缓存命中/在线记录（T8.7）；未改 `CacheStore` 写语义、M1/M2 门与验收数字。
