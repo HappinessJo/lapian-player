@@ -255,7 +255,11 @@ build\release\bin\lapian.exe --online-buffer-test --buffer-media build\test-medi
 | 本地 P1/P2 p95 | 294.8 / 354.1ms，20/20 |
 | 本地 P7 2s p95 | 66.32ms，20/20 |
 
-结论：默认缓存路径与完整 UI E2E 在 Medium 副本上通过；Low 工作区数字仍只代表“工作区缓存”场景，不能替代正常用户 AppData 路径。两者性能差值（UI gap 60→142ms、首帧 604→736ms）属于环境/启动差异，均仍在验收线内。**登录 SESSDATA 的真实 GUI 保存未在 Medium 副本上重新粘贴验证**；目前是代码修复 + 嵌套目录单测 + 目录可写验证。
+结论：默认缓存路径与完整 UI E2E 在 Medium 副本上通过；Low 工作区数字仍只代表“工作区缓存”场景，不能替代正常用户 AppData 路径。两者性能差值（UI gap 60→142ms、首帧 604→736ms）属于环境/启动差异，均仍在验收线内。
+
+**登录保存复测（2026-10-23 19:03）**：在 Medium 副本 GUI 的在线对话框粘贴真实 SESSDATA 并点“保存”，状态显示“凭据已保存；首次提交 BV 时检查登录状态”，`%APPDATA%\拉片软件\credentials.dat` 为 484B；重启后再次打开对话框，仍显示“凭据已保存”，DPAPI 解密正常。未打印 SESSDATA。
+
+**本地拖放第二文件复测（2026-10-23 19:06）**：Medium 副本先打开 `media\proxy\proxy-V1.mp4`，再从资源管理器把 `proxy-V3.mp4` 拖到视频区；窗口标题和 InfoBar 都变为 `proxy-V3.mp4`。修复为 `GfxWidget::setAcceptDrops(true)` + `localFileDropped` 转发到 `MainWindow::OpenFile`。
 
 ---
 

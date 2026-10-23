@@ -7,6 +7,8 @@
 
 struct AVFrame;
 struct ID3D11Device;
+class QDragEnterEvent;
+class QDropEvent;
 class QKeyEvent;
 class QMouseEvent;
 
@@ -43,11 +45,16 @@ class GfxWidget : public QWidget {
   void fullScreenToggleRequested();
   // T7.1：一帧真正走到 Present 之后发一次；用于冷启动 P2 的“首帧呈现”埋点。
   void framePresented();
+  // T8.6 后续：视频区是独立原生 HWND，Qt 窗口级 drop 会被它挡住；
+  // 在原生子窗口接受本地文件拖放后转发给 MainWindow::OpenFile。
+  void localFileDropped(const QString& path);
 
  protected:
   void showEvent(QShowEvent* event) override;
   void paintEvent(QPaintEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
+  void dragEnterEvent(QDragEnterEvent* event) override;
+  void dropEvent(QDropEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
   void mouseDoubleClickEvent(QMouseEvent* event) override;
 

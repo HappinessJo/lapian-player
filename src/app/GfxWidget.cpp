@@ -1,11 +1,15 @@
 #include "app/GfxWidget.h"
 
 #include <QDebug>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QKeyEvent>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QUrl>
 
 #include <cmath>
 #include <string>
@@ -28,6 +32,9 @@ GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
   setAttribute(Qt::WA_OpaquePaintEvent);
   setAttribute(Qt::WA_NoSystemBackground);
   setAutoFillBackground(false);
+  // T8.6 后续：视频区原生 HWND 覆盖主窗口后，主窗口收不到 OLE drop；
+  // 必须让视频子窗口自己接受拖放并转发。
+  setAcceptDrops(true);
   // T6.4：最小尺寸按逻辑像素；1080p@200% 的逻辑可用高度约 540，
   // 原 480×270 会把窗口最小高度推到屏幕可用区之外。
   setMinimumSize(320, 180);
@@ -228,4 +235,29 @@ void GfxWidget::mouseDoubleClickEvent(QMouseEvent* event) {
     return;
   }
   QWidget::mouseDoubleClickEvent(event);
+}
+
+void GfxWidget::dragEnterEvent(QDragEnterEvent* event) {
+  if (event == nullptr || event->mimeData() == nullptr) {
+    return;
+  }
+  for (const QUrl& url : event->mimeData()->urls()) {
+    if (url.isLocalFile()) {
+      event->acceptProposedAction();
+      return;
+    }
+  }
+}
+
+void GfxWidget::dropEvent(QDropEvent* event) {
+  if (event == nullptr || event->mimeData() == nullptr) {
+    return;
+  }
+  for (const QUrl& url : event->mimeData()->urls()) {
+    if (url.isLocalFile()) {
+      event->acceptProposedAction();
+      emit localFileDropped(url.toLocalFile());
+      return;
+    }
+  }
 }

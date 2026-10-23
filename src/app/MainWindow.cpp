@@ -479,6 +479,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   connect(gfx_, &GfxWidget::playPauseRequested, this, &MainWindow::TogglePlayback);
   connect(gfx_, &GfxWidget::gotoRequested, this, &MainWindow::ShowGotoDialog);
   connect(gfx_, &GfxWidget::fullScreenToggleRequested, this, &MainWindow::ToggleFullScreen);
+  // 视频区是独立原生 HWND，主窗口的 drop 到不了这里；由 GfxWidget 转发。
+  connect(gfx_, &GfxWidget::localFileDropped, this, &MainWindow::OpenFile);
   // Esc 的可用性跟随“全屏 + 是否在文本框内”：编辑备注时 Esc 仍交给文本框，
   // 不在备注框里退出全屏（T5.3 的焦点让位语义）。
   connect(qApp, &QApplication::focusChanged, this,
