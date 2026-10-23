@@ -43,6 +43,7 @@
 #include "app/MemoryTestRunner.h"
 #include "app/OnlineAuthTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
+#include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
@@ -125,6 +126,49 @@ int main(int argc, char* argv[]) {
       }
     }
     return lapian::app::RunOnlineCacheTest(options);
+  }
+
+  // T8.4：可增长读层探针同样无 GUI、离线（本地 faststart 样本 + 临时缓存根）。
+  if (HasArgument(argc, argv, "--online-growing-test")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineGrowingTestOptions options;
+    const QStringList growing_args = QCoreApplication::arguments();
+    for (int i = 1; i < growing_args.size(); ++i) {
+      const QString& arg = growing_args[i];
+      if (arg == QStringLiteral("--growing-media") &&
+          i + 1 < growing_args.size()) {
+        options.media = growing_args[++i];
+      } else if (arg.startsWith(QStringLiteral("--growing-media="))) {
+        options.media =
+            arg.mid(static_cast<int>(std::strlen("--growing-media=")));
+      } else if (arg == QStringLiteral("--minutes") &&
+                 i + 1 < growing_args.size()) {
+        options.minutes = growing_args[++i].toInt();
+      } else if (arg.startsWith(QStringLiteral("--minutes="))) {
+        options.minutes =
+            arg.mid(static_cast<int>(std::strlen("--minutes="))).toInt();
+      } else if (arg == QStringLiteral("--readers") &&
+                 i + 1 < growing_args.size()) {
+        options.readers = growing_args[++i].toInt();
+      } else if (arg.startsWith(QStringLiteral("--readers="))) {
+        options.readers =
+            arg.mid(static_cast<int>(std::strlen("--readers="))).toInt();
+      } else if (arg == QStringLiteral("--growing-root") &&
+                 i + 1 < growing_args.size()) {
+        options.root = growing_args[++i];
+      } else if (arg.startsWith(QStringLiteral("--growing-root="))) {
+        options.root =
+            arg.mid(static_cast<int>(std::strlen("--growing-root=")));
+      } else if (arg == QStringLiteral("--growing-keep")) {
+        options.keep_root = true;
+      }
+    }
+    return lapian::app::RunOnlineGrowingTest(options);
   }
 
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。

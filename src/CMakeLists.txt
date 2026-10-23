@@ -64,6 +64,7 @@ target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 # T8.2 补显式 SESSDATA、nav 自检、DPAPI 凭据；HTTP 实现仍是动态加载 WinHTTP，
 # 自检通过后 T8.16 再决定打包栈（libcurl 只在构建时可选）。
 # T8.3 补 CacheStore：缓存根/meta.json/.part→.mp4/配额 LRU/续传/清空；纯本地存储。
+# T8.4 补可增长读层：GrowingSource + 每读者 Cursor/AVIO；只读 `.part`，不发起 HTTP。
 add_library(lapian_online STATIC
   online/BiliAuth.cpp
   online/BiliAuth.h
@@ -75,13 +76,15 @@ add_library(lapian_online STATIC
   online/CacheStore.h
   online/CredentialStore.cpp
   online/CredentialStore.h
+  online/GrowingSource.cpp
+  online/GrowingSource.h
   online/IHttpClient.h
   online/Sessdata.h
   online/WinHttpClient.cpp
   online/WinHttpClient.h)
 lapian_apply_common_options(lapian_online)
 target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_online PUBLIC Qt6::Core PRIVATE crypt32)
+target_link_libraries(lapian_online PUBLIC Qt6::Core PRIVATE crypt32 lapian::ffmpeg)
 
 # T7.3 长时浸泡：采样趋势/阈值判定，纯 C++，产品与单测共用。
 add_library(lapian_soak STATIC
@@ -180,6 +183,8 @@ qt_add_executable(lapian WIN32
   app/OnlineAuthTestRunner.h
   app/OnlineCacheTestRunner.cpp
   app/OnlineCacheTestRunner.h
+  app/OnlineGrowingTestRunner.cpp
+  app/OnlineGrowingTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
   app/OnlineHttpSelfCheckRunner.h
   app/OnlineResolveDialog.cpp
