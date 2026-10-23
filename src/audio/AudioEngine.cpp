@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include <QString>
+
 #include <windows.h>
 #include <avrt.h>
 #include <objbase.h>
@@ -24,6 +26,7 @@
 #include "audio/AudioDecoder.h"
 #include "audio/AudioFormat.h"
 #include "audio/WasapiRenderer.h"
+#include "online/GrowingSource.h"
 
 namespace lapian::audio {
 namespace {
@@ -57,6 +60,10 @@ struct AudioEngine::Impl {
   std::string path;
   int stream_index = -1;
   double av_offset = 0.0;
+  bool growing = false;
+  std::shared_ptr<lapian::online::GrowingSource> growing_source;
+  std::string growing_part_path;
+  std::unique_ptr<lapian::online::GrowingFormat> growing_format;
 
   std::thread thread;
   std::mutex mutex;
@@ -72,6 +79,7 @@ struct AudioEngine::Impl {
   std::atomic<bool> muted{false};
   std::atomic<double> clock_seconds{0.0};
   std::atomic<bool> clock_valid{false};
+  std::atomic<std::int64_t> last_pump_ns{0};
   std::atomic<bool> simulate_device_loss{false};
 
   mutable std::mutex status_mutex;
@@ -145,6 +153,8 @@ struct AudioEngine::Impl {
 
   bool OpenDeviceAndDecoder(std::string* error, bool* decoder_failed) {
     *decoder_failed = false;
+    decoder.Close();
+    growing_format.reset();
     renderer.Shutdown();
     if (!renderer.Initialize(error)) {
       return false;
@@ -170,8 +180,26 @@ struct AudioEngine::Impl {
     scratch.resize(static_cast<std::size_t>(renderer.device_info().buffer_frames) *
                    static_cast<std::size_t>(format.channels));
 
-    if (!decoder.Open(path, stream_index, output, error)) {
+    bool decoder_opened = false;
+    if (growing) {
+      growing_format = std::make_unique<lapian::online::GrowingFormat>();
+      QString format_error;
+      if (!growing_source ||
+          !growing_format->Open(growing_source,
+                                QString::fromUtf8(growing_part_path.c_str()),
+                                &format_error, 0)) {
+        *error = format_error.isEmpty() ? "无法打开可增长音频上下文"
+                                        : format_error.toUtf8().constData();
+      } else {
+        decoder_opened = decoder.OpenWithFormat(
+            growing_format->context(), stream_index, output, error);
+      }
+    } else {
+      decoder_opened = decoder.Open(path, stream_index, output, error);
+    }
+    if (!decoder_opened) {
       *decoder_failed = true;
+      growing_format.reset();
       renderer.Shutdown();
       return false;
     }
@@ -495,6 +523,11 @@ struct AudioEngine::Impl {
   }
 
   void Pump() {
+    last_pump_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_relaxed);
     if (simulate_device_loss.load()) {
       if (playing) {
         // 与真实设备失效同一条路径：停播、使时钟失效、2s 后重试。
@@ -668,6 +701,7 @@ struct AudioEngine::Impl {
     renderer.Stop();
     renderer.Shutdown();
     decoder.Close();
+    growing_format.reset();
     if (mmcss != nullptr) {
       AvRevertMmThreadCharacteristics(mmcss);
     }
@@ -696,6 +730,69 @@ bool AudioEngine::Open(const std::string& utf8_path, int stream_index,
     impl_->path = utf8_path;
     impl_->stream_index = stream_index;
     impl_->av_offset = std::isfinite(av_offset_seconds) ? av_offset_seconds : 0.0;
+    impl_->growing = false;
+    impl_->growing_source.reset();
+    impl_->growing_part_path.clear();
+    impl_->quit = false;
+    impl_->open_requested = true;
+    impl_->want_play.store(false);
+    impl_->seek_serial.store(0);
+    impl_->play_target = 0.0;
+    impl_->ready = false;
+    impl_->playing = false;
+    impl_->decoder_eof = false;
+    impl_->device_retry = false;
+    impl_->simulate_device_loss.store(false);
+    impl_->handled_serial = 0;
+    impl_->handled_rate_serial = 0;
+    impl_->rate = impl_->requested_rate.load();
+    impl_->frames_since_start = 0;
+    impl_->position_seconds = 0.0;
+    impl_->underruns = 0;
+  }
+  try {
+    impl_->thread = std::thread([this] { impl_->Run(); });
+  } catch (const std::exception&) {
+    std::lock_guard<std::mutex> lock(impl_->status_mutex);
+    impl_->status.state = AudioState::kError;
+    impl_->status.message = "启动音频线程失败";
+    ++impl_->status.revision;
+    return false;
+  }
+  return true;
+}
+
+bool AudioEngine::OpenGrowing(
+    std::shared_ptr<lapian::online::GrowingSource> source,
+    const std::string& part_path_utf8, int stream_index,
+    double av_offset_seconds) {
+  Close();
+  if (!source || !source->IsValid() || part_path_utf8.empty()) {
+    std::lock_guard<std::mutex> lock(impl_->status_mutex);
+    impl_->status = AudioStatus{};
+    impl_->status.state = AudioState::kError;
+    impl_->status.message = "可增长音频源无效";
+    ++impl_->status.revision;
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl_->status_mutex);
+    impl_->status = AudioStatus{};
+    impl_->status.state = AudioState::kOpening;
+    impl_->status.has_audio = true;
+    impl_->status.volume = impl_->volume.load();
+    impl_->status.muted = impl_->muted.load();
+    ++impl_->status.revision;
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->path.clear();
+    impl_->stream_index = stream_index;
+    impl_->av_offset =
+        std::isfinite(av_offset_seconds) ? av_offset_seconds : 0.0;
+    impl_->growing = true;
+    impl_->growing_source = std::move(source);
+    impl_->growing_part_path = part_path_utf8;
     impl_->quit = false;
     impl_->open_requested = true;
     impl_->want_play.store(false);
@@ -738,6 +835,9 @@ void AudioEngine::Close() {
     impl_->thread.join();
   }
   impl_->clock_valid.store(false);
+  impl_->growing_source.reset();
+  impl_->growing = false;
+  impl_->growing_part_path.clear();
   {
     std::lock_guard<std::mutex> lock(impl_->status_mutex);
     impl_->status = AudioStatus{};
@@ -808,6 +908,18 @@ AudioStatus AudioEngine::status() const {
 bool AudioEngine::ClockSeconds(double* seconds) const {
   if (seconds == nullptr || !impl_->clock_valid.load()) {
     return false;
+  }
+  // T8.6：音频线程若阻塞在可增长源 frontier（FillTo → DecodeChunk），Pump 不再
+  // 推进；此时设备时钟不再代表媒体进度。用“最后一次 Pump 墙钟”判定失速，
+  // 让 PlaybackController 进入缓冲暂停，而不是拿旧 clock 把画面冻住/跳帧。
+  const std::int64_t last_pump = impl_->last_pump_ns.load(std::memory_order_relaxed);
+  if (last_pump > 0) {
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    if (now - last_pump > 400'000'000LL) {
+      return false;
+    }
   }
   const double value = impl_->clock_seconds.load();
   if (!std::isfinite(value)) {

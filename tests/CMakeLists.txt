@@ -116,6 +116,17 @@ set_tests_properties(lapian_online_fetch_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# T8.6 在线媒体层：0.3MB OpenGrowing/首帧、部分索引、已缓存精确 seek、
+# 未缓存 seek 单读者中断 ≤100ms。无 GUI/网络；素材缺失返回 77。
+add_executable(lapian_online_m1_test online_m1_test.cpp)
+lapian_apply_common_options(lapian_online_m1_test)
+target_link_libraries(lapian_online_m1_test PRIVATE lapian_media lapian_online lapian::ffmpeg)
+lapian_copy_ffmpeg_dlls(lapian_online_m1_test)
+add_test(NAME lapian_online_m1_test COMMAND lapian_online_m1_test)
+set_tests_properties(lapian_online_m1_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
+
 # T8.2.2 扫码登录：QR 本地渲染、generate/poll 解析、4 态/过期/取消、
 # 只提取 SESSDATA、DPAPI、nav 通过才 success；fake HTTP，无网络/GUI。
 add_executable(lapian_online_qr_test online_qr_test.cpp)

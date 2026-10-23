@@ -18,6 +18,7 @@
 #include "core/FrameMath.h"
 #include "core/LoopRange.h"
 #include "core/MarkStore.h"
+#include "media/OnlineIndexBuilder.h"
 
 struct AVFrame;
 
@@ -55,6 +56,20 @@ class AudioEngine;
 class WaveformGenerator;
 }
 
+namespace lapian::online {
+class CacheStore;
+class IDownloadTransport;
+struct PlayUrlData;
+}  // namespace lapian::online
+
+namespace lapian::app {
+class OnlineSession;
+struct OnlineProgress;
+struct OnlineReadyInfo;
+struct OnlineRequest;
+enum class OnlineState;
+}
+
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
 // 播放、时间轴、标记等仍由后续任务接入。
 class MainWindow : public QMainWindow {
@@ -71,6 +86,23 @@ class MainWindow : public QMainWindow {
 
   // 打开本地文件；成功才替换当前会话，失败保留旧画面。
   void OpenFile(const QString& path);
+  // T8.6 在线会话：产品确认路径与自动化共用。返回 false 时 last_online_error 可读。
+  bool StartOnlineSession(const lapian::app::OnlineRequest& request);
+  QString OnlineStateForTest() const;
+  QString OnlineProgressForTest() const;
+  QString OnlineLastErrorForTest() const;
+  bool OnlineReadyForTest() const { return online_ready_; }
+  bool OnlineModeForTest() const { return online_mode_; }
+  qint64 OnlineStableFramesForTest() const;
+  bool OnlineSeekIdleForTest() const { return !online_seek_running_; }
+  int OnlineQualityForTest() const { return online_qn_; }
+  QString OnlinePartPathForTest() const { return online_part_path_; }
+  qint64 OnlineContainerFramesForTest() const;
+  QString StatusMessageForTest() const;
+  void CancelOnlineLoadingForTest() { CancelOnlineLoading(); }
+  void CancelOnlineForTest() { CancelOnlineLoading(); }
+  // 等待在线首帧（或错误/超时），供 --online-m1-test 使用。
+  bool WaitForOnlineReadyForTest(int timeout_ms);
   // 跳到 0 基帧号；成功时画面/信息栏同步。T2.4/T2.6 共用。
   void GoToFrame(std::int64_t frame);
   // T7.4 4K 性能探针入口：走与真实鼠标/键盘完全相同的产品路径。
@@ -235,6 +267,16 @@ class MainWindow : public QMainWindow {
   // T7.5：--robust-test 用独立 AppData 根，避免只读目录回退写进真实
   // %APPDATA%\拉片软件\marks。空 = 产品默认。
   void SetMarkAppDataRootForTest(const QString& root);
+  // T8.6 E2E：在开始在线会话前覆盖缓存根（不写用户默认目录）。
+  void SetOnlineCacheRootForTest(const QString& root);
+  // T8.6 缓冲耗尽/错误注入：只影响下一次在线会话，不进入产品默认路径。
+  void SetOnlineTransportForTest(
+      std::unique_ptr<lapian::online::IDownloadTransport> transport);
+  void SetOnlinePlayUrlForTest(const lapian::online::PlayUrlData& data);
+  void SetOnlineReadyThresholdForTest(qint64 bytes);
+  bool IsOnlineBufferingForTest() const;
+  int OnlineBufferEventCountForTest() const { return online_buffer_event_count_; }
+  QString OnlineGateDebugForTest() const;
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
@@ -283,6 +325,19 @@ class MainWindow : public QMainWindow {
  private:
   void ShowEmptyState();
   void ShowOnlineDialog();
+  void EnsureOnlineSession();
+  void BeginOnlineRequest(const lapian::app::OnlineRequest& request);
+  bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
+  void ApplyOnlineProgress(const lapian::app::OnlineProgress& progress);
+  void ApplyOnlineState(lapian::app::OnlineState state, const QString& message);
+  void StartOnlineIndexBuild();
+  void CancelOnlineLoading();
+  void StopOnlineIndexBuild();
+  void StopOnlineSeekWorker();
+  void RequestOnlineSeek(std::int64_t target, lapian::media::FrameCacheMode mode,
+                         bool exact_index_covered);
+  bool OnlineFrameCached(std::int64_t frame) const;
+  void ShutdownOnlineSession(bool finalize_if_complete);
   void GoToFrameInternal(std::int64_t frame, lapian::media::FrameCacheMode mode);
   void GoToFrameForStep(std::int64_t frame, bool backward);
   // T7.11.1：把待回拷的后退窗口按块写进 FrameCache（每块 4 帧，0ms 定时器）。
@@ -371,6 +426,7 @@ class MainWindow : public QMainWindow {
   QTimer* audio_status_timer_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* online_action_ = nullptr;
+  QAction* online_cancel_action_ = nullptr;
   QAction* play_action_ = nullptr;
   QAction* prev_action_ = nullptr;
   QAction* next_action_ = nullptr;
@@ -388,7 +444,9 @@ class MainWindow : public QMainWindow {
   QAction* exit_fullscreen_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
-  std::unique_ptr<lapian::media::MediaSession> session_;
+  std::shared_ptr<lapian::media::MediaSession> session_;
+  std::unique_ptr<lapian::app::OnlineSession> online_;
+  std::unique_ptr<lapian::online::CacheStore> online_cache_;
   std::unique_ptr<PlaybackController> playback_;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
@@ -405,6 +463,7 @@ class MainWindow : public QMainWindow {
   int step_direction_ = 0;
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
+  std::int64_t current_pts_us_ = 0;
   std::int64_t displayed_frame_index_ = -1;
   // T7.4：本次会话真正 Present 的视频帧数（P8“每帧呈现”探针）。
   int presented_frame_count_ = 0;
@@ -424,6 +483,7 @@ class MainWindow : public QMainWindow {
   QString last_open_error_;
   QString last_navigation_error_;
   QString mark_appdata_root_for_test_;
+  QString snapshot_pictures_root_for_test_;
   std::int64_t snapshot_last_capture_frame_ = -1;
   std::int64_t snapshot_last_saved_frame_ = -1;
   bool snapshot_last_fallback_ = false;
@@ -433,6 +493,39 @@ class MainWindow : public QMainWindow {
   QPointer<QWidget> fullscreen_focus_widget_;
   bool fullscreen_was_maximized_ = false;
   qint64 fullscreen_last_toggle_ms_ = -1;
+  // T8.6 在线会话/部分索引/异步 seek。
+  bool online_mode_ = false;
+  bool online_ready_ = false;
+  bool online_finalized_ = false;
+  bool has_online_test_playurl_ = false;
+  qint64 online_test_threshold_ = 0;
+  std::unique_ptr<lapian::online::IDownloadTransport> online_test_transport_;
+  std::shared_ptr<lapian::online::PlayUrlData> online_test_playurl_;
+  int online_buffer_event_count_ = 0;
+  bool online_gate_last_ = true;
+  qint64 online_gate_published_ = 0;
+  qint64 online_gate_readpos_ = 0;
+  QString online_bvid_;
+  QString online_title_;
+  QString online_part_path_;
+  QString online_display_path_;
+  qint64 online_cid_ = 0;
+  qint64 online_total_bytes_ = 0;
+  qint64 online_published_bytes_ = 0;
+  int online_qn_ = 0;
+  int online_codecid_ = 0;
+  int online_stable_frames_ = 0;
+  bool online_index_complete_ = false;
+  std::vector<lapian::media::OnlineFrameSpan> online_spans_;
+  QString online_last_error_;
+  std::thread online_index_thread_;
+  std::shared_ptr<std::atomic<bool>> online_index_cancel_;
+  std::uint64_t online_index_generation_ = 0;
+  std::thread online_seek_thread_;
+  std::shared_ptr<std::atomic<bool>> online_seek_cancel_;
+  std::uint64_t online_seek_generation_ = 0;
+  bool online_seek_running_ = false;
+  bool online_session_poisoned_ = false;
   bool waveform_visible_ = true;
   int volume_ = 100;
   double rate_ = 1.0;

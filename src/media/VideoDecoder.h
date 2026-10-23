@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+struct AVFormatContext;
 struct AVFrame;
 struct ID3D11Device;
 
@@ -42,6 +43,11 @@ class VideoDecoder {
   bool OpenWithD3D11Device(const std::string& utf8_path, int video_stream_index,
                            ID3D11Device* d3d11_device, bool prefer_hardware,
                            std::string* error);
+  // T8.6：使用调用方拥有的（可增长读层）AVFormatContext；Decoder 不关闭它。
+  // 调用方必须保证 context 的生命周期长于本对象，且同一时刻只有一个线程使用。
+  bool OpenWithFormat(AVFormatContext* format, int video_stream_index,
+                      ID3D11Device* d3d11_device, bool prefer_hardware,
+                      std::string* error);
   void Close();
 
   bool DecodeFirstFrame(DecodedFrameInfo* info, std::string* error);

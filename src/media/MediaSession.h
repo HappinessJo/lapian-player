@@ -15,6 +15,11 @@
 struct AVFrame;
 struct ID3D11Device;
 
+namespace lapian::online {
+class GrowingFormat;
+class GrowingSource;
+}  // namespace lapian::online
+
 namespace lapian::media {
 
 // T7.1：一次打开的分段耗时（毫秒），只用于冷启动测量，不参与逻辑。
@@ -43,7 +48,39 @@ class MediaSession {
   // 通过 InstallIndex 安装；默认 true 保持既有同步语义（回归测试用）。
   bool Open(const std::string& utf8_path, ID3D11Device* device, std::string* error,
             bool build_index = true);
+
+  // T8.6：从可增长读层打开（在线 `.part`）。`part_path_utf8` 是实际读取文件；
+  // `display_name_utf8` 只用于 UI/记录标识，不会打开。成功后会话持有 source/
+  // GrowingFormat，生命周期长于 decoder；本地路径分支不受影响。
+  bool OpenGrowing(std::shared_ptr<lapian::online::GrowingSource> source,
+                   const std::string& part_path_utf8,
+                   const std::string& display_name_utf8,
+                   ID3D11Device* device, std::string* error,
+                   bool prefer_hardware = true);
   void Close();
+
+  bool IsGrowing() const { return growing_; }
+  std::shared_ptr<lapian::online::GrowingSource> growing_source_for_index() const {
+    return growing_source_;
+  }
+  // 已完成下载且所有字节可读。
+  bool GrowingComplete() const;
+  std::int64_t GrowingPublished() const;
+  // AVIO 已读到的文件偏移；用于判断接下来解码是否会撞上未发布区。
+  std::int64_t GrowingReadPosition() const;
+  // 下一帧解码至少还需要 margin 字节的未读缓冲；UI 用它做播放缓冲闸门。
+  bool CanDecodeAhead(std::int64_t margin_bytes) const;
+  // T8.6 异步 seek：中断本会话的 growing cursor（不取消共享 source）。
+  // 中断后该会话的 AVFormatContext 不可继续使用，调用方应关闭并重建。
+  void SetGrowingInterrupt(std::shared_ptr<std::atomic<bool>> flag);
+  void InterruptGrowingReads();
+  bool GrowingInterrupted() const;
+  // 未缓存区的 CFR 近似 seek：目标 PTS 由容器帧率/帧号估算；解码到 >= PTS 后
+  // 校验落点，偏差超过半帧返回 false（不冒充精确）。
+  bool SeekToEstimatedPts(std::int64_t target_pts_us, std::int64_t target_frame,
+                          DecodedFrameInfo* out, std::string* error);
+  // 部分索引：只替换索引，不清 decoder 顺序位置/帧缓存（帧号前缀保持稳定）。
+  void InstallOnlineIndex(FrameIndex index, double build_ms);
 
   // 用当前会话的文件/流建索引；失败不影响已打开的会话（索引保持为空）。
   bool BuildIndexNow(std::string* error, const std::atomic<bool>* cancel = nullptr);
@@ -98,6 +135,12 @@ class MediaSession {
   FrameIndex index_;
   FrameCache frame_cache_;
   std::unique_ptr<VideoDecoder> decoder_;
+  // 声明顺序保证析构时 decoder 先于 growing_format/source 释放。
+  std::shared_ptr<lapian::online::GrowingSource> growing_source_;
+  std::unique_ptr<lapian::online::GrowingFormat> growing_format_;
+  std::shared_ptr<std::atomic<bool>> growing_interrupt_;
+  std::string growing_part_path_;
+  bool growing_ = false;
   DecodedFrameInfo first_frame_;
   MediaOpenTimings last_open_timings_;
   // 缓存命中时返回的软件帧，保持到下一次 Seek/Close，沿用解码器帧的生命周期约定。

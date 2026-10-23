@@ -121,6 +121,10 @@ class MarkStore {
   static MarkStore Open(const std::string& video_path_utf8, std::int64_t duration_us,
                         const MarkStoreOptions& options = {},
                         const FrameLookup& lookup = {});
+  // T8.6：在线会话内标记（完整在线记录/持久化是 T8.7）。不读写 sidecar/AppData；
+  // Save() 只返回成功且不落盘。
+  static MarkStore OpenSessionOnly(const std::string& video_path_utf8,
+                                   std::int64_t duration_us);
 
   bool valid() const { return valid_; }
   const VideoIdentity& video() const { return video_; }
@@ -153,6 +157,7 @@ class MarkStore {
   bool using_fallback_ = false;
   bool valid_ = false;
   bool block_save_ = false;  // 读到更高 schema/读失败时禁止覆盖
+  bool session_only_ = false;  // T8.6：在线会话内，不落盘
 };
 
 }  // namespace lapian::core

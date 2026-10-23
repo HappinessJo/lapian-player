@@ -44,8 +44,10 @@
 #include "app/OnlineAuthTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
 #include "app/OnlineFetchTestRunner.h"
+#include "app/OnlineBufferTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
+#include "app/OnlineM1TestRunner.h"
 #include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
@@ -361,6 +363,19 @@ int main(int argc, char* argv[]) {
   bool online_resolve_test = false;
   // T8.2：产品路径登录自检探针（凭据 UI、DEC-3 时机、-101/超时/取消）。
   bool online_auth_test = false;
+  bool online_m1_test = false;
+  QString online_m1_bvid;
+  QString online_m1_cid_text;
+  QString online_m1_tag;
+  QString online_m1_pictures;
+  QString online_m1_cache_root;
+  int online_m1_page = 1;
+  qint64 online_m1_cid = 0;
+  int online_m1_timeout_ms = 20000;
+  bool online_m1_cancel_only = false;
+  bool online_buffer_test = false;
+  QString online_buffer_media;
+  int online_buffer_timeout_ms = 20000;
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -476,6 +491,37 @@ int main(int argc, char* argv[]) {
       online_resolve_test = true;
     } else if (arguments[i] == QStringLiteral("--online-auth-test")) {
       online_auth_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-m1-test")) {
+      online_m1_test = true;
+    } else if (arguments[i] == QStringLiteral("--cancel-only")) {
+      online_m1_cancel_only = true;
+    } else if (arguments[i] == QStringLiteral("--online-buffer-test")) {
+      online_buffer_test = true;
+    } else if (arguments[i] == QStringLiteral("--buffer-media") &&
+               i + 1 < arguments.size()) {
+      online_buffer_media = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--bvid") &&
+               i + 1 < arguments.size()) {
+      online_m1_bvid = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--cid") &&
+               i + 1 < arguments.size()) {
+      online_m1_cid_text = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--page") &&
+               i + 1 < arguments.size()) {
+      online_m1_page = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--tag") &&
+               i + 1 < arguments.size()) {
+      online_m1_tag = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--online-pictures") &&
+               i + 1 < arguments.size()) {
+      online_m1_pictures = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--online-cache-root") &&
+               i + 1 < arguments.size()) {
+      online_m1_cache_root = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--timeout-ms") &&
+               i + 1 < arguments.size()) {
+      online_m1_timeout_ms = arguments[++i].toInt();
+      online_buffer_timeout_ms = online_m1_timeout_ms;
     } else if (arguments[i] == QStringLiteral("--robust-media") &&
                i + 1 < arguments.size()) {
       robust_media = arguments[++i];
@@ -517,6 +563,34 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  if (online_m1_test) {
+    bool cid_ok = false;
+    online_m1_cid = online_m1_cid_text.toLongLong(&cid_ok);
+    if (!cid_ok) {
+      online_m1_cid = 0;
+    }
+    if (online_m1_page < 1) {
+      online_m1_page = 1;
+    }
+    if (online_m1_timeout_ms < 3000) {
+      online_m1_timeout_ms = 3000;
+    }
+    if (online_m1_timeout_ms > 120000) {
+      online_m1_timeout_ms = 120000;
+    }
+    if (online_m1_tag.isEmpty()) {
+      online_m1_tag = online_m1_bvid;
+    }
+    if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
+      std::fprintf(stderr,
+                   "online_m1_fail reason=missing_bvid_cid usage=--online-m1-test "
+                   "--bvid BV... --cid 123\n");
+      std::fflush(stderr);
+      return 2;
+    }
+    qputenv("LAPIAN_ONLINE_LOG", "1");
+    qputenv("LAPIAN_SNAPSHOT_LOG", "1");
+  }
   if (loop_test) {
     qputenv("LAPIAN_LOOP_LOG", "1");
   }
@@ -541,11 +615,15 @@ int main(int argc, char* argv[]) {
   // --settings-path 可指向 %APPDATA%\拉片软件 做真实默认路径验证。
   // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
-  if ((settings_test || settings_expect || banner_test) && settings_root.isEmpty()) {
+  if ((settings_test || settings_expect || banner_test || online_m1_test ||
+       online_buffer_test) &&
+      settings_root.isEmpty()) {
     settings_root =
         QDir::currentPath() +
         ((settings_test || settings_expect) ? QStringLiteral("/build/t6.3-settings")
-                                           : QStringLiteral("/build/t6.5-settings"));
+                                           : (banner_test
+                                                  ? QStringLiteral("/build/t6.5-settings")
+                                                  : QStringLiteral("/build/t8.6-settings")));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
@@ -682,6 +760,23 @@ int main(int argc, char* argv[]) {
   if (legacy_gui_test) {
     window.SetIndexSynchronousForTest(true);
   }
+  if (online_m1_test) {
+    if (online_m1_cache_root.isEmpty()) {
+      online_m1_cache_root = QDir::currentPath() +
+                             QStringLiteral("/build/t8.6-online-cache");
+    }
+    online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
+    QDir().mkpath(online_m1_cache_root);
+    window.SetOnlineCacheRootForTest(online_m1_cache_root);
+    if (online_m1_pictures.isEmpty()) {
+      online_m1_pictures = QDir::currentPath() +
+                           QStringLiteral("/build/t8.6-online-pictures");
+    }
+    online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
+    QDir(online_m1_pictures).removeRecursively();
+    QDir().mkpath(online_m1_pictures);
+    window.SetSnapshotPicturesRootForTest(online_m1_pictures);
+  }
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
     window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
@@ -780,6 +875,40 @@ int main(int argc, char* argv[]) {
     online_auth_runner =
         std::make_unique<lapian::app::OnlineAuthTestRunner>(&window);
     online_auth_runner->Start();
+  }
+
+  std::unique_ptr<lapian::app::OnlineBufferTestRunner> online_buffer_runner;
+  if (online_buffer_test) {
+    if (online_buffer_media.isEmpty()) {
+      const QString fast =
+          QDir::currentPath() +
+          QStringLiteral("/build/test-media/faststart-720p.mp4");
+      online_buffer_media = QFileInfo::exists(fast)
+                                ? fast
+                                : QDir::currentPath() +
+                                      QStringLiteral("/media/V9.mp4");
+    }
+    lapian::app::OnlineBufferTestOptions options;
+    options.media_path = online_buffer_media;
+    options.timeout_ms = online_buffer_timeout_ms;
+    online_buffer_runner =
+        std::make_unique<lapian::app::OnlineBufferTestRunner>(&window, options);
+    online_buffer_runner->Start();
+  }
+
+  std::unique_ptr<lapian::app::OnlineM1TestRunner> online_m1_runner;
+  if (online_m1_test) {
+    lapian::app::OnlineM1TestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.page = online_m1_page;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.pictures_root = online_m1_pictures;
+    options.cancel_only = online_m1_cancel_only;
+    online_m1_runner =
+        std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
+    online_m1_runner->Start();
   }
 
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。

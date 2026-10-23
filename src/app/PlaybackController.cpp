@@ -45,6 +45,7 @@ void PlaybackController::SetSession(lapian::media::MediaSession* session) {
   audio_clock_active_ = false;
   start_pending_ = false;
   frozen_ = false;
+  buffering_ = false;
   loop_enabled_ = false;
   loop_in_ = 0;
   loop_out_ = 0;
@@ -93,6 +94,7 @@ void PlaybackController::SetPosition(std::int64_t frame, std::int64_t pts_us) {
   start_pending_ = false;
   rate_pending_ = false;
   frozen_ = false;
+  buffering_ = false;
   loop_out_reached_ = LoopActive() && frame >= loop_out_;
   loop_out_wait_active_ = false;
   loop_jump_failures_ = 0;
@@ -159,10 +161,40 @@ void PlaybackController::SetLoopRange(bool enabled, std::int64_t in,
   }
 }
 
+void PlaybackController::SetDecodeGate(DecodeGate gate) {
+  decode_gate_ = std::move(gate);
+  if (!decode_gate_) {
+    buffering_ = false;
+  }
+}
+
+void PlaybackController::TryResumeFromBuffering() {
+  if (!buffering_ || !playing_ || session_ == nullptr) {
+    return;
+  }
+  if (decode_gate_) {
+    std::string reason;
+    if (!decode_gate_(last_decoded_frame_ + 1, &reason)) {
+      return;
+    }
+  }
+  buffering_ = false;
+  start_media_seconds_ = current_pts_seconds_;
+  clock_.Start(current_pts_seconds_, rate_);
+  audio_clock_active_ = false;
+  start_pending_ = (audio_ != nullptr);
+  rate_pending_ = false;
+  start_pending_since_ = std::chrono::steady_clock::now();
+  end_ = false;
+  emit bufferingChanged(false, static_cast<int>(current_frame_), QString());
+  Tick();
+}
+
 void PlaybackController::Play() {
   if (session_ == nullptr || !session_->IsOpen() || playing_) {
     return;
   }
+  buffering_ = false;
 
   if (LoopFreezeActive()) {
     // A=B：Space 只切换状态，不推进帧；当前不在 A 时先精确回到 A。
@@ -222,6 +254,10 @@ void PlaybackController::Pause() {
   }
   playing_ = false;
   frozen_ = false;
+  if (buffering_) {
+    buffering_ = false;
+    emit bufferingChanged(false, static_cast<int>(current_frame_), QString());
+  }
   timer_.stop();
   clock_.Pause();
   start_pending_ = false;
@@ -353,8 +389,35 @@ double PlaybackController::TargetSeconds() {
 }
 
 void PlaybackController::Tick() {
-  if (!playing_ || session_ == nullptr || frozen_) {
+  if (!playing_ || session_ == nullptr || frozen_ || buffering_) {
     return;
+  }
+  if (!has_pending_ && decode_gate_) {
+    std::string reason;
+    if (!decode_gate_(last_decoded_frame_ + 1, &reason)) {
+      buffering_ = true;
+      clock_.Pause();
+      start_pending_ = false;
+      audio_clock_active_ = false;
+      rate_pending_ = false;
+      emit bufferingChanged(
+          true, static_cast<int>(current_frame_),
+          reason.empty() ? QStringLiteral("缓冲中") : QString::fromStdString(reason));
+      return;
+    }
+  }
+  if (buffer_on_audio_stall_ && audio_clock_active_ && audio_ != nullptr) {
+    double ignored = 0.0;
+    if (!audio_->ClockSeconds(&ignored)) {
+      buffering_ = true;
+      clock_.Pause();
+      start_pending_ = false;
+      audio_clock_active_ = false;
+      rate_pending_ = false;
+      emit bufferingChanged(true, static_cast<int>(current_frame_),
+                            QStringLiteral("等待下载"));
+      return;
+    }
   }
   if (!LoopActive()) {
     loop_out_reached_ = false;
@@ -534,6 +597,10 @@ void PlaybackController::Tick() {
 void PlaybackController::Finish() {
   playing_ = false;
   frozen_ = false;
+  if (buffering_) {
+    buffering_ = false;
+    emit bufferingChanged(false, static_cast<int>(current_frame_), QString());
+  }
   timer_.stop();
   clock_.Pause();
   start_pending_ = false;

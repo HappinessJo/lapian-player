@@ -5,6 +5,8 @@
 
 #include "media/MediaInfo.h"
 
+struct AVFormatContext;
+
 namespace lapian::media {
 
 // 打开/探测失败的分类。UI（T1.4）负责把这些分类翻译成用户可读的中文提示；
@@ -41,5 +43,20 @@ struct MediaProbeResult {
 // 打开本地文件，读取第一条视频/音频流元数据；只读，不发网络请求。
 // 失败时不抛异常，返回 ok=false 与错误分类。
 MediaProbeResult ProbeMedia(const std::string& utf8_path);
+
+// T8.6：探测一个已经打开、由调用方拥有的 AVFormatContext（可增长读层）。
+// - 不关闭、不 seek 该 context；调用方负责生命周期与线程归属。
+// - assume_stream_info=true 时不再调用 avformat_find_stream_info（GrowingFormat
+//   已经做过），避免在未缓存区再次阻塞。
+// - skip_packet_scan=true 时跳过 VFR 的包级采样（在线只依赖容器帧率；部分索引
+//   建好后仍可复核）。这是 0.3MB 首帧不阻塞的关键。
+struct ProbeFormatOptions {
+  bool assume_stream_info = true;
+  bool skip_packet_scan = true;
+};
+
+MediaProbeResult ProbeFormat(AVFormatContext* format,
+                             const std::string& display_path_utf8,
+                             const ProbeFormatOptions& options = {});
 
 }  // namespace lapian::media

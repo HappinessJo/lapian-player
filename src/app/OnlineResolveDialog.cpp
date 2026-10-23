@@ -1236,3 +1236,22 @@ QString OnlineResolveDialog::PageLabelAtForTest(int index) const {
   }
   return page_combo_->itemText(index);
 }
+
+OnlineConfirmInfo OnlineResolveDialog::ConfirmInfo() const {
+  OnlineConfirmInfo info;
+  const lapian::online::BiliPage* page = video_.selected_page();
+  if (!has_video_ || page == nullptr) {
+    return info;
+  }
+  info.bvid = video_.bvid;
+  info.cid = page->cid;
+  info.page = page->page;
+  info.title = video_.title;
+  info.owner = video_.owner;
+  info.duration_ms = page->duration_seconds * 1000;
+  if (info.duration_ms <= 0) {
+    info.duration_ms = video_.duration_seconds * 1000;
+  }
+  info.page_title = page->title;
+  return info;
+}

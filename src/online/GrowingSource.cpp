@@ -400,6 +400,10 @@ int GrowingCursor::Read(std::uint8_t* buffer, int buffer_size) {
   if (source_->IsCancelled()) {
     return AVERROR_EXIT;
   }
+  // T8.6：单读者中断。只影响本 cursor，不取消共享 source（其它读者继续）。
+  if (interrupt_ != nullptr && interrupt_->load(std::memory_order_relaxed)) {
+    return AVERROR_EXIT;
+  }
 
   const std::int64_t size = source_->Size();
   if (size <= 0) {
@@ -419,10 +423,31 @@ int GrowingCursor::Read(std::uint8_t* buffer, int buffer_size) {
     const bool after_seek = after_uncached_seek_;
     after_uncached_seek_ = false;
     const std::int64_t wait_start = NowNs();
-    const GrowingWaitResult result =
-        wait_timeout_ms_ > 0
-            ? source_->WaitForTimeout(pos + cap - 1, wait_timeout_ms_)
-            : source_->WaitFor(pos + cap - 1);
+    GrowingWaitResult result = GrowingWaitResult::Ready;
+    bool interrupted_by_cursor = false;
+    if (interrupt_ != nullptr) {
+      // T8.6：可中断等待。25ms 粒度把“改 seek/关窗”的退出延迟压到 ≤100ms，
+      // 同时不像 1ms 轮询那样空转；每次醒来只做两个原子读。
+      std::int64_t waited_ms = 0;
+      while (true) {
+        result = source_->WaitForTimeout(pos + cap - 1, 25);
+        if (result != GrowingWaitResult::TimedOut) {
+          break;
+        }
+        waited_ms += 25;
+        if (interrupt_->load(std::memory_order_relaxed)) {
+          interrupted_by_cursor = true;
+          break;
+        }
+        if (wait_timeout_ms_ > 0 && waited_ms >= wait_timeout_ms_) {
+          break;
+        }
+      }
+    } else {
+      result = wait_timeout_ms_ > 0
+                   ? source_->WaitForTimeout(pos + cap - 1, wait_timeout_ms_)
+                   : source_->WaitFor(pos + cap - 1);
+    }
     const std::int64_t waited_ns = NowNs() - wait_start;
 
     ++stats_.waits;
@@ -436,6 +461,9 @@ int GrowingCursor::Read(std::uint8_t* buffer, int buffer_size) {
       stats_.seek_wait_ns += waited_ns;
     }
 
+    if (interrupted_by_cursor) {
+      return AVERROR_EXIT;
+    }
     if (result == GrowingWaitResult::Cancelled) {
       return AVERROR_EXIT;
     }
@@ -534,6 +562,14 @@ void GrowingCursor::SetWaitTimeoutMs(int timeout_ms) {
 
 int GrowingCursor::WaitTimeoutMs() const { return wait_timeout_ms_; }
 
+void GrowingCursor::SetInterruptFlag(std::shared_ptr<std::atomic<bool>> flag) {
+  interrupt_ = std::move(flag);
+}
+
+bool GrowingCursor::IsInterrupted() const {
+  return interrupt_ != nullptr && interrupt_->load(std::memory_order_relaxed);
+}
+
 GrowingCursorStats GrowingCursor::Stats() const { return stats_; }
 
 void GrowingCursor::Close() {
@@ -559,7 +595,8 @@ GrowingFormat::GrowingFormat() = default;
 GrowingFormat::~GrowingFormat() { Close(); }
 
 bool GrowingFormat::Open(std::shared_ptr<GrowingSource> source,
-                         const QString& file_path, QString* error) {
+                         const QString& file_path, QString* error,
+                         int wait_timeout_ms) {
   Close();
   source_ = source;
 
@@ -573,6 +610,7 @@ bool GrowingFormat::Open(std::shared_ptr<GrowingSource> source,
     return false;
   }
 
+  cursor_->SetWaitTimeoutMs(wait_timeout_ms);
   AVFormatContext* format = avformat_alloc_context();
   if (format == nullptr) {
     if (error != nullptr) {

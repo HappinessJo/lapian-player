@@ -8,6 +8,8 @@
 
 #include "audio/AudioFormat.h"
 
+struct AVFormatContext;
+
 namespace lapian::audio {
 
 struct AudioStreamInfo {
@@ -44,6 +46,9 @@ class AudioDecoder {
   // stream_index < 0 时选第一条音频流；显式索引无效时也回退第一条。
   bool Open(const std::string& utf8_path, int stream_index, const AudioFormat& output_format,
             std::string* error);
+  // T8.6：使用调用方拥有的可增长 AVFormatContext；不关闭 context。
+  bool OpenWithFormat(AVFormatContext* format, int stream_index,
+                      const AudioFormat& output_format, std::string* error);
   void Close();
   bool IsOpen() const;
 
@@ -62,6 +67,10 @@ class AudioDecoder {
   bool ended() const { return ended_; }
 
  private:
+  bool OpenWithFormatInternal(AVFormatContext* format, bool take_ownership,
+                              int stream_index, const AudioFormat& output_format,
+                              std::string* error);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
   AudioStreamInfo info_;

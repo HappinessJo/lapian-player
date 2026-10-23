@@ -888,6 +888,20 @@ MarkStore MarkStore::Open(const std::string& video_path_utf8,
   return store;
 }
 
+MarkStore MarkStore::OpenSessionOnly(const std::string& video_path_utf8,
+                                     std::int64_t duration_us) {
+  MarkStore store;
+  store.video_ = MakeVideoIdentity(video_path_utf8, duration_us);
+  store.valid_ = !store.video_.empty();
+  store.session_only_ = true;
+  store.storage_path_.clear();
+  if (!store.valid_) {
+    store.warnings_.push_back({MarkWarningKind::kReadFailed,
+                               "在线会话标识为空，标记只在当前会话内可用", {}});
+  }
+  return store;
+}
+
 const Mark* MarkStore::FindMark(const std::string& id) const {
   for (const Mark& mark : marks_) {
     if (mark.id == id) {
@@ -954,6 +968,13 @@ SaveResult MarkStore::Save() {
     result.ok = false;
     result.error = "标记文件读取或 schema 版本异常，已阻止覆盖";
     warnings_.push_back({MarkWarningKind::kSaveFailed, result.error, storage_path_});
+    return result;
+  }
+  if (session_only_) {
+    // T8.6：在线会话内标记不落盘（完整在线记录是 T8.7）。
+    result.ok = true;
+    result.wrote = false;
+    result.path.clear();
     return result;
   }
 

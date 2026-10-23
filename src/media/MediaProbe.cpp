@@ -258,26 +258,26 @@ VfrInfo ClassifyVfrIntervals(const std::vector<double>& intervals_seconds) {
   return info;
 }
 
-MediaProbeResult ProbeMedia(const std::string& utf8_path) {
-  const auto started = std::chrono::steady_clock::now();
+namespace {
 
-  AVFormatContext* raw_format = nullptr;
-  int ret = avformat_open_input(&raw_format, utf8_path.c_str(), nullptr, nullptr);
-  if (ret < 0) {
-    if (raw_format != nullptr) {
-      avformat_close_input(&raw_format);
-    }
-    return MakeError(ClassifyOpenError(ret), AvErrorText(ret), ElapsedMs(started));
+MediaProbeResult ProbeFormatCommon(AVFormatContext* format,
+                                   const std::string& display_path_utf8,
+                                   const ProbeFormatOptions& options,
+                                   std::chrono::steady_clock::time_point started,
+                                   bool read_stream_info) {
+  if (format == nullptr) {
+    return MakeError(MediaProbeError::kOpenFailed, "format context is null",
+                     ElapsedMs(started));
   }
-  FormatContextPtr format(raw_format);
-
-  ret = avformat_find_stream_info(format.get(), nullptr);
-  if (ret < 0) {
-    MediaProbeError error = ClassifyOpenError(ret);
-    if (error == MediaProbeError::kOpenFailed) {
-      error = MediaProbeError::kStreamInfoFailed;
+  if (read_stream_info) {
+    const int ret = avformat_find_stream_info(format, nullptr);
+    if (ret < 0) {
+      MediaProbeError error = ClassifyOpenError(ret);
+      if (error == MediaProbeError::kOpenFailed) {
+        error = MediaProbeError::kStreamInfoFailed;
+      }
+      return MakeError(error, AvErrorText(ret), ElapsedMs(started));
     }
-    return MakeError(error, AvErrorText(ret), ElapsedMs(started));
   }
 
   int video_index = -1;
@@ -295,14 +295,16 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
   }
 
   if (video_index < 0) {
-    return MakeError(MediaProbeError::kNoVideoStream, "no video stream", ElapsedMs(started));
+    return MakeError(MediaProbeError::kNoVideoStream, "no video stream",
+                     ElapsedMs(started));
   }
 
   MediaProbeResult result;
   result.ok = true;
-  result.info.path_utf8 = utf8_path;
+  result.info.path_utf8 = display_path_utf8;
   if (format->iformat != nullptr) {
-    result.info.format_name = format->iformat->name != nullptr ? format->iformat->name : "";
+    result.info.format_name =
+        format->iformat->name != nullptr ? format->iformat->name : "";
     result.info.format_long_name =
         format->iformat->long_name != nullptr ? format->iformat->long_name : "";
   }
@@ -318,7 +320,8 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
   const char* video_codec = avcodec_get_name(video_parameters->codec_id);
   video.codec = video_codec != nullptr ? video_codec : "unknown";
 
-  const char* pixel_format = av_get_pix_fmt_name(static_cast<AVPixelFormat>(video_parameters->format));
+  const char* pixel_format =
+      av_get_pix_fmt_name(static_cast<AVPixelFormat>(video_parameters->format));
   video.pixel_format = pixel_format != nullptr ? pixel_format : "unknown";
   // T6.5：优先用容器/编码参数里的位深；缺失时从像素格式描述推导。
   if (video_parameters->bits_per_raw_sample > 0) {
@@ -337,7 +340,8 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
   video.frame_rate = video.average_frame_rate.valid() ? video.average_frame_rate
                                                      : video.real_frame_rate;
   if (!video.frame_rate.valid()) {
-    video.frame_rate = ToRational(av_guess_frame_rate(format.get(), video_stream, nullptr));
+    video.frame_rate =
+        ToRational(av_guess_frame_rate(format, video_stream, nullptr));
   }
   video.time_base = ToRational(video_stream->time_base);
   video.start_time = video_stream->start_time;
@@ -358,25 +362,56 @@ MediaProbeResult ProbeMedia(const std::string& utf8_path) {
   }
 
   ReadRotation(video_parameters, &result.info.rotation);
-  FirstPacketPts first;
-  result.info.vfr = DetectVfr(format.get(), video_index, audio_index,
-                              video_stream->time_base, &first);
-  if (audio_index >= 0 && first.video_seen && first.audio_seen) {
-    const AVStream* audio_stream = format->streams[audio_index];
-    const std::int64_t video_us =
-        av_rescale_q(first.video_pts, video_stream->time_base, AV_TIME_BASE_Q);
-    const std::int64_t audio_us =
-        av_rescale_q(first.audio_pts, audio_stream->time_base, AV_TIME_BASE_Q);
-    const int sample_rate = result.info.audio.sample_rate;
-    const std::int64_t priming_us =
-        sample_rate > 0
-            ? av_rescale(first.audio_skip_samples, 1'000'000, sample_rate)
-            : 0;
-    result.info.av_offset_us = audio_us + priming_us - video_us;
-    result.info.av_offset_estimated = true;
+  if (!options.skip_packet_scan) {
+    FirstPacketPts first;
+    result.info.vfr = DetectVfr(format, video_index, audio_index,
+                                video_stream->time_base, &first);
+    if (audio_index >= 0 && first.video_seen && first.audio_seen) {
+      const AVStream* audio_stream = format->streams[audio_index];
+      const std::int64_t video_us =
+          av_rescale_q(first.video_pts, video_stream->time_base, AV_TIME_BASE_Q);
+      const std::int64_t audio_us =
+          av_rescale_q(first.audio_pts, audio_stream->time_base, AV_TIME_BASE_Q);
+      const int sample_rate = result.info.audio.sample_rate;
+      const std::int64_t priming_us =
+          sample_rate > 0
+              ? av_rescale(first.audio_skip_samples, 1'000'000, sample_rate)
+              : 0;
+      result.info.av_offset_us = audio_us + priming_us - video_us;
+      result.info.av_offset_estimated = true;
+    }
   }
   result.probe_ms = ElapsedMs(started);
   return result;
+}
+
+}  // namespace
+
+MediaProbeResult ProbeMedia(const std::string& utf8_path) {
+  const auto started = std::chrono::steady_clock::now();
+
+  AVFormatContext* raw_format = nullptr;
+  int ret = avformat_open_input(&raw_format, utf8_path.c_str(), nullptr, nullptr);
+  if (ret < 0) {
+    if (raw_format != nullptr) {
+      avformat_close_input(&raw_format);
+    }
+    return MakeError(ClassifyOpenError(ret), AvErrorText(ret), ElapsedMs(started));
+  }
+  FormatContextPtr format(raw_format);
+
+  ProbeFormatOptions options;
+  options.assume_stream_info = false;
+  options.skip_packet_scan = false;
+  return ProbeFormatCommon(format.get(), utf8_path, options, started, true);
+}
+
+MediaProbeResult ProbeFormat(AVFormatContext* format,
+                             const std::string& display_path_utf8,
+                             const ProbeFormatOptions& options) {
+  const auto started = std::chrono::steady_clock::now();
+  return ProbeFormatCommon(format, display_path_utf8, options, started,
+                           !options.assume_stream_info);
 }
 
 }  // namespace lapian::media

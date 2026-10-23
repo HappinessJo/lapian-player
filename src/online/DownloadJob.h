@@ -50,6 +50,7 @@ enum class DownloadState {
   kPaused,
   kRetrying,
   kRefreshing,
+  kAwaitingFinalize,  // T8.6：写完/Publish 完成，等待 reader 关闭后再改名
   kCompleted,
   kFailed,
   kCancelled,
@@ -93,6 +94,9 @@ struct DownloadOptions {
   int progress_interval_ms = 1000;
   QString user_agent;
   QString referer;
+  // T8.6：写完后不立即 rename，进入 kAwaitingFinalize；调用方先停所有 reader，
+  // 再调用 FinalizeCompleted()。T8.5 默认 false，行为不变。
+  bool defer_finalize = false;
 };
 
 class DownloadJob {
@@ -122,6 +126,10 @@ class DownloadJob {
 
   // 等待工作线程结束（-1 = 无限）。返回 true 表示已进入终态。
   bool Wait(int timeout_ms = -1);
+
+  // T8.6：defer_finalize=true 且数据写完时调用。调用方必须已经关闭该 source 的
+  // 所有 reader（GrowingCursor 句柄不带 FILE_SHARE_DELETE），否则 rename 会 busy。
+  bool FinalizeCompleted(QString* error);
 
   DownloadState state() const;
   DownloadStats stats() const;

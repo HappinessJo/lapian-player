@@ -6,6 +6,10 @@
 
 #include "audio/WaveformData.h"
 
+namespace lapian::online {
+class GrowingSource;
+}
+
 namespace lapian::audio {
 
 enum class WaveformState {
@@ -36,6 +40,11 @@ class WaveformGenerator {
   // 异步启动；返回 false 只表示线程启动失败。
   bool Start(const std::string& utf8_path, int stream_index,
              double av_offset_seconds);
+  // T8.6：从可增长读层渐进生成；读到发布前沿会阻塞，随下载增长继续。
+  // 关闭前调用方应先 source->Cancel() 唤醒阻塞读，再 Cancel()/join。
+  bool StartGrowing(std::shared_ptr<lapian::online::GrowingSource> source,
+                    const std::string& part_path_utf8, int stream_index,
+                    double av_offset_seconds);
   void Cancel();
 
   WaveformStatus status() const;

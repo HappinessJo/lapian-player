@@ -223,3 +223,9 @@ build\release\bin\lapian.exe --online-fetch-test --real --bvid BV1GJ411x7h7 --ci
 - **T8.5 链路通过**：playurl → 720P durl → CacheStore → 顺序下载/Range 续传/3 备份/重试/过期刷新 → 写后 Publish → 关闭句柄后 MarkComplete；3 个真实样本均完成下载、首屏、ffprobe。
 - **M1 3/3 720P 不成立**：OB-2 实际 360P；这是已知档位风险，不用假数据或改请求值掩盖。
 - 离线/单元/回归/本地性能/打包导入均通过；M1 门留给 T8.8。
+
+---
+
+## 10. T8.6 后续（2026-10-23）
+
+T8.6 已把本文件的下载/读层接入真实窗口 UI，证据见 [v2-online-session.md](v2-online-session.md)。T8.6 的 3 条真实 E2E 中 OB-1/OB-3 为 720P、**OB-2 仍为 360P（qn=16）**；因此本文件的 M1 3/3 blocked 结论不变，T8.6 不写 M1 通过。

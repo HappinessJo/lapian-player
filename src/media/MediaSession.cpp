@@ -1,12 +1,17 @@
 #include "media/MediaSession.h"
 
+#include <QString>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
+
+#include "online/GrowingSource.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -53,13 +58,7 @@ constexpr int kDeferredCacheMaxPixels = 1920 * 1088;
 
 MediaSession::MediaSession() = default;
 
-MediaSession::~MediaSession() {
-  if (last_hit_frame_ != nullptr) {
-    av_frame_free(&last_hit_frame_);
-  }
-  ClearSeekHandoff();
-  CancelPendingCacheWindow();
-}
+MediaSession::~MediaSession() { Close(); }
 
 void MediaSession::ClearSeekHandoff() {
   if (seek_previous_frame_ != nullptr) {
@@ -143,6 +142,12 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
   // 只有探测/解码都成功才替换旧会话。
   probe_ = last_attempt_;
   decoder_ = std::move(decoder);
+  // 本地路径成功后才丢弃旧的可增长会话（失败保留旧画面/旧会话）。
+  growing_format_.reset();
+  growing_source_.reset();
+  growing_interrupt_.reset();
+  growing_part_path_.clear();
+  growing_ = false;
   first_frame_ = first_frame;
   open_ = true;
   // 首帧已解码，解码器下一次 DecodeNextFrame 返回第 1 帧。
@@ -156,10 +161,228 @@ bool MediaSession::Open(const std::string& utf8_path, ID3D11Device* device, std:
   return true;
 }
 
+bool MediaSession::OpenGrowing(
+    std::shared_ptr<lapian::online::GrowingSource> source,
+    const std::string& part_path_utf8, const std::string& display_name_utf8,
+    ID3D11Device* device, std::string* error, bool prefer_hardware) {
+  if (error == nullptr) {
+    return false;
+  }
+  error->clear();
+  if (!source || !source->IsValid()) {
+    *error = "可增长读层没有有效的数据源";
+    return false;
+  }
+  if (part_path_utf8.empty()) {
+    *error = "可增长读层没有数据文件路径";
+    return false;
+  }
+
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+  frame_cache_.Clear();
+  ClearSeekHandoff();
+  CancelPendingCacheWindow();
+  decoder_stale_ = true;
+
+  const auto open_started = Clock::now();
+  auto timings = MediaOpenTimings{};
+  auto format = std::make_unique<lapian::online::GrowingFormat>();
+  QString format_error;
+  const auto probe_started = Clock::now();
+  if (!format->Open(source, QString::fromUtf8(part_path_utf8.c_str()),
+                    &format_error, 0)) {
+    timings.probe_ms = ElapsedMs(probe_started);
+    timings.total_ms = ElapsedMs(open_started);
+    last_open_timings_ = timings;
+    *error = format_error.toUtf8().constData();
+    return false;
+  }
+  auto interrupt = std::make_shared<std::atomic<bool>>(false);
+  if (format->cursor() != nullptr) {
+    format->cursor()->SetInterruptFlag(interrupt);
+  }
+
+  ProbeFormatOptions probe_options;
+  probe_options.assume_stream_info = true;
+  probe_options.skip_packet_scan = true;
+  last_attempt_ =
+      ProbeFormat(format->context(), display_name_utf8, probe_options);
+  timings.probe_ms = ElapsedMs(probe_started);
+  if (!last_attempt_.ok) {
+    *error = last_attempt_.error_detail.empty() ? "无法探测可增长媒体"
+                                                : last_attempt_.error_detail;
+    timings.total_ms = ElapsedMs(open_started);
+    last_open_timings_ = timings;
+    return false;
+  }
+
+  const auto decoder_started = Clock::now();
+  auto decoder = std::make_unique<VideoDecoder>();
+  const bool hardware = prefer_hardware && device != nullptr;
+  if (!decoder->OpenWithFormat(format->context(),
+                               last_attempt_.info.video.stream_index, device,
+                               hardware, error)) {
+    timings.decoder_open_ms = ElapsedMs(decoder_started);
+    timings.total_ms = ElapsedMs(open_started);
+    last_open_timings_ = timings;
+    return false;
+  }
+  timings.decoder_open_ms = ElapsedMs(decoder_started);
+
+  const auto first_frame_started = Clock::now();
+  DecodedFrameInfo first_frame;
+  if (!decoder->DecodeFirstFrame(&first_frame, error)) {
+    timings.first_frame_ms = ElapsedMs(first_frame_started);
+    timings.total_ms = ElapsedMs(open_started);
+    last_open_timings_ = timings;
+    return false;
+  }
+  timings.first_frame_ms = ElapsedMs(first_frame_started);
+  timings.total_ms = ElapsedMs(open_started);
+  last_open_timings_ = timings;
+
+  // 成功后才替换旧会话。先替换 decoder（旧 decoder 析构），再替换它依赖的 format。
+  probe_ = last_attempt_;
+  decoder_ = std::move(decoder);
+  growing_format_ = std::move(format);
+  growing_source_ = std::move(source);
+  growing_interrupt_ = std::move(interrupt);
+  growing_part_path_ = part_path_utf8;
+  growing_ = true;
+  first_frame_ = first_frame;
+  open_ = true;
+  index_.Reset();
+  decoder_stale_ = false;
+  sequential_frame_ = 1;
+  const lapian::media::FrameCacheLimits limits = FrameCache::LimitsForFrame(
+      probe_.info.video.width, probe_.info.video.height,
+      probe_.info.video.bit_depth);
+  frame_cache_.SetLimits(limits.max_bytes, limits.max_entries);
+  return true;
+}
+
+bool MediaSession::GrowingComplete() const {
+  return growing_ && growing_source_ &&
+         growing_source_->Published() >= growing_source_->Size();
+}
+
+std::int64_t MediaSession::GrowingPublished() const {
+  return growing_source_ ? growing_source_->Published() : 0;
+}
+
+std::int64_t MediaSession::GrowingReadPosition() const {
+  return growing_format_ && growing_format_->cursor() != nullptr
+             ? growing_format_->cursor()->Pos()
+             : 0;
+}
+
+bool MediaSession::CanDecodeAhead(std::int64_t margin_bytes) const {
+  if (!growing_) {
+    return true;
+  }
+  if (!growing_source_) {
+    return false;
+  }
+  const std::int64_t size = growing_source_->Size();
+  const std::int64_t published = growing_source_->Published();
+  if (published >= size) {
+    return true;
+  }
+  return published - GrowingReadPosition() >= margin_bytes;
+}
+
+void MediaSession::SetGrowingInterrupt(
+    std::shared_ptr<std::atomic<bool>> flag) {
+  growing_interrupt_ = std::move(flag);
+  if (growing_format_ && growing_format_->cursor() != nullptr) {
+    growing_format_->cursor()->SetInterruptFlag(growing_interrupt_);
+  }
+}
+
+void MediaSession::InterruptGrowingReads() {
+  if (growing_interrupt_) {
+    growing_interrupt_->store(true, std::memory_order_relaxed);
+  }
+}
+
+bool MediaSession::GrowingInterrupted() const {
+  return growing_interrupt_ &&
+         growing_interrupt_->load(std::memory_order_relaxed);
+}
+
+bool MediaSession::SeekToEstimatedPts(std::int64_t target_pts_us,
+                                      std::int64_t target_frame,
+                                      DecodedFrameInfo* out,
+                                      std::string* error) {
+  if (error == nullptr || out == nullptr) {
+    return false;
+  }
+  error->clear();
+  if (!open_ || decoder_ == nullptr || !growing_) {
+    *error = "会话未打开或不是可增长会话";
+    return false;
+  }
+  if (last_hit_frame_ != nullptr) {
+    av_frame_free(&last_hit_frame_);
+  }
+  ClearSeekHandoff();
+  CancelPendingCacheWindow();
+  decoder_stale_ = true;
+  sequential_frame_ = -1;
+  if (!decoder_->SeekToPts(target_pts_us, error)) {
+    return false;
+  }
+  const std::int64_t tolerance_us =
+      probe_.info.video.frame_rate.valid()
+          ? static_cast<std::int64_t>(
+                500'000.0 /
+                std::max(1.0, probe_.info.video.frame_rate.ToDouble()))
+          : 20'000;
+  for (int guard = 0; guard < 100'000; ++guard) {
+    DecodedFrameInfo info;
+    if (!decoder_->DecodeNextFrame(&info, error)) {
+      return false;
+    }
+    if (info.pts_us + tolerance_us < target_pts_us) {
+      continue;
+    }
+    const std::int64_t delta =
+        info.pts_us > target_pts_us ? info.pts_us - target_pts_us
+                                    : target_pts_us - info.pts_us;
+    if (delta > tolerance_us) {
+      *error = "索引未覆盖目标帧，解码落点与估算 PTS 不一致";
+      return false;
+    }
+    *out = info;
+    decoder_stale_ = false;
+    sequential_frame_ = target_frame + 1;
+    return true;
+  }
+  *error = "近似 seek 解码超过上限";
+  return false;
+}
+
+void MediaSession::InstallOnlineIndex(FrameIndex index, double build_ms) {
+  // 在线部分索引只覆盖已发布前缀的稳定部分；帧号前缀不会回退，因此保留
+  // decoder 顺序位置与帧缓存，避免每次扫描完成都把 P7 打回冷缓存。
+  index_ = std::move(index);
+  last_open_timings_.index_ok = HasIndex();
+  last_open_timings_.index_frames = index_.size();
+  last_open_timings_.index_ms = build_ms;
+}
+
 bool MediaSession::BuildIndexNow(std::string* error, const std::atomic<bool>* cancel) {
   if (!open_) {
     if (error != nullptr) {
       *error = "会话未打开";
+    }
+    return false;
+  }
+  if (growing_) {
+    if (error != nullptr) {
+      *error = "可增长会话使用部分索引，不能按完整文件建索引";
     }
     return false;
   }
@@ -558,6 +781,11 @@ void MediaSession::Close() {
   decoder_stale_ = true;
   sequential_frame_ = -1;
   decoder_.reset();
+  growing_format_.reset();
+  growing_source_.reset();
+  growing_interrupt_.reset();
+  growing_part_path_.clear();
+  growing_ = false;
   index_.Reset();
   probe_ = MediaProbeResult{};
   last_attempt_ = MediaProbeResult{};

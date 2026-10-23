@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QTimer>
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "core/MediaClock.h"
@@ -36,6 +38,14 @@ class PlaybackController : public QObject {
   void SetRate(double rate);
   // T4.2 A/B：enabled 只在 A/B 完整时为 true；A=B 时进入定帧语义。
   void SetLoopRange(bool enabled, std::int64_t in, std::int64_t out);
+  // T8.6 在线缓冲闸门：返回 false 时暂停推进（画面保持），等 UI 轮询再次调用
+  // TryResumeFromBuffering；不把未缓存读塞进 UI 线程。
+  using DecodeGate = std::function<bool(std::int64_t next_frame, std::string* reason)>;
+  void SetDecodeGate(DecodeGate gate);
+  // T8.6：在线播放时，音频时钟失速（数据前沿阻塞）也作为缓冲耗尽处理。
+  void SetBufferOnAudioStall(bool enabled) { buffer_on_audio_stall_ = enabled; }
+  void TryResumeFromBuffering();
+  bool IsBuffering() const { return buffering_; }
   void Play();
   void Pause();
   void Toggle();
@@ -56,6 +66,8 @@ class PlaybackController : public QObject {
   void reachedEnd();
   // B→A 跳转完成；MainWindow 用它把音频重新 seek 到 A。
   void loopJumped(qint64 frame, double media_seconds);
+  // T8.6：缓冲耗尽（true）/恢复（false）；MainWindow 负责提示与暂停音频。
+  void bufferingChanged(bool buffering, int frame, const QString& reason);
 
  private slots:
   void Tick();
@@ -85,6 +97,9 @@ class PlaybackController : public QObject {
   bool start_pending_ = false;
   bool rate_pending_ = false;
   bool frozen_ = false;
+  bool buffering_ = false;
+  bool buffer_on_audio_stall_ = false;
+  DecodeGate decode_gate_;
   bool loop_enabled_ = false;
   std::int64_t loop_in_ = 0;
   std::int64_t loop_out_ = 0;

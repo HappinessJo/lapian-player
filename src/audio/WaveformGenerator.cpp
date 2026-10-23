@@ -11,7 +11,10 @@
 #include <thread>
 #include <utility>
 
+#include <QString>
+
 #include "audio/AudioDecoder.h"
+#include "online/GrowingSource.h"
 
 namespace lapian::audio {
 namespace {
@@ -51,7 +54,39 @@ struct WaveformGenerator::Impl {
               error);
       return;
     }
+    RunDecoded(decoder);
+  }
 
+  void RunGrowing(std::shared_ptr<lapian::online::GrowingSource> source,
+                  std::string part_path, int stream_index) {
+    AudioFormat format;
+    format.sample_rate = kOutputSampleRate;
+    format.channels = 1;
+
+    lapian::online::GrowingFormat growing;
+    QString format_error;
+    if (!source ||
+        !growing.Open(source, QString::fromUtf8(part_path.c_str()), &format_error,
+                      0)) {
+      Publish(WaveformState::kFailed, 0.0,
+              format_error.isEmpty() ? "无法打开可增长音频上下文"
+                                     : format_error.toUtf8().constData());
+      return;
+    }
+    AudioDecoder decoder;
+    std::string error;
+    if (!decoder.OpenWithFormat(growing.context(), stream_index, format,
+                                &error)) {
+      const bool no_audio = error.find("没有音频流") != std::string::npos;
+      Publish(no_audio ? WaveformState::kNoAudio : WaveformState::kFailed, 0.0,
+              error);
+      return;
+    }
+    RunDecoded(decoder);
+  }
+
+  void RunDecoded(AudioDecoder& decoder) {
+    std::string error;
     const double duration =
         decoder.info().duration_us > 0
             ? static_cast<double>(decoder.info().duration_us) / 1.0e6
@@ -158,6 +193,27 @@ bool WaveformGenerator::Start(const std::string& utf8_path, int stream_index,
   try {
     impl_->thread = std::thread([this, utf8_path, stream_index]() {
       impl_->Run(utf8_path, stream_index);
+    });
+  } catch (const std::exception&) {
+    impl_->Publish(WaveformState::kFailed, 0.0, "启动波形线程失败");
+    return false;
+  }
+  return true;
+}
+
+bool WaveformGenerator::StartGrowing(
+    std::shared_ptr<lapian::online::GrowingSource> source,
+    const std::string& part_path_utf8, int stream_index,
+    double av_offset_seconds) {
+  Cancel();
+  impl_->cancel.store(false);
+  impl_->data = std::make_shared<WaveformData>();
+  impl_->data->Reset(av_offset_seconds);
+  impl_->Publish(WaveformState::kRunning, 0.0, "生成中");
+
+  try {
+    impl_->thread = std::thread([this, source, part_path_utf8, stream_index]() {
+      impl_->RunGrowing(source, part_path_utf8, stream_index);
     });
   } catch (const std::exception&) {
     impl_->Publish(WaveformState::kFailed, 0.0, "启动波形线程失败");

@@ -84,6 +84,7 @@ struct FormatContextDeleter {
 
 struct VideoDecoder::Impl {
   AVFormatContext* format = nullptr;
+  bool owns_format = true;
   AVCodecContext* decoder = nullptr;
   AVFrame* frame = nullptr;
   AVPacket* packet = nullptr;
@@ -108,9 +109,11 @@ struct VideoDecoder::Impl {
     if (decoder != nullptr) {
       avcodec_free_context(&decoder);
     }
-    if (format != nullptr) {
+    if (format != nullptr && owns_format) {
       avformat_close_input(&format);
     }
+    format = nullptr;
+    owns_format = true;
     video_stream = -1;
     bit_depth = 8;
     hardware_active = false;
@@ -123,35 +126,55 @@ struct VideoDecoder::Impl {
   bool OpenInternal(const std::string& utf8_path, int stream_index, bool prefer_hardware,
                     ID3D11Device* shared_d3d11_device, std::string* error) {
     AVFormatContext* raw_format = nullptr;
-    int ret = avformat_open_input(&raw_format, utf8_path.c_str(), nullptr, nullptr);
+    const int ret =
+        avformat_open_input(&raw_format, utf8_path.c_str(), nullptr, nullptr);
     if (ret < 0) {
       *error = "打开文件失败: " + AvErrorText(ret);
       return false;
     }
-    std::unique_ptr<AVFormatContext, FormatContextDeleter> format_holder(raw_format);
-
-    ret = avformat_find_stream_info(format_holder.get(), nullptr);
-    if (ret < 0) {
-      *error = "读取流信息失败: " + AvErrorText(ret);
+    const int info_ret = avformat_find_stream_info(raw_format, nullptr);
+    if (info_ret < 0) {
+      *error = "读取流信息失败: " + AvErrorText(info_ret);
+      avformat_close_input(&raw_format);
       return false;
     }
+    if (OpenFormatInternal(raw_format, true, stream_index, prefer_hardware,
+                           shared_d3d11_device, utf8_path, error)) {
+      return true;
+    }
+    if (raw_format != nullptr) {
+      avformat_close_input(&raw_format);
+    }
+    return false;
+  }
 
+  bool OpenFormatInternal(AVFormatContext* input_format, bool take_ownership,
+                          int stream_index, bool prefer_hardware,
+                          ID3D11Device* shared_d3d11_device,
+                          const std::string& display_path, std::string* error) {
+    if (input_format == nullptr) {
+      *error = "媒体上下文为空";
+      return false;
+    }
     int selected = stream_index;
     if (selected < 0) {
-      for (unsigned int i = 0; i < format_holder->nb_streams; ++i) {
-        if (format_holder->streams[i]->codecpar != nullptr &&
-            format_holder->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+      for (unsigned int i = 0; i < input_format->nb_streams; ++i) {
+        if (input_format->streams[i]->codecpar != nullptr &&
+            input_format->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
           selected = static_cast<int>(i);
           break;
         }
       }
     }
-    if (selected < 0 || selected >= static_cast<int>(format_holder->nb_streams)) {
+    if (selected < 0 || selected >= static_cast<int>(input_format->nb_streams)) {
       *error = "找不到视频流";
+      if (take_ownership) {
+        avformat_close_input(&input_format);
+      }
       return false;
     }
 
-    AVStream* stream = format_holder->streams[selected];
+    AVStream* stream = input_format->streams[selected];
     AVCodecParameters* parameters = stream->codecpar;
     if (parameters == nullptr || parameters->codec_type != AVMEDIA_TYPE_VIDEO) {
       *error = "指定流不是视频流";
@@ -263,7 +286,8 @@ struct VideoDecoder::Impl {
     }
 
     Close();
-    format = format_holder.release();
+    format = input_format;
+    owns_format = take_ownership;
     decoder = decoder_holder;
     frame = frame_holder;
     packet = packet_holder;
@@ -272,7 +296,7 @@ struct VideoDecoder::Impl {
     hardware_active = hardware;
     eof_sent = false;
     packet_valid = false;
-    path = utf8_path;
+    path = display_path;
     requested_stream = selected;
     external_device = shared_d3d11_device;
     return true;
@@ -281,9 +305,18 @@ struct VideoDecoder::Impl {
   bool ReopenSoftware(std::string* error) {
     const std::string saved_path = path;
     const int saved_stream = requested_stream;
+    AVFormatContext* saved_format = format;
+    const bool saved_owns_format = owns_format;
+    const bool had_format = saved_format != nullptr;
     Close();
     path = saved_path;
     requested_stream = saved_stream;
+    if (had_format && !saved_owns_format) {
+      // 可增长读层：format 由 MediaSession 拥有；软解回退只重建 codec，
+      // 并在 DecodeInternal(true) 里重新 seek 到流起点。
+      return OpenFormatInternal(saved_format, false, saved_stream, false,
+                                external_device, saved_path, error);
+    }
     return OpenInternal(saved_path, saved_stream, false, external_device, error);
   }
 
@@ -465,6 +498,36 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
   impl_->requested_stream = video_stream_index;
   impl_->external_device = d3d11_device;
   if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, d3d11_device, error)) {
+    return true;
+  }
+  impl_->Close();
+  return false;
+}
+
+bool VideoDecoder::OpenWithFormat(AVFormatContext* format, int video_stream_index,
+                                  ID3D11Device* d3d11_device, bool prefer_hardware,
+                                  std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (prefer_hardware || impl_->hardware_active) {
+    device_lock.lock();
+  }
+  error->clear();
+  if (format == nullptr) {
+    *error = "可增长媒体上下文为空";
+    return false;
+  }
+  if (prefer_hardware && d3d11_device == nullptr) {
+    // 软件路径/自动化可以用空设备；只有明确要求硬解才拒绝。
+    prefer_hardware = false;
+  }
+  impl_->external_device = d3d11_device;
+  impl_->requested_stream = video_stream_index;
+  if (impl_->OpenFormatInternal(format, false, video_stream_index, prefer_hardware,
+                                d3d11_device, std::string(), error)) {
     return true;
   }
   impl_->Close();

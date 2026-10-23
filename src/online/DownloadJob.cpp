@@ -92,6 +92,8 @@ QString DownloadStateName(DownloadState state) {
       return QStringLiteral("retrying");
     case DownloadState::kRefreshing:
       return QStringLiteral("refreshing");
+    case DownloadState::kAwaitingFinalize:
+      return QStringLiteral("awaiting_finalize");
     case DownloadState::kCompleted:
       return QStringLiteral("completed");
     case DownloadState::kFailed:
@@ -248,6 +250,17 @@ bool DownloadJob::Start(QString* error) {
   if (existing_ == total_) {
     CloseWriteHandle();
     source_->Publish(total_);
+    cache_->UpdateProgress(key_, total_, true);
+    if (options_.defer_finalize) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      state_ = DownloadState::kAwaitingFinalize;
+      finished_ = true;
+      stats_.total_bytes = total_;
+      stats_.written_bytes = total_;
+      stats_.elapsed_ms = 1;
+      cv_.notify_all();
+      return true;
+    }
     QString complete_error;
     if (!cache_->MarkComplete(key_, &complete_error)) {
       return fail(complete_error.isEmpty()
@@ -736,6 +749,22 @@ void DownloadJob::FinishCompleted() {
   source_->Publish(total_);
   cache_->UpdateProgress(key_, total_, true);
 
+  if (options_.defer_finalize) {
+    // T8.6：数据已完整发布，但 .part 仍被正在播放的 reader 打开。
+    // 不 rename；由 OnlineSession 停 reader 后调用 FinalizeCompleted()。
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = DownloadState::kAwaitingFinalize;
+    finished_ = true;
+    stats_.total_bytes = total_;
+    stats_.written_bytes = total_;
+    stats_.downloaded_bytes = session_bytes_;
+    stats_.elapsed_ms = std::max<std::int64_t>(1, NowMs() - run_start_ms_);
+    stats_.bps = static_cast<double>(session_bytes_) * 1000.0 /
+                 static_cast<double>(stats_.elapsed_ms);
+    cv_.notify_all();
+    return;
+  }
+
   QString complete_error;
   if (!cache_->MarkComplete(key_, &complete_error)) {
     FinishFailed(AVERROR(EIO),
@@ -763,6 +792,52 @@ void DownloadJob::FinishCompleted() {
   stats_.bps = static_cast<double>(session_bytes_) * 1000.0 /
                static_cast<double>(stats_.elapsed_ms);
   cv_.notify_all();
+}
+
+bool DownloadJob::FinalizeCompleted(QString* error) {
+  auto fail = [&](const QString& message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = DownloadState::kFailed;
+    stats_.error = message;
+    stats_.av_error = AVERROR(EIO);
+    if (error != nullptr) {
+      *error = message;
+    }
+    cv_.notify_all();
+    return false;
+  };
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != DownloadState::kAwaitingFinalize) {
+      const QString message = QStringLiteral("下载尚未进入可完成状态");
+      if (error != nullptr) {
+        *error = message;
+      }
+      return false;
+    }
+  }
+  QString complete_error;
+  if (!cache_->MarkComplete(key_, &complete_error)) {
+    return fail(complete_error.isEmpty()
+                    ? QStringLiteral("缓存完成失败，已保留 .part")
+                    : complete_error);
+  }
+  QString mp4_path;
+  QString open_error;
+  if (!cache_->OpenComplete(key_, &mp4_path, &open_error)) {
+    return fail(open_error.isEmpty() ? QStringLiteral("缓存完成后无法打开 .mp4")
+                                     : open_error);
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = DownloadState::kCompleted;
+    stats_.error.clear();
+    stats_.av_error = 0;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
 }
 
 void DownloadJob::FinishFailed(int av_error, const QString& error) {

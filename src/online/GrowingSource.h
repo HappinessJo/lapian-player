@@ -23,6 +23,7 @@
 //
 // 范围：T8.4 只做读层；HTTP/下载（T8.5）、MediaSession/UI 集成（T8.6）不在本文件。
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -178,6 +179,12 @@ class GrowingCursor {
   void SetWaitTimeoutMs(int timeout_ms);
   int WaitTimeoutMs() const;
 
+  // T8.6：单读者中断（不取消共享 GrowingSource）。T8.6 的异步 seek 在用户改目标时
+  // 用它唤醒“卡在未缓存区”的解码线程；Read 在等待循环中每 25ms 检查一次。
+  // 中断后 cursor 应被关闭/丢弃，不能继续在同一 AVFormatContext 上解码。
+  void SetInterruptFlag(std::shared_ptr<std::atomic<bool>> flag);
+  bool IsInterrupted() const;
+
   GrowingCursorStats Stats() const;
 
   // 释放 AVIO + 文件句柄；析构自动调用；重复调用安全。
@@ -195,6 +202,7 @@ class GrowingCursor {
   AVIOContext* avio_ = nullptr;
   std::int64_t pos_ = 0;
   int wait_timeout_ms_ = 0;
+  std::shared_ptr<std::atomic<bool>> interrupt_;
   bool after_uncached_seek_ = false;
   GrowingCursorStats stats_;
 };
@@ -209,8 +217,10 @@ class GrowingFormat {
   GrowingFormat(const GrowingFormat&) = delete;
   GrowingFormat& operator=(const GrowingFormat&) = delete;
 
+  // wait_timeout_ms>0 时只用于索引/测试等可重试路径：读到当前发布前沿时以
+  // ETIMEDOUT 结束，而不是无限等待。产品播放/首帧传 0（阻塞到有数据）。
   bool Open(std::shared_ptr<GrowingSource> source, const QString& file_path,
-            QString* error);
+            QString* error, int wait_timeout_ms = 0);
   void Close();
   bool IsOpen() const;
   AVFormatContext* context() const;

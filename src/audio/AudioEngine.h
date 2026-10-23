@@ -4,6 +4,10 @@
 #include <memory>
 #include <string>
 
+namespace lapian::online {
+class GrowingSource;
+}
+
 namespace lapian::audio {
 
 enum class AudioState {
@@ -40,6 +44,11 @@ class AudioEngine {
   // 首帧的全局偏移（T3.4）；返回 false 只表示线程启动失败。
   bool Open(const std::string& utf8_path, int stream_index,
             double av_offset_seconds = 0.0);
+  // T8.6：从可增长读层打开（独立 GrowingFormat/AudioDecoder，音频线程持有）。
+  // 关闭前调用方应先 source->Cancel() 唤醒可能阻塞在未发布区的读。
+  bool OpenGrowing(std::shared_ptr<lapian::online::GrowingSource> source,
+                   const std::string& part_path_utf8, int stream_index,
+                   double av_offset_seconds = 0.0);
   void Close();
 
   // 从媒体秒开始播放；音频时钟/精确同步留 T3.2。

@@ -44,6 +44,7 @@ std::string AvErrorText(int error) {
 
 struct AudioDecoder::Impl {
   AVFormatContext* format = nullptr;
+  bool owns_format = true;
   AVCodecContext* codec = nullptr;
   AVStream* stream = nullptr;
   AVPacket* packet = nullptr;
@@ -112,9 +113,11 @@ struct AudioDecoder::Impl {
     if (codec != nullptr) {
       avcodec_free_context(&codec);
     }
-    if (format != nullptr) {
+    if (format != nullptr && owns_format) {
       avformat_close_input(&format);
     }
+    format = nullptr;
+    owns_format = true;
     stream = nullptr;
     stream_index = -1;
     packet_valid = false;
@@ -396,32 +399,77 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
     *error = "音频输出格式无效";
     return false;
   }
-  impl_->output_format = output_format;
 
-  int ret = avformat_open_input(&impl_->format, utf8_path.c_str(), nullptr, nullptr);
+  AVFormatContext* format = nullptr;
+  int ret = avformat_open_input(&format, utf8_path.c_str(), nullptr, nullptr);
   if (ret < 0) {
     *error = "打开音频文件失败: " + AvErrorText(ret);
-    impl_->Close();
     return false;
   }
-  ret = avformat_find_stream_info(impl_->format, nullptr);
+  ret = avformat_find_stream_info(format, nullptr);
   if (ret < 0) {
     *error = "读取音频流信息失败: " + AvErrorText(ret);
+    avformat_close_input(&format);
+    return false;
+  }
+  if (!OpenWithFormatInternal(format, true, stream_index, output_format, error)) {
+    // OpenWithFormatInternal 在 take_ownership=true 时负责关闭 format。
     impl_->Close();
     return false;
   }
+  return true;
+}
+
+bool AudioDecoder::OpenWithFormat(AVFormatContext* format, int stream_index,
+                                  const AudioFormat& output_format,
+                                  std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  error->clear();
+  impl_->Close();
+  ended_ = false;
+  info_ = AudioStreamInfo{};
+  if (!output_format.valid()) {
+    *error = "音频输出格式无效";
+    return false;
+  }
+  if (format == nullptr) {
+    *error = "可增长媒体上下文为空";
+    return false;
+  }
+  if (!OpenWithFormatInternal(format, false, stream_index, output_format, error)) {
+    impl_->Close();
+    return false;
+  }
+  return true;
+}
+
+bool AudioDecoder::OpenWithFormatInternal(AVFormatContext* format,
+                                          bool take_ownership,
+                                          int stream_index,
+                                          const AudioFormat& output_format,
+                                          std::string* error) {
+  if (format == nullptr) {
+    *error = "音频媒体上下文为空";
+    return false;
+  }
+  impl_->Close();
+  impl_->format = format;
+  impl_->owns_format = take_ownership;
+  impl_->output_format = output_format;
 
   int selected = -1;
-  if (stream_index >= 0 && stream_index < static_cast<int>(impl_->format->nb_streams)) {
-    const AVStream* candidate = impl_->format->streams[stream_index];
+  if (stream_index >= 0 && stream_index < static_cast<int>(format->nb_streams)) {
+    const AVStream* candidate = format->streams[stream_index];
     if (candidate != nullptr && candidate->codecpar != nullptr &&
         candidate->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
       selected = stream_index;
     }
   }
   if (selected < 0) {
-    for (unsigned int i = 0; i < impl_->format->nb_streams; ++i) {
-      const AVStream* candidate = impl_->format->streams[i];
+    for (unsigned int i = 0; i < format->nb_streams; ++i) {
+      const AVStream* candidate = format->streams[i];
       if (candidate != nullptr && candidate->codecpar != nullptr &&
           candidate->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         selected = static_cast<int>(i);
@@ -431,37 +479,32 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
   }
   if (selected < 0) {
     *error = "文件没有音频流";
-    impl_->Close();
     return false;
   }
 
   impl_->stream_index = selected;
-  impl_->stream = impl_->format->streams[selected];
+  impl_->stream = format->streams[selected];
   const AVCodecParameters* parameters = impl_->stream->codecpar;
   const AVCodec* decoder = avcodec_find_decoder(parameters->codec_id);
   if (decoder == nullptr) {
     *error = "没有可用的音频解码器";
-    impl_->Close();
     return false;
   }
 
   impl_->codec = avcodec_alloc_context3(decoder);
   if (impl_->codec == nullptr) {
     *error = "创建音频解码器失败";
-    impl_->Close();
     return false;
   }
-  ret = avcodec_parameters_to_context(impl_->codec, parameters);
+  int ret = avcodec_parameters_to_context(impl_->codec, parameters);
   if (ret < 0) {
     *error = "复制音频解码参数失败: " + AvErrorText(ret);
-    impl_->Close();
     return false;
   }
   impl_->codec->pkt_timebase = impl_->stream->time_base;
   ret = avcodec_open2(impl_->codec, decoder, nullptr);
   if (ret < 0) {
     *error = "打开音频解码器失败: " + AvErrorText(ret);
-    impl_->Close();
     return false;
   }
 
@@ -476,7 +519,6 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
   impl_->input_layout = input_layout;
   impl_->has_input_layout = true;
   if (!impl_->ConfigureOutput(output_format, error)) {
-    impl_->Close();
     return false;
   }
 
@@ -484,7 +526,6 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
   impl_->frame = av_frame_alloc();
   if (impl_->packet == nullptr || impl_->frame == nullptr) {
     *error = "分配音频解码缓冲失败";
-    impl_->Close();
     return false;
   }
 
@@ -496,8 +537,8 @@ bool AudioDecoder::Open(const std::string& utf8_path, int stream_index,
   if (impl_->stream->duration != AV_NOPTS_VALUE && impl_->stream->duration > 0) {
     info_.duration_us =
         av_rescale_q(impl_->stream->duration, impl_->stream->time_base, AV_TIME_BASE_Q);
-  } else if (impl_->format->duration != AV_NOPTS_VALUE && impl_->format->duration > 0) {
-    info_.duration_us = impl_->format->duration;
+  } else if (format->duration != AV_NOPTS_VALUE && format->duration > 0) {
+    info_.duration_us = format->duration;
   }
   if (impl_->stream->start_time != AV_NOPTS_VALUE) {
     info_.start_time_us =

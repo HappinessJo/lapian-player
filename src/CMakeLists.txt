@@ -97,7 +97,9 @@ add_library(lapian_online STATIC
   online/WinHttpClient.cpp
   online/WinHttpClient.h
   online/WinHttpDownloadTransport.cpp
-  online/qrcodegen/qrcodegen.cpp)
+  online/qrcodegen/qrcodegen.cpp
+  app/OnlineSession.cpp
+  app/OnlineSession.h)
 lapian_apply_common_options(lapian_online)
 target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(lapian_online PRIVATE
@@ -150,6 +152,8 @@ add_library(lapian_media STATIC
   media/MediaProbe.h
   media/MediaSession.cpp
   media/MediaSession.h
+  media/OnlineIndexBuilder.cpp
+  media/OnlineIndexBuilder.h
   media/PathProbe.cpp
   media/PathProbe.h
   media/PreviewDecoder.cpp
@@ -162,7 +166,9 @@ add_library(lapian_media STATIC
   media/VideoDecoder.h)
 lapian_apply_common_options(lapian_media)
 target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath)
+# T8.6：MediaSession::OpenGrowing 持有 GrowingSource/GrowingFormat；本地路径分支
+# 不调用这些类型，但静态库需要一个链接边。
+target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath lapian_online)
 
 # T3.1 音频：FFmpeg 解码 + WASAPI shared mode，不依赖 Qt，便于单测。
 add_library(lapian_audio STATIC
@@ -180,7 +186,8 @@ add_library(lapian_audio STATIC
   audio/WasapiRenderer.h)
 lapian_apply_common_options(lapian_audio)
 target_include_directories(lapian_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg ole32 uuid avrt)
+# T8.6：AudioEngine/WaveformGenerator 增加可增长读层入口（GrowingFormat）。
+target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt)
 
 # 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
 qt_add_executable(lapian WIN32
@@ -205,6 +212,10 @@ qt_add_executable(lapian WIN32
   app/OnlineFetchTestRunner.h
   app/OnlineGrowingTestRunner.cpp
   app/OnlineGrowingTestRunner.h
+  app/OnlineBufferTestRunner.cpp
+  app/OnlineBufferTestRunner.h
+  app/OnlineM1TestRunner.cpp
+  app/OnlineM1TestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
   app/OnlineHttpSelfCheckRunner.h
   app/OnlineQrTestRunner.cpp

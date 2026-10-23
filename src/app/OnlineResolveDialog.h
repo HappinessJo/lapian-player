@@ -33,6 +33,17 @@ class IHttpClient;
 class QrLoginController;
 }  // namespace lapian::online
 
+// T8.6：确认时把回显的标题/UP/时长一并交给会话（仍以 bvid/cid/page 为主键）。
+struct OnlineConfirmInfo {
+  QString bvid;
+  qint64 cid = 0;
+  int page = 0;
+  QString title;
+  QString owner;
+  qint64 duration_ms = 0;
+  QString page_title;
+};
+
 class OnlineResolveDialog : public QDialog {
   Q_OBJECT
 
@@ -70,6 +81,8 @@ class OnlineResolveDialog : public QDialog {
   int PageCountForTest() const;
   int SelectedPageIndexForTest() const;
   QString PageLabelAtForTest(int index) const;
+  // T8.6：产品确认路径读取回显元数据；无结果时 bvid 为空。
+  OnlineConfirmInfo ConfirmInfo() const;
   int LastHttpRequestsForTest() const { return last_http_requests_; }
   int TotalHttpRequestsForTest() const { return total_http_requests_; }
   qint64 LastLocalValidationMsForTest() const { return last_local_validation_ms_; }
