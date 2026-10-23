@@ -127,6 +127,9 @@ class CacheStore {
   bool SetRoot(const QString& root, QString* error);
   // 只接受 >= kMinQuotaBytes；1–100GB 的 clamp 在设置层，测试可直接设 300MB。
   bool SetQuotaBytes(qint64 quota_bytes, QString* error);
+  // T8.3.1：只探测目录是否可写（一次临时文件，不改变 store 状态）；
+  // 目录不存在/不是目录/只读 ACL 均返回可读错误。
+  static bool CheckDirectoryWritable(const QString& dir, QString* error);
 
   // 配额口径的总占用（data.mp4 + data.part + meta.json 实际字节；含损坏条目）。
   qint64 UsageBytes() const;
@@ -167,13 +170,17 @@ class CacheStore {
   bool Rebuild(const CacheKey& key, QString* error);
 
   // 清空：只删缓存根下的条目数据；不删在线记录/截图；幂等。
-  bool ClearAll(QString* error, qint64* removed_bytes = nullptr);
+  // T8.3.1：keep 指向当前会话时保留该条目（bvid/cid 必填；qn/codecid=0 表示
+  // 同 bvid+cid 的全部档位），其余条目照常清理；kept_entries 返回保留数。
+  bool ClearAll(QString* error, qint64* removed_bytes = nullptr,
+                const CacheKey* keep = nullptr, int* kept_entries = nullptr);
 
   // 启动清理：无 meta 的孤儿数据、超过 N 小时未访问的未完成条目、evict_pending；
-  // 当前会话 key 永不清理。
+  // 当前会话 key 永不清理（同样支持 bvid+cid 部分键）。
   bool CleanupOrphans(const CacheKey& current, QString* error,
                       CleanupOptions options = CleanupOptions(),
-                      qint64* removed_bytes = nullptr);
+                      qint64* removed_bytes = nullptr,
+                      int* removed_entries = nullptr);
 
   // 记录最近访问（LRU）；条目损坏/不存在时返回 false。
   bool Touch(const CacheKey& key, QString* error);

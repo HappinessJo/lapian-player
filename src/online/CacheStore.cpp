@@ -14,6 +14,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -297,6 +298,22 @@ bool IsValidDirSegment(const QString& name) {
          !name.contains(QLatin1Char('\\'));
 }
 
+// T8.3.1：当前会话保护键。完整键按 qn/codecid 精确匹配；qn=0 表示
+// playurl 还没返回档位，但 bvid+cid 已知——保护该视频的全部档位，
+// 避免启动/定期清理在“已 Reserve、尚未 Ready”窗口误删当前 .part。
+bool MatchesProtectedKey(const CacheKey& entry, const CacheKey& keep) {
+  if (keep.bvid.isEmpty() || keep.cid <= 0) {
+    return false;
+  }
+  if (entry.bvid != keep.bvid || entry.cid != keep.cid) {
+    return false;
+  }
+  if (keep.qn <= 0) {
+    return true;
+  }
+  return entry.qn == keep.qn && entry.codecid == keep.codecid;
+}
+
 bool ParsePositiveInt(const QString& text, int min_value, int max_value, int* out) {
   bool ok = false;
   const qint64 value = text.toLongLong(&ok);
@@ -502,6 +519,41 @@ bool CacheStore::EnsureRootLocked(QString* error) {
   return true;
 }
 
+bool CacheStore::CheckDirectoryWritable(const QString& dir, QString* error) {
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  if (dir.isEmpty()) {
+    return fail(QStringLiteral("缓存根为空"));
+  }
+  const QFileInfo info(dir);
+  if (!info.exists()) {
+    return fail(QStringLiteral("缓存目录不存在：%1").arg(dir));
+  }
+  if (!info.isDir()) {
+    return fail(QStringLiteral("缓存根不是目录：%1").arg(dir));
+  }
+  // 可写探测：用一次性文件，失败时不改当前根（比等到下载才失败更早）。
+  static std::atomic<quint64> probe_seq{0};
+  const quint64 sequence = probe_seq.fetch_add(1, std::memory_order_relaxed);
+  const QString probe =
+      JoinPath(dir, QStringLiteral(".lapian-probe-%1-%2.tmp")
+                        .arg(QDateTime::currentMSecsSinceEpoch())
+                        .arg(sequence));
+  QFile probe_file(probe);
+  if (!probe_file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+    return fail(QStringLiteral("缓存目录不可写（只读或权限不足）：%1（%2）")
+                    .arg(dir, probe_file.errorString()));
+  }
+  probe_file.write("lapian");
+  probe_file.close();
+  QFile::remove(probe);
+  return true;
+}
+
 bool CacheStore::SetRoot(const QString& root, QString* error) {
   QMutexLocker locker(&mutex_);
   if (root.trimmed().isEmpty()) {
@@ -531,21 +583,9 @@ bool CacheStore::SetRoot(const QString& root, QString* error) {
     }
     return false;
   }
-  // 可写探测：用一次性文件，失败时不改当前根（比等到下载才失败更早）。
-  const QString probe =
-      JoinPath(cleaned, QStringLiteral(".lapian-probe-%1.tmp")
-                            .arg(QDateTime::currentMSecsSinceEpoch()));
-  QFile probe_file(probe);
-  if (!probe_file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
-    if (error != nullptr) {
-      *error = QStringLiteral("缓存目录不可写：%1（%2）")
-                   .arg(cleaned, probe_file.errorString());
-    }
+  if (!CheckDirectoryWritable(cleaned, error)) {
     return false;
   }
-  probe_file.write("lapian");
-  probe_file.close();
-  QFile::remove(probe);
   // 契约：路径变化不迁移旧缓存，旧根的文件继续留在旧根（delta §4.1）。
   root_ = cleaned;
   last_progress_write_ms_.clear();
@@ -1350,12 +1390,12 @@ bool CacheStore::EvictUntilLocked(qint64 target_usage, const CacheKey& current,
   QVector<CacheEntry> candidates;
   candidates.reserve(entries.size() + broken.size());
   for (const CacheEntry& entry : entries) {
-    if (!(entry.key == current)) {
+    if (!MatchesProtectedKey(entry.key, current)) {
       candidates.push_back(entry);
     }
   }
   for (const CacheEntry& entry : broken) {
-    if (!(entry.key == current)) {
+    if (!MatchesProtectedKey(entry.key, current)) {
       candidates.push_back(entry);
     }
   }
@@ -1460,20 +1500,31 @@ bool CacheStore::Rebuild(const CacheKey& key, QString* error) {
   return true;
 }
 
-bool CacheStore::ClearAll(QString* error, qint64* removed_bytes) {
+bool CacheStore::ClearAll(QString* error, qint64* removed_bytes,
+                          const CacheKey* keep, int* kept_entries) {
   QMutexLocker locker(&mutex_);
   if (removed_bytes != nullptr) {
     *removed_bytes = 0;
+  }
+  if (kept_entries != nullptr) {
+    *kept_entries = 0;
   }
   QVector<CacheEntry> entries;
   QVector<CacheEntry> broken;
   ScanLocked(&entries, &broken, nullptr);
   // 缓存根必须存在；不存在时清空是幂等的成功。
   qint64 removed_total = 0;
+  int kept_total = 0;
   bool ok = true;
   QString first_error;
   auto clear_list = [&](const QVector<CacheEntry>& list) {
     for (const CacheEntry& entry : list) {
+      // T8.3.1：当前在线会话（含 bvid+cid 部分键）不删，避免清空把正在播放/
+      // 正在下载的条目抽走；其它条目照常删除。
+      if (keep != nullptr && MatchesProtectedKey(entry.key, *keep)) {
+        ++kept_total;
+        continue;
+      }
       qint64 removed = 0;
       bool busy = false;
       QString delete_error;
@@ -1494,6 +1545,9 @@ bool CacheStore::ClearAll(QString* error, qint64* removed_bytes) {
   if (removed_bytes != nullptr) {
     *removed_bytes = removed_total;
   }
+  if (kept_entries != nullptr) {
+    *kept_entries = kept_total;
+  }
   if (!ok) {
     if (error != nullptr) {
       *error = first_error.isEmpty() ? QStringLiteral("清空缓存失败") : first_error;
@@ -1504,11 +1558,15 @@ bool CacheStore::ClearAll(QString* error, qint64* removed_bytes) {
 }
 
 bool CacheStore::CleanupOrphans(const CacheKey& current, QString* error,
-                                CleanupOptions options, qint64* removed_bytes) {
+                                CleanupOptions options, qint64* removed_bytes,
+                                int* removed_entries) {
   QMutexLocker locker(&mutex_);
   Q_UNUSED(error);  // 清理是按条目尽力而为：读句柄占用留到下一轮，不算失败
   if (removed_bytes != nullptr) {
     *removed_bytes = 0;
+  }
+  if (removed_entries != nullptr) {
+    *removed_entries = 0;
   }
   if (!options.enabled) {
     return true;  // 可关闭
@@ -1520,11 +1578,12 @@ bool CacheStore::CleanupOrphans(const CacheKey& current, QString* error,
   const QDateTime cutoff =
       QDateTime::currentDateTimeUtc().addSecs(-static_cast<qint64>(hours) * 3600);
   qint64 removed_total = 0;
+  int removed_count = 0;
 
   auto cleanup_list = [&](const QVector<CacheEntry>& list) {
     for (const CacheEntry& entry : list) {
-      if (entry.key == current) {
-        continue;  // 当前会话永不清理
+      if (MatchesProtectedKey(entry.key, current)) {
+        continue;  // 当前会话永不清理（支持 bvid+cid 部分键）
       }
       bool should_remove = false;
       if (!entry.meta_present) {
@@ -1548,6 +1607,7 @@ bool CacheStore::CleanupOrphans(const CacheKey& current, QString* error,
         // 仍被读取：下一轮再试；不把整个清理判失败。
         continue;
       }
+      ++removed_count;
       RemoveEmptyParents(entry.dir, root_);
     }
   };
@@ -1555,6 +1615,9 @@ bool CacheStore::CleanupOrphans(const CacheKey& current, QString* error,
   cleanup_list(broken);
   if (removed_bytes != nullptr) {
     *removed_bytes = removed_total;
+  }
+  if (removed_entries != nullptr) {
+    *removed_entries = removed_count;
   }
   return true;
 }

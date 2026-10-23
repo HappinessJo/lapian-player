@@ -5,6 +5,7 @@
 #include <QByteArray>
 #include <QCloseEvent>
 #include <QDebug>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -27,6 +28,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSignalBlocker>
@@ -66,6 +68,7 @@ extern "C" {
 #include <libavutil/frame.h>
 }
 
+#include "app/CacheSettingsDialog.h"
 #include "app/GfxWidget.h"
 #include "app/InfoBar.h"
 #include "app/MarkPanel.h"
@@ -84,12 +87,18 @@ extern "C" {
 #include "media/MediaSession.h"
 #include "media/PathProbe.h"
 #include "media/PreviewDecoder.h"
+#include "online/CacheManager.h"
 #include "online/CacheStore.h"
 #include "online/CredentialStore.h"
 #include "online/IHttpClient.h"
 #include "online/PlayUrl.h"
 
 namespace {
+
+// T8.3.1：启动后做一次孤儿清理，之后每 6 小时一次。延迟启动清理是为了不把
+// 首次扫描压在窗口显示/首帧路径上；测试模式由 main 关闭（见构造函数参数）。
+constexpr int kCacheStartupMaintenanceDelayMs = 3000;
+constexpr int kCacheMaintenanceIntervalMs = 6 * 60 * 60 * 1000;
 
 QString DescribeAudioChannels(int channels) {
   if (channels == 1) {
@@ -138,8 +147,10 @@ QString EscapeForLog(QString text) {
 
 }  // namespace
 
-MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
+MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
+                       bool enable_cache_maintenance)
     : QMainWindow(parent) {
+  cache_maintenance_enabled_ = enable_cache_maintenance;
   settings_log_ = qEnvironmentVariableIsSet("LAPIAN_SETTINGS_LOG");
   startup_log_ = qEnvironmentVariableIsSet("LAPIAN_STARTUP_LOG");
   // T6.3：构造期间只建立 store；文件读取放在 UI 建好之后、首次打开文件之前，
@@ -184,6 +195,16 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   online_action_->setShortcutContext(Qt::WindowShortcut);
   connect(online_action_, &QAction::triggered, this, &MainWindow::OpenOnlineDialog);
   addAction(online_action_);
+
+  // T8.3.1：设置（在线缓存目录/配额/清空/孤儿清理）。快捷键不在 spec §3.7
+  // 表内，不改变既有键位；文本输入聚焦时 Qt 仍会把 Ctrl+, 交给本 action。
+  cache_settings_action_ = new QAction(QStringLiteral("缓存设置..."), this);
+  cache_settings_action_->setObjectName(QStringLiteral("cacheSettingsAction"));
+  cache_settings_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
+  cache_settings_action_->setShortcutContext(Qt::WindowShortcut);
+  connect(cache_settings_action_, &QAction::triggered, this,
+          &MainWindow::ShowCacheSettingsDialog);
+  addAction(cache_settings_action_);
 
   // T8.6：在线加载/缓冲中可取消；关窗也走同一条清理路径。快捷键不在 §3.7 表内，
   // 用 Ctrl+Shift+U，并在状态栏提示。
@@ -458,6 +479,15 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   connect(volume_slider_, &QSlider::valueChanged, this, &MainWindow::OnVolumeChanged);
   statusBar()->addPermanentWidget(volume_slider_);
 
+  // T8.3.1：可见的“设置”入口（Ctrl+, 同一路径）；不新增主菜单/不改变 v1 快捷键。
+  cache_settings_button_ = new QPushButton(QStringLiteral("设置"), this);
+  cache_settings_button_->setObjectName(QStringLiteral("cacheSettingsButton"));
+  cache_settings_button_->setFlat(true);
+  cache_settings_button_->setToolTip(QStringLiteral("在线缓存设置（Ctrl+,）"));
+  connect(cache_settings_button_, &QPushButton::clicked, this,
+          &MainWindow::ShowCacheSettingsDialog);
+  statusBar()->addPermanentWidget(cache_settings_button_);
+
   mute_action_ = new QAction(QStringLiteral("静音"), this);
   mute_action_->setShortcut(Qt::Key_M);
   mute_action_->setShortcutContext(Qt::WindowShortcut);
@@ -490,6 +520,19 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
   settings_save_timer_->setInterval(250);
   connect(settings_save_timer_, &QTimer::timeout, this, [this]() { FlushSettings(); });
   LoadSettingsIntoUi();
+
+  // T8.3.1：构造 CacheStore 本身不碰磁盘；真正 SetRoot/清理延后到启动定时器，
+  // 避免把默认 AppData 写操作压在窗口显示路径上。测试模式由 main 关闭。
+  InitializeOnlineCacheStore();
+  cache_maintenance_timer_ = new QTimer(this);
+  cache_maintenance_timer_->setInterval(kCacheMaintenanceIntervalMs);
+  connect(cache_maintenance_timer_, &QTimer::timeout, this,
+          [this]() { RunCacheMaintenance("periodic"); });
+  if (cache_maintenance_enabled_) {
+    cache_maintenance_timer_->start();
+    QTimer::singleShot(kCacheStartupMaintenanceDelayMs, this,
+                       [this]() { RunCacheMaintenance("startup"); });
+  }
 
   ShowEmptyState();
 
@@ -1259,9 +1302,10 @@ bool MainWindow::LookupOnlineCacheForDialog(const QString& bvid,
   if (online_cache_ == nullptr) {
     EnsureOnlineSession();
   }
-  if (online_cache_ == nullptr) {
+  QString cache_ready_error;
+  if (!EnsureOnlineCacheReady(&cache_ready_error)) {
     if (error != nullptr) {
-      *error = QStringLiteral("在线缓存未初始化");
+      *error = cache_ready_error;
     }
     return false;
   }
@@ -1299,17 +1343,75 @@ bool MainWindow::LookupOnlineCacheForDialog(const QString& bvid,
   return true;
 }
 
-void MainWindow::EnsureOnlineSession() {
-  if (online_) {
+void MainWindow::InitializeOnlineCacheStore() {
+  if (online_cache_) {
     return;
   }
-  QString root = loaded_settings_.cache_root;
   const qint64 quota =
       static_cast<qint64>(std::clamp(loaded_settings_.cache_quota_gb,
                                      lapian::core::kCacheQuotaMinGb,
                                      lapian::core::kCacheQuotaMaxGb)) *
       1024LL * 1024LL * 1024LL;
-  online_cache_ = std::make_unique<lapian::online::CacheStore>(root, quota);
+  online_cache_ =
+      std::make_unique<lapian::online::CacheStore>(loaded_settings_.cache_root,
+                                                   quota);
+  online_cache_ready_ = false;
+  online_cache_error_.clear();
+}
+
+bool MainWindow::EnsureOnlineCacheReady(QString* error) {
+  if (online_cache_ == nullptr) {
+    InitializeOnlineCacheStore();
+  }
+  if (online_cache_ == nullptr) {
+    if (error != nullptr) {
+      *error = QStringLiteral("在线缓存未初始化");
+    }
+    return false;
+  }
+  if (online_cache_ready_) {
+    return true;
+  }
+  QString root_error;
+  if (!online_cache_->SetRoot(online_cache_->root(), &root_error)) {
+    online_cache_error_ = root_error;
+    if (error != nullptr) {
+      *error = root_error;
+    }
+    return false;
+  }
+  const qint64 quota =
+      static_cast<qint64>(std::clamp(loaded_settings_.cache_quota_gb,
+                                     lapian::core::kCacheQuotaMinGb,
+                                     lapian::core::kCacheQuotaMaxGb)) *
+      1024LL * 1024LL * 1024LL;
+  QString quota_error;
+  if (!online_cache_->SetQuotaBytes(quota, &quota_error)) {
+    online_cache_error_ = quota_error;
+    if (error != nullptr) {
+      *error = quota_error;
+    }
+    return false;
+  }
+  online_cache_ready_ = true;
+  online_cache_error_.clear();
+  return true;
+}
+
+void MainWindow::EnsureOnlineSession() {
+  if (online_) {
+    return;
+  }
+  QString cache_error;
+  if (!EnsureOnlineCacheReady(&cache_error)) {
+    online_last_error_ =
+        QStringLiteral("在线缓存目录不可用：%1").arg(cache_error);
+    if (info_bar_ != nullptr) {
+      info_bar_->SetError(online_last_error_);
+    }
+    statusBar()->showMessage(online_last_error_, 12000);
+    return;
+  }
   online_ = std::make_unique<lapian::app::OnlineSession>(online_cache_.get(), this);
   if (online_test_http_) {
     online_->SetHttpClientForTest(std::move(online_test_http_));
@@ -1347,6 +1449,313 @@ bool MainWindow::StartOnlineSession(const lapian::app::OnlineRequest& request) {
   return online_ != nullptr && online_->IsActive();
 }
 
+bool MainWindow::CurrentOnlineCacheKey(lapian::online::CacheKey* key) const {
+  if (key == nullptr || !online_mode_ || online_bvid_.isEmpty() ||
+      online_cid_ <= 0) {
+    return false;
+  }
+  key->bvid = online_bvid_;
+  key->cid = online_cid_;
+  // qn/codecid 为 0 表示 playurl 尚未返回；CacheStore 会把 bvid+cid 当作
+  // 部分保护键，避免清空/清理误删当前会话刚 Reserve 的 .part。
+  key->qn = online_qn_;
+  key->codecid = online_codecid_;
+  return true;
+}
+
+QString MainWindow::OnlineRecordsRoot() const {
+  if (!online_records_root_for_test_.isEmpty()) {
+    return QDir::cleanPath(
+        QFileInfo(online_records_root_for_test_).absoluteFilePath());
+  }
+  return lapian::online::CacheManager::DefaultRecordsRoot();
+}
+
+bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
+                                    QString* error) {
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  if (online_mode_) {
+    return fail(QStringLiteral("在线会话打开中，不能更改缓存目录或配额；"
+                               "请先关闭在线视频。"));
+  }
+  const int clamped_gb = std::clamp(quota_gb, lapian::core::kCacheQuotaMinGb,
+                                    lapian::core::kCacheQuotaMaxGb);
+  const qint64 quota = static_cast<qint64>(clamped_gb) * 1024LL * 1024LL *
+                       1024LL;
+  const QString normalized = lapian::online::CacheManager::NormalizeRoot(root);
+  if (normalized.isEmpty()) {
+    return fail(QStringLiteral("缓存目录为空"));
+  }
+  const QString old_root =
+      online_cache_ != nullptr ? online_cache_->root()
+                               : lapian::online::CacheStore::DefaultRoot();
+  const qint64 old_usage =
+      online_cache_ != nullptr ? online_cache_->UsageBytes() : 0;
+
+  auto next = std::make_unique<lapian::online::CacheStore>(normalized, quota);
+  QString setup_error;
+  if (!next->SetRoot(normalized, &setup_error)) {
+    return fail(setup_error);
+  }
+  if (!next->SetQuotaBytes(quota, &setup_error)) {
+    return fail(setup_error);
+  }
+
+  // 先写 settings.json，成功后才替换 online_cache_。这样保存失败时对话框
+  // 持有的 CacheStore* 仍然有效，不会出现“设置没保存但缓存对象已被换掉”。
+  lapian::core::AppSettings updated =
+      lapian::core::MergeVolumeWaveform(loaded_settings_, volume_,
+                                        waveform_visible_);
+  updated.cache_root =
+      QDir::cleanPath(normalized).compare(
+          QDir::cleanPath(lapian::online::CacheStore::DefaultRoot()),
+          Qt::CaseInsensitive) == 0
+          ? QString()
+          : normalized;
+  updated.cache_quota_gb = clamped_gb;
+  if (settings_store_ == nullptr) {
+    return fail(QStringLiteral("设置存储未初始化，无法保存缓存目录/配额。"));
+  }
+  QElapsedTimer save_timer;
+  save_timer.start();
+  const bool saved = settings_store_->Save(updated);
+  settings_last_save_ms_ =
+      static_cast<double>(save_timer.nsecsElapsed()) / 1.0e6;
+  if (!saved) {
+    return fail(QStringLiteral("无法写入 settings.json，缓存目录/配额未改变；"
+                               "请检查 %APPDATA% 写权限后重试。"));
+  }
+  if (online_ != nullptr) {
+    ShutdownOnlineSession(false);
+  }
+  online_cache_ = std::move(next);
+  online_cache_ready_ = true;
+  online_cache_error_.clear();
+  loaded_settings_ = updated;
+  settings_dirty_ = false;
+  // 配额调小后立即回收；读句柄占用时只提示，不阻止设置保存。
+  QString evict_error;
+  const bool evicted =
+      online_cache_->EvictToQuota(lapian::online::CacheKey{}, &evict_error);
+  if (old_root.compare(normalized, Qt::CaseInsensitive) != 0 &&
+      old_usage > 0) {
+    statusBar()->showMessage(
+        QStringLiteral("已切换缓存目录；旧目录仍有 %1，未自动迁移或删除。")
+            .arg(lapian::online::CacheStore::FormatBytes(old_usage)),
+        12000);
+  } else if (!evicted) {
+    statusBar()->showMessage(
+        QStringLiteral("配额已保存；暂未完全回收：%1").arg(evict_error), 10000);
+  } else {
+    statusBar()->showMessage(QStringLiteral("缓存设置已保存。"), 5000);
+  }
+  return true;
+}
+
+bool MainWindow::ClearOnlineCache(QString* error, qint64* removed_bytes,
+                                  int* kept_entries) {
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  QString cache_error;
+  if (!EnsureOnlineCacheReady(&cache_error)) {
+    return fail(cache_error);
+  }
+  lapian::online::CacheKey key;
+  const bool has_key = CurrentOnlineCacheKey(&key);
+  if (online_mode_ && !has_key) {
+    return fail(QStringLiteral("当前在线会话尚未确定缓存键，暂不能清空缓存；"
+                               "请等首帧或关闭在线视频后重试。"));
+  }
+  lapian::online::CacheManager manager(online_cache_.get(), OnlineRecordsRoot());
+  return manager.ClearAll(has_key ? &key : nullptr, error, removed_bytes,
+                          kept_entries);
+}
+
+bool MainWindow::CleanupOnlineCache(QString* error, qint64* removed_bytes,
+                                    int* removed_entries) {
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  QString cache_error;
+  if (!EnsureOnlineCacheReady(&cache_error)) {
+    return fail(cache_error);
+  }
+  lapian::online::CacheKey key;
+  const bool has_key = CurrentOnlineCacheKey(&key);
+  lapian::online::CacheManager manager(online_cache_.get(), OnlineRecordsRoot());
+  const lapian::online::CacheMaintenanceResult result =
+      manager.CleanupOrphans(has_key ? &key : nullptr,
+                             lapian::online::CleanupOptions{}, false);
+  if (!result.ok) {
+    return fail(result.error);
+  }
+  if (removed_bytes != nullptr) {
+    *removed_bytes = result.removed_bytes;
+  }
+  if (removed_entries != nullptr) {
+    *removed_entries = result.removed_entries;
+  }
+  if (!result.warning.isEmpty()) {
+    statusBar()->showMessage(result.warning, 10000);
+  }
+  return true;
+}
+
+bool MainWindow::OpenOnlineCacheDirectory(QString* error) {
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  QString cache_error;
+  if (!EnsureOnlineCacheReady(&cache_error)) {
+    return fail(cache_error);
+  }
+  const QString root = online_cache_->root();
+  if (!QDir().mkpath(root)) {
+    return fail(QStringLiteral("无法创建缓存目录：%1").arg(root));
+  }
+  if (!QDesktopServices::openUrl(QUrl::fromLocalFile(root))) {
+    return fail(QStringLiteral("无法打开缓存目录：%1").arg(root));
+  }
+  return true;
+}
+
+void MainWindow::ShowCacheSettingsDialog() {
+  if (online_cache_ == nullptr) {
+    InitializeOnlineCacheStore();
+  }
+  QString ready_error;
+  if (!EnsureOnlineCacheReady(&ready_error)) {
+    // 目录不可写仍打开设置：对话框会显示只读/权限错误，并允许改目录。
+    statusBar()->showMessage(
+        QStringLiteral("在线缓存目录不可用：%1").arg(ready_error), 10000);
+  }
+  if (online_cache_ == nullptr) {
+    QMessageBox::warning(this, QStringLiteral("缓存设置"),
+                         QStringLiteral("在线缓存未初始化。"));
+    return;
+  }
+  lapian::app::CacheSettingsDialog::Callbacks callbacks;
+  callbacks.apply = [this](const QString& root, int quota_gb, QString* error) {
+    return ApplyCacheSettings(root, quota_gb, error);
+  };
+  callbacks.clear = [this](QString* error, qint64* removed, int* kept) {
+    return ClearOnlineCache(error, removed, kept);
+  };
+  callbacks.cleanup = [this](QString* error, qint64* removed, int* entries) {
+    return CleanupOnlineCache(error, removed, entries);
+  };
+  callbacks.open_directory = [this](QString* error) {
+    return OpenOnlineCacheDirectory(error);
+  };
+  const QString description =
+      online_mode_
+          ? QStringLiteral("在线会话打开中：不能更改缓存目录或配额；"
+                           "清空缓存会保留当前会话的条目。")
+          : QString();
+  lapian::app::CacheSettingsDialog dialog(
+      online_cache_.get(), OnlineRecordsRoot(), online_mode_, description,
+      callbacks, this);
+  dialog.exec();
+}
+
+void MainWindow::RunCacheMaintenance(const char* reason) {
+  if (!cache_maintenance_enabled_) {
+    return;
+  }
+  const QString reason_text =
+      QString::fromLatin1(reason == nullptr ? "manual" : reason);
+  QElapsedTimer timer;
+  timer.start();
+  cache_last_maintenance_reason_ = reason_text;
+  cache_last_maintenance_removed_bytes_ = 0;
+  cache_last_maintenance_removed_entries_ = 0;
+  QString cache_error;
+  if (!EnsureOnlineCacheReady(&cache_error)) {
+    cache_last_maintenance_ms_ =
+        static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+    statusBar()->showMessage(
+        QStringLiteral("在线缓存目录不可用：%1").arg(cache_error), 12000);
+    if (qEnvironmentVariableIsSet("LAPIAN_CACHE_LOG")) {
+      std::fprintf(stderr,
+                   "T8.3.1 cache_maintenance reason=%s ok=0 error=\"%s\" "
+                   "elapsed_ms=%.3f\n",
+                   reason_text.toUtf8().constData(),
+                   cache_error.toUtf8().constData(),
+                   cache_last_maintenance_ms_);
+      std::fflush(stderr);
+    }
+    return;
+  }
+  lapian::online::CacheKey key;
+  const bool has_key = CurrentOnlineCacheKey(&key);
+  lapian::online::CacheManager manager(online_cache_.get(), OnlineRecordsRoot());
+  const lapian::online::CacheMaintenanceResult result =
+      manager.CleanupOrphans(has_key ? &key : nullptr,
+                             lapian::online::CleanupOptions{}, true);
+  cache_last_maintenance_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+  cache_last_maintenance_removed_bytes_ = result.removed_bytes;
+  cache_last_maintenance_removed_entries_ = result.removed_entries;
+  if (!result.ok) {
+    statusBar()->showMessage(
+        QStringLiteral("在线缓存清理失败：%1").arg(result.error), 10000);
+  } else if (result.removed_bytes > 0 || result.removed_entries > 0) {
+    statusBar()->showMessage(
+        QStringLiteral("已清理在线缓存：%1 个条目，%2")
+            .arg(result.removed_entries)
+            .arg(lapian::online::CacheStore::FormatBytes(result.removed_bytes)),
+        8000);
+  }
+  if (qEnvironmentVariableIsSet("LAPIAN_CACHE_LOG")) {
+    std::fprintf(stderr,
+                 "T8.3.1 cache_maintenance reason=%s ok=%d removed_bytes=%lld "
+                 "removed_entries=%d usage_after=%lld protected=%d "
+                 "elapsed_ms=%.3f warning=\"%s\"\n",
+                 reason_text.toUtf8().constData(), result.ok ? 1 : 0,
+                 static_cast<long long>(result.removed_bytes),
+                 result.removed_entries,
+                 static_cast<long long>(result.usage_after),
+                 result.current_protected ? 1 : 0,
+                 cache_last_maintenance_ms_,
+                 result.warning.toUtf8().constData());
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::RunCacheMaintenanceForTest() { RunCacheMaintenance("test"); }
+
+bool MainWindow::ApplyCacheSettingsForTest(const QString& root, int quota_gb,
+                                           QString* error) {
+  return ApplyCacheSettings(root, quota_gb, error);
+}
+
+void MainWindow::SetCacheMaintenanceEnabledForTest(bool enabled) {
+  cache_maintenance_enabled_ = enabled;
+  if (cache_maintenance_timer_ != nullptr) {
+    if (enabled) {
+      if (!cache_maintenance_timer_->isActive()) {
+        cache_maintenance_timer_->start();
+      }
+    } else {
+      cache_maintenance_timer_->stop();
+    }
+  }
+}
+
 void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   if (request.bvid.isEmpty() || request.cid <= 0) {
     online_last_error_ = QStringLiteral("在线请求缺少 bvid/cid");
@@ -1355,6 +1764,17 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   }
   ShutdownOnlineSession(false);
   EnsureOnlineSession();
+  if (online_ == nullptr) {
+    online_mode_ = false;
+    if (online_last_error_.isEmpty()) {
+      online_last_error_ = QStringLiteral("无法开始在线会话");
+    }
+    if (info_bar_ != nullptr) {
+      info_bar_->SetError(online_last_error_);
+    }
+    statusBar()->showMessage(online_last_error_, 12000);
+    return;
+  }
   online_mode_ = true;
   online_ready_ = false;
   online_finalized_ = false;
@@ -3350,6 +3770,8 @@ void MainWindow::SetOnlineCacheRootForTest(const QString& root) {
   }
   loaded_settings_.cache_root = root;
   online_cache_.reset();
+  online_cache_ready_ = false;
+  online_cache_error_.clear();
 }
 
 QString MainWindow::OnlineCacheRootForTest() const {
@@ -4993,6 +5415,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
   };
   close_mark("start");
+  // T8.3.1：关窗后不再触发启动/定期缓存清理。
+  if (cache_maintenance_timer_ != nullptr) {
+    cache_maintenance_timer_->stop();
+  }
   // T8.1：在线解析中关窗必须取消并 join 工作线程，不能把请求/线程留给析构。
   if (online_dialog_ != nullptr) {
     online_dialog_->Shutdown();

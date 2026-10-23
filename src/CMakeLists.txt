@@ -76,6 +76,8 @@ add_library(lapian_online STATIC
   online/BiliResolveClient.h
   online/CacheStore.cpp
   online/CacheStore.h
+  online/CacheManager.cpp
+  online/CacheManager.h
   online/CredentialStore.cpp
   online/CredentialStore.h
   online/DownloadJob.cpp
@@ -198,6 +200,8 @@ qt_add_executable(lapian WIN32
   app/GfxWidget.h
   app/InfoBar.cpp
   app/InfoBar.h
+  app/CacheSettingsDialog.cpp
+  app/CacheSettingsDialog.h
   app/DragTestRunner.cpp
   app/DragTestRunner.h
   app/GopBoundaryTestRunner.cpp
@@ -208,6 +212,8 @@ qt_add_executable(lapian WIN32
   app/OnlineAuthTestRunner.h
   app/OnlineCacheTestRunner.cpp
   app/OnlineCacheTestRunner.h
+  app/OnlineCacheManageTestRunner.cpp
+  app/OnlineCacheManageTestRunner.h
   app/OnlineFetchTestRunner.cpp
   app/OnlineFetchTestRunner.h
   app/OnlineGrowingTestRunner.cpp

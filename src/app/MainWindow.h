@@ -30,6 +30,7 @@ class QDropEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
+class QPushButton;
 class QResizeEvent;
 class QSlider;
 class QTimer;
@@ -37,6 +38,7 @@ class GfxWidget;
 class InfoBar;
 class MarkPanel;
 class OnlineResolveDialog;
+class CacheSettingsDialog;
 class PlaybackController;
 class SnapshotService;
 class TimelineWidget;
@@ -61,6 +63,7 @@ namespace lapian::online {
 class CacheStore;
 class IDownloadTransport;
 class IHttpClient;
+struct CacheKey;
 struct PlayUrlData;
 }  // namespace lapian::online
 
@@ -79,7 +82,8 @@ class MainWindow : public QMainWindow {
 
  public:
   explicit MainWindow(QWidget* parent = nullptr,
-                      const QString& settings_root = QString());
+                      const QString& settings_root = QString(),
+                      bool enable_cache_maintenance = true);
   ~MainWindow() override;
 
   // T8.1 在线解析：Ctrl+U 打开的模型对话框；测试入口走同一路径。
@@ -272,6 +276,22 @@ class MainWindow : public QMainWindow {
   // T8.6 E2E：在开始在线会话前覆盖缓存根（不写用户默认目录）。
   void SetOnlineCacheRootForTest(const QString& root);
   QString OnlineCacheRootForTest() const;
+  // T8.3.1：缓存管理/启动清理的自动化入口（不弹设置对话框）。
+  void SetCacheMaintenanceEnabledForTest(bool enabled);
+  void RunCacheMaintenanceForTest();
+  bool ApplyCacheSettingsForTest(const QString& root, int quota_gb,
+                                 QString* error);
+  bool CacheRootReadyForTest() const { return online_cache_ready_; }
+  QString CacheRootErrorForTest() const { return online_cache_error_; }
+  QString CacheLastMaintenanceReasonForTest() const {
+    return cache_last_maintenance_reason_;
+  }
+  qint64 CacheLastMaintenanceRemovedBytesForTest() const {
+    return cache_last_maintenance_removed_bytes_;
+  }
+  int CacheLastMaintenanceRemovedEntriesForTest() const {
+    return cache_last_maintenance_removed_entries_;
+  }
   // T8.7 E2E：在线记录/截图回退根（空 = 真实 %APPDATA%\拉片软件\online）。
   void SetOnlineRecordsRootForTest(const QString& root);
   QString OnlineRecordPathForTest() const;
@@ -369,6 +389,17 @@ class MainWindow : public QMainWindow {
   bool LookupOnlineCacheForDialog(const QString& bvid,
                                   OnlineCacheSummary* summary, QString* error);
   void EnsureOnlineSession();
+  void InitializeOnlineCacheStore();
+  bool EnsureOnlineCacheReady(QString* error);
+  bool ApplyCacheSettings(const QString& root, int quota_gb, QString* error);
+  bool ClearOnlineCache(QString* error, qint64* removed_bytes, int* kept_entries);
+  bool CleanupOnlineCache(QString* error, qint64* removed_bytes,
+                          int* removed_entries);
+  bool OpenOnlineCacheDirectory(QString* error);
+  void ShowCacheSettingsDialog();
+  void RunCacheMaintenance(const char* reason);
+  bool CurrentOnlineCacheKey(lapian::online::CacheKey* key) const;
+  QString OnlineRecordsRoot() const;
   void BeginOnlineRequest(const lapian::app::OnlineRequest& request);
   bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
   bool ApplyOnlineCacheHit(const lapian::app::OnlineReadyInfo& info);
@@ -493,12 +524,14 @@ class MainWindow : public QMainWindow {
   QLabel* waveform_label_ = nullptr;
   QLabel* notice_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
+  QPushButton* cache_settings_button_ = nullptr;
   QAction* mute_action_ = nullptr;
   QAction* slower_action_ = nullptr;
   QAction* faster_action_ = nullptr;
   QTimer* audio_status_timer_ = nullptr;
   QAction* open_action_ = nullptr;
   QAction* online_action_ = nullptr;
+  QAction* cache_settings_action_ = nullptr;
   QAction* online_cancel_action_ = nullptr;
   QAction* play_action_ = nullptr;
   QAction* prev_action_ = nullptr;
@@ -520,6 +553,14 @@ class MainWindow : public QMainWindow {
   std::shared_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<lapian::app::OnlineSession> online_;
   std::unique_ptr<lapian::online::CacheStore> online_cache_;
+  bool online_cache_ready_ = false;
+  QString online_cache_error_;
+  QTimer* cache_maintenance_timer_ = nullptr;
+  bool cache_maintenance_enabled_ = true;
+  QString cache_last_maintenance_reason_;
+  qint64 cache_last_maintenance_removed_bytes_ = 0;
+  int cache_last_maintenance_removed_entries_ = 0;
+  double cache_last_maintenance_ms_ = 0.0;
   std::unique_ptr<PlaybackController> playback_;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;

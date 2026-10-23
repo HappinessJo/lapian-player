@@ -42,6 +42,7 @@
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
 #include "app/OnlineAuthTestRunner.h"
+#include "app/OnlineCacheManageTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
 #include "app/OnlineFetchTestRunner.h"
 #include "app/OnlineBufferTestRunner.h"
@@ -132,6 +133,61 @@ int main(int argc, char* argv[]) {
       }
     }
     return lapian::app::RunOnlineCacheTest(options);
+  }
+
+  // T8.3.1：缓存管理探针（设置目录/配额、清空、孤儿清理、只读/磁盘满）。
+  // 默认无 GUI、临时根；`--ui` 额外构造设置对话框与 MainWindow 清理入口。
+  if (HasArgument(argc, argv, "--online-cache-manage-test")) {
+    const bool ui_smoke = HasArgument(argc, argv, "--ui");
+    std::unique_ptr<QCoreApplication> app;
+    if (ui_smoke) {
+      app = std::make_unique<QApplication>(argc, argv);
+    } else {
+      app = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineCacheManageTestOptions options;
+    const QStringList manage_args = QCoreApplication::arguments();
+    for (int i = 1; i < manage_args.size(); ++i) {
+      const QString& arg = manage_args[i];
+      auto take = [&](QString* target) {
+        if (i + 1 < manage_args.size()) {
+          *target = manage_args[++i];
+          return true;
+        }
+        return false;
+      };
+      if (arg == QStringLiteral("--manage-root")) {
+        take(&options.root);
+      } else if (arg.startsWith(QStringLiteral("--manage-root="))) {
+        options.root = arg.mid(static_cast<int>(std::strlen("--manage-root=")));
+      } else if (arg == QStringLiteral("--manage-records-root")) {
+        take(&options.records_root);
+      } else if (arg.startsWith(QStringLiteral("--manage-records-root="))) {
+        options.records_root =
+            arg.mid(static_cast<int>(std::strlen("--manage-records-root=")));
+      } else if (arg == QStringLiteral("--manage-settings-root")) {
+        take(&options.settings_root);
+      } else if (arg.startsWith(QStringLiteral("--manage-settings-root="))) {
+        options.settings_root =
+            arg.mid(static_cast<int>(std::strlen("--manage-settings-root=")));
+      } else if (arg == QStringLiteral("--manage-readonly-root")) {
+        take(&options.readonly_root);
+      } else if (arg.startsWith(QStringLiteral("--manage-readonly-root="))) {
+        options.readonly_root =
+            arg.mid(static_cast<int>(std::strlen("--manage-readonly-root=")));
+      } else if (arg == QStringLiteral("--manage-default-paths")) {
+        options.default_paths = true;
+      } else if (arg == QStringLiteral("--manage-keep")) {
+        options.keep_root = true;
+      }
+    }
+    options.ui_smoke = ui_smoke;
+    return lapian::app::RunOnlineCacheManageTest(options);
   }
 
   // T8.4：可增长读层探针同样无 GUI、离线（本地 faststart 样本 + 临时缓存根）。
@@ -815,7 +871,17 @@ int main(int argc, char* argv[]) {
   }
 
   const auto process_start = std::chrono::steady_clock::now();
-  MainWindow window(nullptr, settings_root);
+  // T8.3.1：所有自检/GUI 回归都不在真实默认缓存上跑启动清理；产品路径默认开启。
+  bool running_test_mode = false;
+  for (int i = 1; i < argc; ++i) {
+    const QString arg = QString::fromLocal8Bit(argv[i]);
+    if (arg.endsWith(QStringLiteral("-test")) ||
+        arg == QStringLiteral("--settings-expect")) {
+      running_test_mode = true;
+      break;
+    }
+  }
+  MainWindow window(nullptr, settings_root, !running_test_mode);
   log_startup("window_created");
   // T7.1：旧 GUI 回归在 OpenFile 后立即导航；保持同步索引语义。
   // 产品路径与 --startup-test 走异步索引（首帧先出，后台扫描）。

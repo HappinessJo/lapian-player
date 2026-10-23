@@ -94,6 +94,15 @@ add_test(NAME lapian_online_cache_test COMMAND lapian_online_cache_test)
 set_tests_properties(lapian_online_cache_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.3.1 缓存管理：默认根/记录根、目录/配额跨会话、清空保留当前会话（部分键）、
+# 在线记录在缓存根外、孤儿清理、磁盘满/非法路径可读错误。纯本地存储。
+add_executable(lapian_online_cache_manage_test online_cache_manage_test.cpp)
+lapian_apply_common_options(lapian_online_cache_manage_test)
+target_link_libraries(lapian_online_cache_manage_test PRIVATE lapian_online lapian_settings)
+add_test(NAME lapian_online_cache_manage_test COMMAND lapian_online_cache_manage_test)
+set_tests_properties(lapian_online_cache_manage_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T8.4 可增长读层：Publish/Published、每读者 AVIO/文件句柄、阻塞读/唤醒、
 # Cancel ≤100ms、EOF/EIO/EXIT、seek/AVSEEK_SIZE、4 读者短压测、4GiB−1 int64、
 # CacheStore OpenPart/淘汰 busy 边界。纯本地，无网络/GUI。
