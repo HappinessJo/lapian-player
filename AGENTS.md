@@ -384,6 +384,8 @@
 | `docs/handoff-2026-10-23-t8.4.md` | v1 | 2026-10-23 | **当前交接**：T8.4 接口/数字/决定/缺口、T8.5 与 T8.6 需要；一个 commit |
 | `docs/next-session-prompt-t8.3.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.3 提示词（缓存存储/配额/续传；300MB/20GB、长路径、停止条件） |
 | `docs/next-session-prompt-t8.4.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.4 提示词（可增长读层；0.3MB 首帧/100 seek/取消 ≤100ms/4 读者 10min；离线测试、停止条件） |
+| `docs/next-session-prompt-t8.5.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.5 提示词（durl 720p；playurl/Range/续传/3 备份/过期刷新；3/3、首帧、停止条件） |
+| `docs/next-session-prompt-t8.2.2.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.2.2 提示词（扫码登录；官方 QR generate/poll、本地渲染、只保留 SESSDATA；非门） |
 | `docs/next-session-prompt-t8.2.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.2 提示词（HTTP 栈自检、SESSDATA/DPAPI、DEC-3、日志脱敏、门/停止条件） |
 
 **变更记录**
@@ -481,4 +483,4 @@
 
 > 完整提示词见 [docs/next-session-prompt.md](docs/next-session-prompt.md)。核心：先读 `AGENTS.md`、`docs/handoff-2026-10-22-t7.7.md`、`docs/preview-release-2026-10-22.md`、`docs/perf/T7.7-acceptance-checklist.md`、`spec.md`、`plan.md`、`tasks.md`、ADR-001–006；T7.7 清单/预检脚本已入库，本机 `verdict=blocked`，P7 2s 复跑 65.33ms；**用户已决定内部预览收口，除非资源到位，不要追正式 T7.7/P14，也不要宣称通过**；以 `git log`/`ctest` 为准，不要重做 T1–T7.11.1（T7.11.1 已修复 P7 边界：2s 64.13ms、1s 27.11ms、1080p60 HEVC 67.31ms）；T7.7 仍需真实 V1–V10、基线机、冷缓存 F1-A1、Explorer 真双击，正式 P14 仍需真实 V10；4K 仍 proxy；T7.5/T7.6 缺口照旧；只做 F1–F8/P1–P14，spec v0.3 冻结；每任务保持 build/ctest/dist 通过并补交接/证据。
 >
-> **v2（在线）走另一条线**：S1/S2 已完成、S3 定稿（T8.0/T8.1/T8.2/T8.3/T8.4 完成）；DEC/B 已拍板（含 **DEC-6 扫码登录，T8.2.2 非门**）、ADR-007 附条件接受；**下一步 T8.5（M1 关键路径）；T8.2.2（扫码）可与 T8.5 并行**，见 [docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)（v0.4）、[plan.md](plan.md) v2 章节、[tasks-v2.md](tasks-v2.md)（v0.8）、[S3 交接](docs/handoff-2026-10-23-s3.md)、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)、[T8.3 证据](docs/perf/v2-online-cache.md)、[T8.3 交接](docs/handoff-2026-10-23-t8.3.md)、[T8.4 证据](docs/perf/v2-online-growing.md)、[T8.4 交接](docs/handoff-2026-10-23-t8.4.md)、[vision](docs/product-v2-vision.md)（v1.1）。不要用本节的 v1 提示词去做 v2。
+> **v2（在线）走另一条线**：S1/S2 已完成、S3 定稿（T8.0/T8.1/T8.2/T8.3/T8.4 完成）；DEC/B 已拍板（含 **DEC-6 扫码登录，T8.2.2 非门**）、ADR-007 附条件接受；**下一步 T8.5（M1 关键路径，提示词 [T8.5](docs/next-session-prompt-t8.5.md)）；T8.2.2（扫码，非门，提示词 [T8.2.2](docs/next-session-prompt-t8.2.2.md)）建议在 T8.5 之后做，确需并行则独立 worktree**，见 [docs/spec-v1.0-delta.md](docs/spec-v1.0-delta.md)（v0.4）、[plan.md](plan.md) v2 章节、[tasks-v2.md](tasks-v2.md)（v0.8）、[S3 交接](docs/handoff-2026-10-23-s3.md)、[T8.1 交接](docs/handoff-2026-10-23-t8.1.md)、[T8.2 证据](docs/perf/v2-online-http-selfcheck.md)、[T8.2 交接](docs/handoff-2026-10-23-t8.2.md)、[T8.3 证据](docs/perf/v2-online-cache.md)、[T8.3 交接](docs/handoff-2026-10-23-t8.3.md)、[T8.4 证据](docs/perf/v2-online-growing.md)、[T8.4 交接](docs/handoff-2026-10-23-t8.4.md)、[vision](docs/product-v2-vision.md)（v1.1）。不要用本节的 v1 提示词去做 v2。
