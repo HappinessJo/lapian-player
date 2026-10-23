@@ -76,6 +76,8 @@ extern "C" {
 #include "media/PreviewDecoder.h"
 #include "online/CacheStore.h"
 #include "online/CredentialStore.h"
+#include "online/IHttpClient.h"
+#include "online/PlayUrl.h"
 
 namespace {
 
@@ -354,6 +356,17 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
             if (snapshot_log_) {
               std::fprintf(stderr, "T5.4 snapshot_failed error=%s\n",
                            error.toUtf8().constData());
+              std::fflush(stderr);
+            }
+          });
+  connect(snapshots_.get(), &SnapshotService::snapshotIndexWarning, this,
+          [this](const QString& warning) {
+            // 截图 PNG 已保存；只是 index.jsonl 追加失败。可见但不回滚截图。
+            statusBar()->showMessage(
+                QStringLiteral("截图清单写入失败：%1").arg(warning), 10000);
+            if (snapshot_log_) {
+              std::fprintf(stderr, "T8.7 snapshot_index_warning error=%s\n",
+                           warning.toUtf8().constData());
               std::fflush(stderr);
             }
           });
@@ -996,6 +1009,8 @@ void MainWindow::ShowEmptyState() {
   }
   online_mode_ = false;
   online_ready_ = false;
+  online_cache_hit_ = false;
+  online_cache_path_.clear();
   // T7.1：空态/切文件前停止后台索引，避免旧结果装到空会话上。
   CancelIndexBuild();
   CancelPendingMarkJump();
@@ -1169,9 +1184,65 @@ void MainWindow::ShowOnlineDialog() {
               BeginOnlineRequest(request);
             });
   }
+  online_dialog_->SetCacheProbe(
+      [this](const QString& bvid, OnlineCacheSummary* summary, QString* error) {
+        return LookupOnlineCacheForDialog(bvid, summary, error);
+      });
   online_dialog_->show();
   online_dialog_->raise();
   online_dialog_->activateWindow();
+}
+
+bool MainWindow::LookupOnlineCacheForDialog(const QString& bvid,
+                                            OnlineCacheSummary* summary,
+                                            QString* error) {
+  if (summary == nullptr) {
+    return false;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (online_cache_ == nullptr) {
+    EnsureOnlineSession();
+  }
+  if (online_cache_ == nullptr) {
+    if (error != nullptr) {
+      *error = QStringLiteral("在线缓存未初始化");
+    }
+    return false;
+  }
+  QVector<lapian::online::CacheEntry> entries;
+  QVector<lapian::online::CacheEntry> broken;
+  QString scan_error;
+  if (!online_cache_->Scan(&entries, &broken, &scan_error)) {
+    if (error != nullptr) {
+      *error = scan_error;
+    }
+    return false;
+  }
+  const lapian::online::CacheEntry* best = nullptr;
+  for (const lapian::online::CacheEntry& entry : entries) {
+    if (!entry.complete || entry.broken || entry.key.bvid != bvid) {
+      continue;
+    }
+    if (best == nullptr || entry.last_access_at > best->last_access_at ||
+        (entry.last_access_at == best->last_access_at &&
+         entry.key.qn > best->key.qn)) {
+      best = &entry;
+    }
+  }
+  if (best == nullptr) {
+    return false;
+  }
+  summary->bvid = bvid;
+  summary->cid = best->key.cid;
+  summary->title = best->title;
+  summary->owner = best->owner;
+  summary->duration_ms = best->duration_ms;
+  summary->qn = best->key.qn;
+  summary->codecid = best->key.codecid;
+  summary->fps = best->fps;
+  return true;
 }
 
 void MainWindow::EnsureOnlineSession() {
@@ -1186,6 +1257,9 @@ void MainWindow::EnsureOnlineSession() {
       1024LL * 1024LL * 1024LL;
   online_cache_ = std::make_unique<lapian::online::CacheStore>(root, quota);
   online_ = std::make_unique<lapian::app::OnlineSession>(online_cache_.get(), this);
+  if (online_test_http_) {
+    online_->SetHttpClientForTest(std::move(online_test_http_));
+  }
   if (online_test_transport_) {
     online_->SetDownloadTransportForTest(std::move(online_test_transport_));
   }
@@ -1230,6 +1304,10 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_mode_ = true;
   online_ready_ = false;
   online_finalized_ = false;
+  online_cache_hit_ = false;
+  online_cache_path_.clear();
+  online_owner_.clear();
+  online_fps_ = 0.0;
   online_bvid_ = request.bvid;
   online_title_ = request.title;
   online_cid_ = request.cid;
@@ -1271,13 +1349,16 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   if (!online_mode_) {
     return false;
   }
+  if (info.cache_hit) {
+    return ApplyOnlineCacheHit(info);
+  }
   if (!info.source || info.part_path.isEmpty() || gfx_ == nullptr ||
       gfx_->d3d_device() == nullptr) {
     online_last_error_ = QStringLiteral("在线首帧打开缺少数据源/图形设备");
     statusBar()->showMessage(online_last_error_, 8000);
     return false;
   }
-  // 截图/记录标识：不写缓存根，先落到图片目录下的 snapshots/（T8.7 再正式化）。
+  // 在线记录：bvid+cid 持久化；截图在 T8.7 走图片目录 + index.jsonl。
   QString pictures = snapshot_pictures_root_for_test_;
   if (pictures.isEmpty()) {
     pictures =
@@ -1395,11 +1476,15 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   }
   current_frame_ = 0;
   online_ready_ = true;
+  online_cache_hit_ = false;
+  online_cache_path_.clear();
   online_bvid_ = info.request.bvid;
   online_title_ = info.request.title;
   online_cid_ = info.request.cid;
   online_qn_ = info.playurl.quality;
   online_codecid_ = info.playurl.codecid;
+  online_owner_ = info.request.owner;
+  online_fps_ = session_->info().video.frame_rate.ToDouble();
   online_total_bytes_ = info.source->Size();
   online_published_bytes_ = info.source->Published();
   online_part_path_ = info.part_path;
@@ -1466,16 +1551,19 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     waveform_action_->setEnabled(true);
   }
 
-  // T8.6 标记：会话内可用，不写 sidecar；完整在线记录留给 T8.7。
-  marks_ = std::make_unique<lapian::core::MarkStore>(
-      lapian::core::MarkStore::OpenSessionOnly(display_path_utf8,
-                                               media.duration_us));
-  marks_dirty_ = false;
-  if (mark_panel_ != nullptr) {
-    mark_panel_->Clear();
-  }
-  RefreshMarksUi();
-  UpdateMarkStorageUi();
+  // T8.7 在线记录：bvid+cid 持久化；不再使用 T8.6 的会话内假标记。
+  OnlineOpenContext mark_context;
+  mark_context.bvid = info.request.bvid;
+  mark_context.cid = info.request.cid;
+  mark_context.title = info.request.title;
+  mark_context.owner = info.request.owner;
+  mark_context.qn = info.playurl.quality;
+  mark_context.codecid = info.playurl.codecid;
+  mark_context.fps = media.video.frame_rate.ToDouble();
+  mark_context.duration_ms = info.request.duration_ms;
+  mark_context.total_bytes = info.source->Size();
+  mark_context.cache_hit = false;
+  LoadOnlineMarks(mark_context);
 
   // 音频跟随：AudioEngine 自己打开另一个 GrowingFormat；读到 frontier 会等待。
   if (media.has_audio) {
@@ -1543,6 +1631,122 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   return true;
 }
 
+bool MainWindow::ApplyOnlineCacheHit(
+    const lapian::app::OnlineReadyInfo& info) {
+  if (info.cache_mp4_path.isEmpty()) {
+    online_last_error_ = QStringLiteral("缓存命中缺少 data.mp4 路径");
+    statusBar()->showMessage(online_last_error_, 8000);
+    online_mode_ = false;
+    online_ready_ = false;
+    return false;
+  }
+  OnlineOpenContext online;
+  online.bvid = info.request.bvid;
+  online.cid = info.request.cid;
+  online.title = info.title;
+  online.owner = info.owner;
+  online.qn = info.qn;
+  online.codecid = info.codecid;
+  online.fps = info.fps;
+  online.duration_ms = info.duration_ms;
+  online.total_bytes = info.total_bytes;
+  online.cache_hit = true;
+
+  const std::shared_ptr<lapian::media::MediaSession> previous = session_;
+  OpenLocalMedia(info.cache_mp4_path, &online);
+  if (session_ == previous || !online_ready_ || !online_cache_hit_ ||
+      session_ == nullptr) {
+    online_last_error_ = QStringLiteral("缓存命中打开失败：%1")
+                             .arg(QDir::toNativeSeparators(info.cache_mp4_path));
+    if (info_bar_ != nullptr) {
+      info_bar_->SetError(online_last_error_);
+    }
+    statusBar()->showMessage(online_last_error_, 10000);
+    online_mode_ = false;
+    online_ready_ = false;
+    return false;
+  }
+  if (online_cancel_action_ != nullptr) {
+    online_cancel_action_->setEnabled(false);
+  }
+  return true;
+}
+
+void MainWindow::LoadOnlineMarks(const OnlineOpenContext& online) {
+  if (session_ == nullptr) {
+    return;
+  }
+  lapian::core::MarkStoreOptions options;
+  if (!online_records_root_for_test_.isEmpty()) {
+    options.appdata_online_dir =
+        QDir::toNativeSeparators(online_records_root_for_test_).toUtf8().toStdString();
+  }
+  lapian::core::FrameLookup lookup;
+  const lapian::media::FrameIndex& index = session_->index();
+  if (index.IsReady() && !index.empty()) {
+    lookup.frame_count = static_cast<std::int64_t>(index.size());
+    lookup.pts_of_frame = [&index](std::int64_t frame, std::int64_t* pts_us) {
+      const lapian::media::FrameIndexEntry* entry = index.Entry(frame);
+      if (entry == nullptr) {
+        return false;
+      }
+      *pts_us = entry->pts_us;
+      return true;
+    };
+    lookup.frame_of_pts = [&index](std::int64_t pts_us, std::int64_t* frame) {
+      return index.FindExactPts(pts_us, frame);
+    };
+  }
+  const double fps = session_->info().video.frame_rate.ToDouble();
+  const QByteArray bvid_utf8 = online.bvid.toUtf8();
+  marks_ = std::make_unique<lapian::core::MarkStore>(
+      lapian::core::MarkStore::OpenOnline(
+          std::string(bvid_utf8.constData(),
+                      static_cast<std::size_t>(bvid_utf8.size())),
+          online.cid, fps > 0.0 ? fps : online.fps, online.qn, online.codecid,
+          options, lookup));
+  marks_dirty_ = false;
+  if (mark_panel_ != nullptr) {
+    mark_panel_->Clear();
+  }
+  RefreshMarksUi();
+  ShowMarkWarnings();
+}
+
+void MainWindow::ReconcileOnlineMarks() {
+  if (marks_ == nullptr || !marks_->online() || session_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty()) {
+    return;
+  }
+  lapian::core::FrameLookup lookup;
+  lookup.frame_count = static_cast<std::int64_t>(index.size());
+  lookup.pts_of_frame = [&index](std::int64_t frame, std::int64_t* pts_us) {
+    const lapian::media::FrameIndexEntry* entry = index.Entry(frame);
+    if (entry == nullptr) {
+      return false;
+    }
+    *pts_us = entry->pts_us;
+    return true;
+  };
+  lookup.frame_of_pts = [&index](std::int64_t pts_us, std::int64_t* frame) {
+    return index.FindExactPts(pts_us, frame);
+  };
+  bool changed = false;
+  marks_->ReconcileFrames(lookup, nullptr, &changed);
+  if (!changed) {
+    return;
+  }
+  marks_dirty_ = true;
+  SaveMarks(false);
+  RefreshMarksUi();
+  ShowMarkWarnings();
+  statusBar()->showMessage(
+      QStringLiteral("在线记录帧率/帧号与当前流不同，已按 PTS 映射"), 6000);
+}
+
 void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
                                   const QString& message) {
   if (!online_mode_) {
@@ -1555,6 +1759,9 @@ void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
       break;
     case OnlineState::kBuffering:
       status_label_->setText(base_info_ + QStringLiteral(" · 在线：缓冲中…"));
+      break;
+    case OnlineState::kCacheHit:
+      status_label_->setText(base_info_ + QStringLiteral(" · 在线：缓存命中"));
       break;
     case OnlineState::kReady:
       // 首帧后状态栏保留档位/实际 fps/降帧提示，不被“已就绪”覆盖。
@@ -1688,6 +1895,7 @@ void MainWindow::StartOnlineIndexBuild() {
                   session_->InstallOnlineIndex(std::move(built->index),
                                                built->build_ms);
                   ApplyIndexState();
+                  ReconcileOnlineMarks();
                   if (online_index_complete_) {
                     statusBar()->showMessage(
                         QStringLiteral("在线索引完成：%1 帧").arg(online_stable_frames_),
@@ -1988,6 +2196,14 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (!online_ && !online_mode_) {
     return;
   }
+  const bool log = qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG");
+  auto mark = [log](const char* step) {
+    if (log) {
+      std::fprintf(stderr, "T8.7 online_shutdown step=%s\n", step);
+      std::fflush(stderr);
+    }
+  };
+  mark("start");
   if (playback_) {
     playback_->Pause();
   }
@@ -1995,8 +2211,11 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (online_) {
     online_->Cancel();
   }
+  mark("cancelled");
   StopOnlineSeekWorker();
+  mark("seek_stopped");
   StopOnlineIndexBuild();
+  mark("index_stopped");
   if (playback_) {
     playback_->SetAudioEngine(nullptr);
   }
@@ -2008,6 +2227,7 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
     waveform_->Cancel();
     waveform_.reset();
   }
+  mark("audio_waveform_closed");
   if (session_) {
     if (playback_) {
       playback_->SetSession(nullptr);
@@ -2015,10 +2235,12 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
     session_->Close();
     session_.reset();
   }
+  mark("session_closed");
   // HasPendingFinalize 只会在下载已完整、写句柄已关闭、进入 awaiting 时为真。
   // 即使调用方传 false（切到另一个在线/本地文件），也应把已完整的数据落盘；
   // 未完整的下载不会进入这里，仍按取消语义保留 .part。
   if (online_ && online_->HasPendingFinalize()) {
+    mark("finalize_begin");
     QString error;
     if (!online_->FinalizeAfterReadersStopped(&error)) {
       online_last_error_ = error;
@@ -2027,11 +2249,13 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
     } else {
       online_finalized_ = true;
     }
+    mark("finalize_end");
   }
   if (online_) {
     online_->Close();
     online_.reset();
   }
+  mark("online_closed");
   if (playback_) {
     playback_->SetDecodeGate({});
     playback_->SetBufferOnAudioStall(false);
@@ -2041,6 +2265,10 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   }
   online_mode_ = false;
   online_ready_ = false;
+  online_cache_hit_ = false;
+  online_cache_path_.clear();
+  online_owner_.clear();
+  online_fps_ = 0.0;
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
@@ -2048,6 +2276,7 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_display_path_.clear();
   online_published_bytes_ = 0;
   online_total_bytes_ = 0;
+  mark("end");
 }
 
 QString MainWindow::OnlineStateForTest() const {
@@ -2113,16 +2342,11 @@ void MainWindow::OpenFile(const QString& path) {
   if (path.isEmpty()) {
     return;
   }
-  // T8.6：切到本地文件前先停在线下载/reader（保留 .part，不 finalize 未完成项）。
-  if (online_mode_ || online_) {
-    ShutdownOnlineSession(false);
-  }
-  online_mode_ = false;
-  online_ready_ = false;
-  if (playback_) {
-    playback_->SetDecodeGate({});
-    playback_->SetBufferOnAudioStall(false);
-  }
+  OpenLocalMedia(path, nullptr);
+}
+
+void MainWindow::OpenLocalMedia(const QString& path,
+                                const OnlineOpenContext* online) {
   // T7.1：打开路径分段计时；只在冷启动日志开启时输出。
   QElapsedTimer open_timer;
   open_timer.start();
@@ -2135,6 +2359,20 @@ void MainWindow::OpenFile(const QString& path) {
   const QString native_path = QDir::toNativeSeparators(path);
   const QByteArray utf8 = native_path.toUtf8();
   const std::string path_utf8(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+
+  if (online == nullptr) {
+  // T8.6：切到本地文件前先停在线下载/reader（保留 .part，不 finalize 未完成项）。
+  if (online_mode_ || online_) {
+    ShutdownOnlineSession(false);
+  }
+  online_mode_ = false;
+  online_ready_ = false;
+  online_cache_hit_ = false;
+  online_cache_path_.clear();
+  if (playback_) {
+    playback_->SetDecodeGate({});
+    playback_->SetBufferOnAudioStall(false);
+  }
   // T7.5：网络路径先在有限时间内预检。断开的映射盘/不可达 UNC 的 SMB 连接
   // 默认要 ~20s 才失败；如果直接进 avformat_open_input，UI 线程会冻结超过
   // spec §4.4 的 5s。预检失败时保留当前会话与播放状态，只报可读错误。
@@ -2179,6 +2417,7 @@ void MainWindow::OpenFile(const QString& path) {
     }
     readable.close();
   }
+  }  // online == nullptr：本地路径的预检/权限提示
   CancelPendingMarkJump();
   if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
@@ -2253,19 +2492,76 @@ void MainWindow::OpenFile(const QString& path) {
     first_upload_ms = static_cast<double>(upload_timer.nsecsElapsed()) / 1.0e6;
   }
   RememberDisplayedFrame(frame.av_frame, info.rotation.counterclockwise_degrees, 0);
+  current_pts_us_ = frame.pts_us;
+
+  if (online != nullptr) {
+    online_mode_ = true;
+    online_ready_ = true;
+    online_cache_hit_ = online->cache_hit;
+    online_bvid_ = online->bvid;
+    online_title_ = online->title;
+    online_cid_ = online->cid;
+    online_qn_ = online->qn;
+    online_codecid_ = online->codecid;
+    online_owner_ = online->owner;
+    online_fps_ = info.video.frame_rate.ToDouble();
+    online_total_bytes_ =
+        online->total_bytes > 0 ? online->total_bytes : QFileInfo(native_path).size();
+    online_published_bytes_ = online_total_bytes_;
+    online_cache_path_ = online->cache_hit ? native_path : QString();
+    online_part_path_.clear();
+    online_stable_frames_ = 0;
+    online_index_complete_ = false;
+    online_spans_.clear();
+    online_last_error_.clear();
+    if (online_cancel_action_ != nullptr) {
+      online_cancel_action_->setEnabled(false);
+    }
+    LoadOnlineMarks(*online);
+  }
 
   const QFileInfo file_info(path);
-  setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
+  if (online != nullptr) {
+    const QString label = online->title.isEmpty() ? online->bvid : online->title;
+    const QString quality = lapian::online::QualityName(online->qn);
+    setWindowTitle(QStringLiteral("%1 — 拉片软件（在线 · 缓存命中 · %2）")
+                       .arg(label, quality));
+  } else {
+    setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
+  }
 
   info_bar_->SetMedia(info, session_->IsVfrSuspect());
-  status_label_->setText(base_info_ + QStringLiteral(" · ") +
-                         (frame.hardware ? QStringLiteral("硬解") : QStringLiteral("软解")));
-
-  if (session_->IsVfrSuspect()) {
+  if (online != nullptr) {
+    const QString quality = lapian::online::QualityName(online->qn);
+    QString online_detail = QStringLiteral(" · 在线缓存命中 · %1 · %2x%3")
+                                .arg(quality)
+                                .arg(info.video.width)
+                                .arg(info.video.height);
+    if (online_fps_ > 0.0) {
+      online_detail +=
+          QStringLiteral(" · %1fps").arg(QString::number(online_fps_, 'f', 1));
+    }
+    if (online_fps_ > 0.0 && online_fps_ < 50.0) {
+      online_detail +=
+          QStringLiteral("（当前流帧率；若源片为 60fps，帧号不同步/约 1/2）");
+    }
+    status_label_->setText(base_info_ + online_detail);
     statusBar()->showMessage(
-        QStringLiteral("可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"), 8000);
+        QStringLiteral("缓存命中：已打开本地 data.mp4（0 网络）"), 8000);
   } else {
-    statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
+    status_label_->setText(base_info_ + QStringLiteral(" · ") +
+                           (frame.hardware ? QStringLiteral("硬解")
+                                           : QStringLiteral("软解")));
+  }
+
+  if (online == nullptr) {
+    if (session_->IsVfrSuspect()) {
+      statusBar()->showMessage(
+          QStringLiteral("可变帧率（VFR）：帧号按显示帧计数，时间码不承诺与帧号严格对应"),
+          8000);
+    } else {
+      statusBar()->showMessage(QStringLiteral("已打开，停在第 0 帧"));
+    }
   }
 
   // 新文件从“循环：关”开始；A/B 需要索引，扫描中由 SyncLoopUi 禁用。
@@ -2422,13 +2718,16 @@ void MainWindow::BeginIndexScan() {
   speed_label_->setText(FormatSpeed(rate_));
   SyncLoopUi();
   // 索引就绪后再加载标记：MarkStore 需要索引做 frame+pts 校正。
-  marks_.reset();
-  marks_dirty_ = false;
-  if (mark_panel_ != nullptr) {
-    mark_panel_->Clear();
-  }
-  if (timeline_ != nullptr) {
-    timeline_->SetMarks({});
+  // T8.7 缓存命中：在线记录已在打开时加载并先于索引可见，扫描中不能清空。
+  if (!online_ready_) {
+    marks_.reset();
+    marks_dirty_ = false;
+    if (mark_panel_ != nullptr) {
+      mark_panel_->Clear();
+    }
+    if (timeline_ != nullptr) {
+      timeline_->SetMarks({});
+    }
   }
   preview_.reset();
   if (startup_log_) {
@@ -2512,6 +2811,9 @@ void MainWindow::ApplyIndexReady(std::uint64_t generation) {
   }
   index_scanning_ = false;
   ApplyIndexState();
+  if (online_ready_) {
+    ReconcileOnlineMarks();
+  }
   if (startup_log_) {
     const lapian::media::MediaOpenTimings& timings = session_->last_open_timings();
     std::fprintf(stderr,
@@ -2545,12 +2847,14 @@ void MainWindow::ApplyIndexState() {
   const std::int64_t frames =
       ready ? static_cast<std::int64_t>(session_->index().size()) : 0;
   const lapian::core::TotalFrameCount container_total = ContainerTotal();
+  // 缓存命中是完整本地文件：索引/seek/步进全部按本地口径，不走部分索引。
+  const bool online_growing = online_ready_ && !online_cache_hit_;
   const bool online_can_seek =
-      online_ready_ && container_total.has_value() &&
+      online_growing && container_total.has_value() &&
       (online_stable_frames_ > 0 || online_index_complete_);
   if (timeline_ != nullptr) {
     const std::int64_t timeline_frames =
-        online_ready_
+        online_growing
             ? (online_index_complete_ && online_stable_frames_ > 0
                    ? static_cast<std::int64_t>(online_stable_frames_)
                    : (container_total.has_value() ? container_total.value() : 0))
@@ -2579,7 +2883,7 @@ void MainWindow::ApplyIndexState() {
   // 不因为后台索引完成而改写这一提示语义。
   if (session_->IsVfrSuspect()) {
     info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
-  } else if (online_ready_) {
+  } else if (online_growing) {
     info_bar_->SetTotal(online_index_complete_
                             ? lapian::core::TotalFrameCount::Exact(
                                   online_stable_frames_)
@@ -2589,7 +2893,7 @@ void MainWindow::ApplyIndexState() {
   }
   SyncLoopUi();
   LoadMarksForCurrentSession();
-  if (ready && !online_mode_) {
+  if (ready && (!online_mode_ || online_cache_hit_)) {
     // T2.9：索引就绪后再预热预览器；在线部分索引没有本地路径，预览器禁用。
     preview_ = std::make_unique<lapian::media::PreviewDecoder>();
     preview_->Configure(session_->path_utf8(), session_->video_stream_index(),
@@ -2604,12 +2908,13 @@ void MainWindow::LoadMarksForCurrentSession() {
     return;
   }
   if (online_ready_) {
+    // T8.7：在线记录已在 ApplyOnlineReady/缓存命中打开时加载；这里不再用
+    // 会话内空标记覆盖，也不重置未保存状态。
     if (!marks_) {
       marks_ = std::make_unique<lapian::core::MarkStore>(
           lapian::core::MarkStore::OpenSessionOnly(session_->path_utf8(),
                                                    session_->info().duration_us));
     }
-    marks_dirty_ = false;
     return;
   }
   // T5.2：用当前索引构造 FrameLookup，让 MarkStore 做 frame+pts 校正；
@@ -2747,6 +3052,53 @@ void MainWindow::SetOnlineCacheRootForTest(const QString& root) {
   }
   loaded_settings_.cache_root = root;
   online_cache_.reset();
+}
+
+QString MainWindow::OnlineCacheRootForTest() const {
+  if (online_cache_ != nullptr) {
+    return online_cache_->root();
+  }
+  if (!loaded_settings_.cache_root.isEmpty()) {
+    return loaded_settings_.cache_root;
+  }
+  return lapian::online::CacheStore::DefaultRoot();
+}
+
+void MainWindow::SetOnlineRecordsRootForTest(const QString& root) {
+  online_records_root_for_test_ = root;
+}
+
+QString MainWindow::OnlineRecordPathForTest() const {
+  if (marks_ == nullptr || !marks_->online()) {
+    return QString();
+  }
+  return QString::fromStdString(marks_->storage_path());
+}
+
+QString MainWindow::OnlineSnapshotIndexPathForTest() const {
+  if (snapshot_last_path_.isEmpty()) {
+    return QString();
+  }
+  return QDir(QFileInfo(snapshot_last_path_).absolutePath())
+      .filePath(QStringLiteral("index.jsonl"));
+}
+
+int MainWindow::OnlinePlayUrlRequestsForTest() const {
+  return online_ == nullptr ? 0 : online_->PlayUrlRequestsForTest();
+}
+
+void MainWindow::SetOnlineHttpClientForTest(
+    std::unique_ptr<lapian::online::IHttpClient> client) {
+  if (online_ != nullptr) {
+    online_->SetHttpClientForTest(std::move(client));
+    return;
+  }
+  online_test_http_ = std::move(client);
+}
+
+void MainWindow::ClearOnlineTestPlayUrlForTest() {
+  has_online_test_playurl_ = false;
+  online_test_playurl_.reset();
 }
 
 void MainWindow::SetOnlineTransportForTest(
@@ -3369,6 +3721,18 @@ void MainWindow::CaptureSnapshot() {
   request.rotation_counterclockwise_degrees = displayed_rotation_;
   request.fps_num = session_->info().video.frame_rate.num;
   request.fps_den = session_->info().video.frame_rate.den;
+  if (online_ready_) {
+    request.online = true;
+    request.online_bvid = online_bvid_;
+    request.online_cid = online_cid_;
+    request.online_qn = online_qn_;
+    request.online_codecid = online_codecid_;
+    request.online_fps = online_fps_ > 0.0
+                             ? online_fps_
+                             : session_->info().video.frame_rate.ToDouble();
+    request.online_pts_us = current_pts_us_;
+    request.online_appdata_root = online_records_root_for_test_;
+  }
 
   // 按键路径只做 av_frame_ref（O(1)）；回读/转换/编码/写盘全在工作线程。
   QElapsedTimer timer;
@@ -3980,7 +4344,7 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
-  if (online_ready_) {
+  if (online_ready_ && !online_cache_hit_) {
     const lapian::core::TotalFrameCount container = ContainerTotal();
     std::int64_t last_frame = -1;
     if (online_index_complete_ && online_stable_frames_ > 0) {
@@ -4174,27 +4538,42 @@ void MainWindow::ShowOpenError(const QString& message) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+  const bool close_log = qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG");
+  auto close_mark = [close_log](const char* step) {
+    if (close_log) {
+      std::fprintf(stderr, "T8.7 close step=%s\n", step);
+      std::fflush(stderr);
+    }
+  };
+  close_mark("start");
   // T8.1：在线解析中关窗必须取消并 join 工作线程，不能把请求/线程留给析构。
   if (online_dialog_ != nullptr) {
     online_dialog_->Shutdown();
   }
+  close_mark("dialog");
   // T8.6：关窗 ≤1s：先取消下载/唤醒 reader，再按“音频/波形/索引/seek →
   // MediaSession → MarkComplete”的顺序收尾；reader 先停，rename 不 busy。
   if (online_mode_ || online_) {
     ShutdownOnlineSession(true);
   }
+  close_mark("online");
   // T6.3：先把音量/波形落盘；它独立于截图/标记的等待链，失败也不阻止关窗。
   FlushSettings();
+  close_mark("settings");
   CancelPendingMarkJump();
   // 关窗前把已按下的截图任务写完，避免用户以为存了却丢文件。
   if (snapshots_ != nullptr) {
     snapshots_->Drain();
   }
+  close_mark("snapshots");
   if (!FlushMarksOnClose()) {
+    close_mark("marks_failed");
     event->ignore();
     return;
   }
+  close_mark("marks");
   QMainWindow::closeEvent(event);
+  close_mark("end");
 }
 
 void MainWindow::AddMarkAtCurrentFrame() {
@@ -4210,6 +4589,8 @@ void MainWindow::ApplyAddMark() {
   if (session_ == nullptr || !session_->IsOpen() || marks_ == nullptr) {
     return;
   }
+  QElapsedTimer add_timer;
+  add_timer.start();
   // 先提交侧栏里未保存的标签/备注，避免增删标记时被列表刷新覆盖。
   FlushMarkEditor();
   const lapian::media::FrameIndex& index = session_->index();
@@ -4238,14 +4619,15 @@ void MainWindow::ApplyAddMark() {
       QStringLiteral("已添加标记：帧 %1 · %2 · %3")
           .arg(static_cast<qlonglong>(current_frame_))
           .arg(saved ? QStringLiteral("已保存") : QStringLiteral("未保存"))
-          .arg(online_ready_ ? QStringLiteral("会话内（完整记录 T8.7）")
-                            : (marks_->using_fallback()
-                                   ? QStringLiteral("%APPDATA% 回退")
-                                   : QStringLiteral("sidecar"))),
+          .arg(marks_->online()
+                   ? QStringLiteral("在线记录")
+                   : (marks_->using_fallback() ? QStringLiteral("%APPDATA% 回退")
+                                               : QStringLiteral("sidecar"))),
       3000);
   if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
-    std::fprintf(stderr, "T5.2 mark_add frame=%lld count=%d\n",
-                 static_cast<long long>(current_frame_), MarkCountForTest());
+    std::fprintf(stderr, "T5.2 mark_add frame=%lld count=%d total_ms=%.2f\n",
+                 static_cast<long long>(current_frame_), MarkCountForTest(),
+                 static_cast<double>(add_timer.nsecsElapsed()) / 1.0e6);
     std::fflush(stderr);
   }
 }
@@ -4429,7 +4811,16 @@ bool MainWindow::SaveMarks(bool show_errors) {
   if (marks_ == nullptr || !marks_dirty_) {
     return true;
   }
+  QElapsedTimer save_timer;
+  save_timer.start();
   const lapian::core::SaveResult result = marks_->Save();
+  if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
+    std::fprintf(stderr, "T8.7 mark_save ms=%.2f ok=%d online=%d path=%s\n",
+                 static_cast<double>(save_timer.nsecsElapsed()) / 1.0e6,
+                 result.ok ? 1 : 0, marks_->online() ? 1 : 0,
+                 result.path.c_str());
+    std::fflush(stderr);
+  }
   if (result.ok) {
     marks_dirty_ = false;
     UpdateMarkStorageUi();
@@ -4465,8 +4856,13 @@ void MainWindow::UpdateMarkStorageUi() {
   if (marks_ == nullptr || mark_panel_ == nullptr) {
     return;
   }
+  if (marks_ != nullptr && marks_->online()) {
+    mark_panel_->SetStorage(QString::fromStdString(marks_->storage_path()), false);
+    mark_panel_->SetWarnings(marks_->warnings());
+    return;
+  }
   if (online_ready_) {
-    mark_panel_->SetStorage(QStringLiteral("在线会话内（完整记录 T8.7）"), false);
+    mark_panel_->SetStorage(QStringLiteral("在线会话内（记录未初始化）"), false);
     mark_panel_->SetWarnings(marks_->warnings());
     return;
   }
@@ -4564,7 +4960,7 @@ void MainWindow::ShowMarkWarnings() {
       blocking = true;
     }
   }
-  if (blocking) {
+  if (blocking && (marks_ == nullptr || !marks_->online())) {
     QMessageBox::warning(this, QStringLiteral("标记文件提示"),
                          lines.join(QStringLiteral("\n\n")));
   }
@@ -4724,8 +5120,16 @@ bool MainWindow::DrainSnapshotsForTest() {
   if (snapshots_ == nullptr) {
     return false;
   }
+  QElapsedTimer drain_timer;
+  drain_timer.start();
   snapshots_->Drain();
+  const double drain_ms = static_cast<double>(drain_timer.nsecsElapsed()) / 1.0e6;
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  if (snapshot_log_) {
+    std::fprintf(stderr, "T8.7 snapshot_drain ms=%.2f pending=%d\n", drain_ms,
+                 snapshots_->PendingCount());
+    std::fflush(stderr);
+  }
   return snapshots_->PendingCount() == 0;
 }
 

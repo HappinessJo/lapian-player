@@ -39,4 +39,29 @@ SnapshotDirectory ResolveSnapshotDirectory(const QString& video_path,
                                            const QString& pictures_root,
                                            QString* error);
 
+// T8.7 在线截图（delta O10）：
+// 目录 %USERPROFILE%\Pictures\拉片软件\<bvid>\；不可写时回退
+// %APPDATA%\拉片软件\online\snapshots\<bvid>\。
+// appdata_online_root 为空时使用 %APPDATA%\拉片软件\online（测试可注入）。
+struct OnlineSnapshotDirectory {
+  QString path;     // 空表示主目录与回退目录都不可写
+  bool fallback = false;
+  QString reason;   // 回退原因，可直接用于状态栏提示
+};
+
+OnlineSnapshotDirectory ResolveOnlineSnapshotDirectory(
+    const QString& bvid, const QString& pictures_root,
+    const QString& appdata_online_root, QString* error);
+
+// <bvid>_f<frame>_<HH-MM-SS-FF>（重名加 _1、_2…，由 SnapshotFilePath 负责）。
+QString BuildOnlineSnapshotBaseName(const QString& bvid, std::int64_t frame,
+                                    int fps_num, int fps_den);
+
+// 截图目录内 index.jsonl 追加一行；编码/写盘全部成功后才调用。
+// 失败时回滚到追加前的文件长度，不留下半条 JSON。
+bool AppendOnlineSnapshotIndex(const QString& directory, const QString& bvid,
+                               std::int64_t cid, int qn, int codecid, double fps,
+                               std::int64_t frame, std::int64_t pts_us,
+                               const QString& png_path, QString* error);
+
 }  // namespace lapian::snapshot

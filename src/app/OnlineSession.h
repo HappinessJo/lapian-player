@@ -51,6 +51,7 @@ enum class OnlineState {
   kIdle = 0,
   kPreparing,
   kBuffering,
+  kCacheHit,
   kReady,
   kStalled,
   kSeekingWait,
@@ -80,6 +81,16 @@ struct OnlineReadyInfo {
   QString part_path;
   lapian::online::PlayUrlData playurl;
   OnlineRequest request;
+  // T8.7：完整缓存命中时不建 GrowingSource/DownloadJob，直接打开 data.mp4。
+  bool cache_hit = false;
+  QString cache_mp4_path;
+  QString title;
+  QString owner;
+  qint64 duration_ms = 0;
+  qint64 total_bytes = 0;
+  int qn = 0;
+  int codecid = 0;
+  double fps = 0.0;
 };
 
 class OnlineSession : public QObject {
@@ -127,6 +138,8 @@ class OnlineSession : public QObject {
   int qn() const { return qn_; }
   int codecid() const { return codecid_; }
   bool ready_emitted() const { return ready_emitted_; }
+  bool cache_hit() const { return cache_hit_; }
+  QString cache_mp4_path() const;
   bool HasPendingFinalize() const;
   // reader 全部关闭后调用；内部仍走 CacheStore::MarkComplete。
   bool FinalizeAfterReadersStopped(QString* error);
@@ -147,6 +160,10 @@ class OnlineSession : public QObject {
 
   void SetState(OnlineState state, const QString& message);
   void PublishProgress();
+  // 返回 kHit 时已安排 ready 回调；kError 时 *error 可读（不联网）；kMiss 继续取流。
+  enum class CacheLookupResult { kMiss, kHit, kError };
+  CacheLookupResult TryCacheHit(const OnlineRequest& request, QString* error);
+  void EmitCacheHitReady();
   void StartPlayUrlWorker(std::uint64_t generation);
   void JoinPlayUrlWorker();
   bool BuildPlan(const lapian::online::PlayUrlData& data,
@@ -188,6 +205,9 @@ class OnlineSession : public QObject {
   std::atomic<bool> closing_{false};
   bool ready_emitted_ = false;
   bool finalize_pending_ = false;
+  bool cache_hit_ = false;
+  QString cache_mp4_path_;
+  lapian::online::CacheEntry cache_entry_;
 
   StateCallback state_callback_;
   ProgressCallback progress_callback_;

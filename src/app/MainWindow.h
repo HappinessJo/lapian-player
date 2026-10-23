@@ -21,6 +21,7 @@
 #include "media/OnlineIndexBuilder.h"
 
 struct AVFrame;
+struct OnlineCacheSummary;
 
 class QAction;
 class QCloseEvent;
@@ -59,6 +60,7 @@ class WaveformGenerator;
 namespace lapian::online {
 class CacheStore;
 class IDownloadTransport;
+class IHttpClient;
 struct PlayUrlData;
 }  // namespace lapian::online
 
@@ -269,6 +271,18 @@ class MainWindow : public QMainWindow {
   void SetMarkAppDataRootForTest(const QString& root);
   // T8.6 E2E：在开始在线会话前覆盖缓存根（不写用户默认目录）。
   void SetOnlineCacheRootForTest(const QString& root);
+  QString OnlineCacheRootForTest() const;
+  // T8.7 E2E：在线记录/截图回退根（空 = 真实 %APPDATA%\拉片软件\online）。
+  void SetOnlineRecordsRootForTest(const QString& root);
+  QString OnlineRecordPathForTest() const;
+  QString OnlineSnapshotIndexPathForTest() const;
+  bool OnlineCacheHitForTest() const { return online_cache_hit_; }
+  QString OnlineCachePathForTest() const { return online_cache_path_; }
+  int OnlinePlayUrlRequestsForTest() const;
+  // T8.7 断网验证：注入不会成功的 HTTP 客户端；命中缓存时它不应被调用。
+  void SetOnlineHttpClientForTest(
+      std::unique_ptr<lapian::online::IHttpClient> client);
+  void ClearOnlineTestPlayUrlForTest();
   // T8.6 缓冲耗尽/错误注入：只影响下一次在线会话，不进入产品默认路径。
   void SetOnlineTransportForTest(
       std::unique_ptr<lapian::online::IDownloadTransport> transport);
@@ -323,11 +337,31 @@ class MainWindow : public QMainWindow {
   void CaptureSnapshot();
 
  private:
+  // T8.7：缓存命中的在线身份；用于在本地打开 data.mp4 后仍按 bvid+cid 存记录。
+  struct OnlineOpenContext {
+    QString bvid;
+    QString title;
+    QString owner;
+    qint64 cid = 0;
+    int qn = 0;
+    int codecid = 0;
+    double fps = 0.0;
+    qint64 duration_ms = 0;
+    qint64 total_bytes = 0;
+    bool cache_hit = false;
+  };
+
   void ShowEmptyState();
   void ShowOnlineDialog();
+  bool LookupOnlineCacheForDialog(const QString& bvid,
+                                  OnlineCacheSummary* summary, QString* error);
   void EnsureOnlineSession();
   void BeginOnlineRequest(const lapian::app::OnlineRequest& request);
   bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
+  bool ApplyOnlineCacheHit(const lapian::app::OnlineReadyInfo& info);
+  void OpenLocalMedia(const QString& path, const OnlineOpenContext* online);
+  void LoadOnlineMarks(const OnlineOpenContext& online);
+  void ReconcileOnlineMarks();
   void ApplyOnlineProgress(const lapian::app::OnlineProgress& progress);
   void ApplyOnlineState(lapian::app::OnlineState state, const QString& message);
   void StartOnlineIndexBuild();
@@ -497,10 +531,16 @@ class MainWindow : public QMainWindow {
   bool online_mode_ = false;
   bool online_ready_ = false;
   bool online_finalized_ = false;
+  bool online_cache_hit_ = false;
+  QString online_cache_path_;
+  QString online_owner_;
+  double online_fps_ = 0.0;
   bool has_online_test_playurl_ = false;
   qint64 online_test_threshold_ = 0;
   std::unique_ptr<lapian::online::IDownloadTransport> online_test_transport_;
+  std::unique_ptr<lapian::online::IHttpClient> online_test_http_;
   std::shared_ptr<lapian::online::PlayUrlData> online_test_playurl_;
+  QString online_records_root_for_test_;
   int online_buffer_event_count_ = 0;
   bool online_gate_last_ = true;
   qint64 online_gate_published_ = 0;

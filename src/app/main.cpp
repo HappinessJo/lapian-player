@@ -48,6 +48,7 @@
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineM1TestRunner.h"
+#include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
@@ -373,6 +374,13 @@ int main(int argc, char* argv[]) {
   qint64 online_m1_cid = 0;
   int online_m1_timeout_ms = 20000;
   bool online_m1_cancel_only = false;
+  // T8.7：完整缓存命中/断网/在线记录 E2E。
+  bool online_offline_test = false;
+  QString online_offline_media;
+  QString online_records_root;
+  bool online_offline_keep_cache = false;
+  bool online_offline_skip_corrupt = false;
+  bool online_offline_default_paths = false;
   bool online_buffer_test = false;
   QString online_buffer_media;
   int online_buffer_timeout_ms = 20000;
@@ -497,6 +505,20 @@ int main(int argc, char* argv[]) {
       online_m1_cancel_only = true;
     } else if (arguments[i] == QStringLiteral("--online-buffer-test")) {
       online_buffer_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-offline-test")) {
+      online_offline_test = true;
+    } else if (arguments[i] == QStringLiteral("--offline-media") &&
+               i + 1 < arguments.size()) {
+      online_offline_media = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--online-records-root") &&
+               i + 1 < arguments.size()) {
+      online_records_root = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--offline-keep-cache")) {
+      online_offline_keep_cache = true;
+    } else if (arguments[i] == QStringLiteral("--offline-skip-corrupt")) {
+      online_offline_skip_corrupt = true;
+    } else if (arguments[i] == QStringLiteral("--offline-default-paths")) {
+      online_offline_default_paths = true;
     } else if (arguments[i] == QStringLiteral("--buffer-media") &&
                i + 1 < arguments.size()) {
       online_buffer_media = arguments[++i];
@@ -563,7 +585,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (online_m1_test) {
+  if (online_m1_test || online_offline_test) {
     bool cid_ok = false;
     online_m1_cid = online_m1_cid_text.toLongLong(&cid_ok);
     if (!cid_ok) {
@@ -583,8 +605,10 @@ int main(int argc, char* argv[]) {
     }
     if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
       std::fprintf(stderr,
-                   "online_m1_fail reason=missing_bvid_cid usage=--online-m1-test "
-                   "--bvid BV... --cid 123\n");
+                   "online_%s_fail reason=missing_bvid_cid usage=--online-%s-test "
+                   "--bvid BV... --cid 123\n",
+                   online_offline_test ? "offline" : "m1",
+                   online_offline_test ? "offline" : "m1");
       std::fflush(stderr);
       return 2;
     }
@@ -616,14 +640,16 @@ int main(int argc, char* argv[]) {
   // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
-       online_buffer_test) &&
+       online_buffer_test || online_offline_test) &&
       settings_root.isEmpty()) {
     settings_root =
         QDir::currentPath() +
         ((settings_test || settings_expect) ? QStringLiteral("/build/t6.3-settings")
                                            : (banner_test
                                                   ? QStringLiteral("/build/t6.5-settings")
-                                                  : QStringLiteral("/build/t8.6-settings")));
+                                                  : (online_offline_test
+                                                         ? QStringLiteral("/build/t8.7-settings")
+                                                         : QStringLiteral("/build/t8.6-settings"))));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
@@ -760,22 +786,65 @@ int main(int argc, char* argv[]) {
   if (legacy_gui_test) {
     window.SetIndexSynchronousForTest(true);
   }
-  if (online_m1_test) {
+  if (online_m1_test ||
+      (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
-      online_m1_cache_root = QDir::currentPath() +
-                             QStringLiteral("/build/t8.6-online-cache");
+      online_m1_cache_root =
+          QDir::currentPath() +
+          (online_offline_test ? QStringLiteral("/build/t8.7-online-cache")
+                               : QStringLiteral("/build/t8.6-online-cache"));
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
     QDir().mkpath(online_m1_cache_root);
     window.SetOnlineCacheRootForTest(online_m1_cache_root);
     if (online_m1_pictures.isEmpty()) {
-      online_m1_pictures = QDir::currentPath() +
-                           QStringLiteral("/build/t8.6-online-pictures");
+      online_m1_pictures =
+          QDir::currentPath() +
+          (online_offline_test ? QStringLiteral("/build/t8.7-online-pictures")
+                               : QStringLiteral("/build/t8.6-online-pictures"));
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
     QDir().mkpath(online_m1_pictures);
     window.SetSnapshotPicturesRootForTest(online_m1_pictures);
+  }
+  if (online_offline_test) {
+    if (online_offline_default_paths) {
+      // 默认 AppData 验收：只允许覆盖图片目录（显式传入时），不碰缓存/记录。
+      if (!online_m1_pictures.isEmpty()) {
+        online_m1_pictures =
+            QFileInfo(online_m1_pictures).absoluteFilePath();
+        QDir().mkpath(online_m1_pictures);
+        window.SetSnapshotPicturesRootForTest(online_m1_pictures);
+      }
+    } else {
+      if (online_records_root.isEmpty()) {
+        online_records_root =
+            QDir::currentPath() + QStringLiteral("/build/t8.7-online-records");
+      }
+      online_records_root = QFileInfo(online_records_root).absoluteFilePath();
+      QDir(online_records_root).removeRecursively();
+      QDir().mkpath(online_records_root);
+      window.SetOnlineRecordsRootForTest(online_records_root);
+    }
+  } else if (online_m1_test) {
+    // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
+    // 失败时弹出模态“保存失败”阻塞自动化。
+    if (online_records_root.isEmpty()) {
+      online_records_root =
+          QDir::currentPath() + QStringLiteral("/build/t8.7-online-records-m1");
+    }
+    online_records_root = QFileInfo(online_records_root).absoluteFilePath();
+    QDir(online_records_root).removeRecursively();
+    QDir().mkpath(online_records_root);
+    window.SetOnlineRecordsRootForTest(online_records_root);
+  } else if (online_buffer_test) {
+    online_records_root =
+        QDir::currentPath() + QStringLiteral("/build/t8.7-online-records-buffer");
+    online_records_root = QFileInfo(online_records_root).absoluteFilePath();
+    QDir(online_records_root).removeRecursively();
+    QDir().mkpath(online_records_root);
+    window.SetOnlineRecordsRootForTest(online_records_root);
   }
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
@@ -909,6 +978,33 @@ int main(int argc, char* argv[]) {
     online_m1_runner =
         std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
     online_m1_runner->Start();
+  }
+
+  std::unique_ptr<lapian::app::OnlineOfflineTestRunner> online_offline_runner;
+  if (online_offline_test) {
+    if (online_offline_media.isEmpty()) {
+      const QString fast =
+          QDir::currentPath() +
+          QStringLiteral("/build/test-media/faststart-720p.mp4");
+      online_offline_media =
+          QFileInfo::exists(fast) ? fast
+                                  : QDir::currentPath() + QStringLiteral("/media/V9.mp4");
+    }
+    lapian::app::OnlineOfflineTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.tag = online_m1_tag;
+    options.media_path = online_offline_media;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.keep_cache = online_offline_keep_cache;
+    options.skip_corrupt = online_offline_skip_corrupt;
+    options.use_default_paths = online_offline_default_paths;
+    online_offline_runner =
+        std::make_unique<lapian::app::OnlineOfflineTestRunner>(&window, options);
+    online_offline_runner->Start();
   }
 
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。

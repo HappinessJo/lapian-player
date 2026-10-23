@@ -24,6 +24,16 @@ class SnapshotService : public QObject {
     int rotation_counterclockwise_degrees = 0;
     int fps_num = 0;
     int fps_den = 0;
+    // T8.7：在线截图走 <Pictures>/拉片软件/<bvid>/ + index.jsonl，不按缓存文件
+    // data.mp4 的目录命名。qn/codecid/fps/pts 写进清单。
+    bool online = false;
+    QString online_bvid;
+    std::int64_t online_cid = 0;
+    int online_qn = 0;
+    int online_codecid = 0;
+    double online_fps = 0.0;
+    std::int64_t online_pts_us = 0;
+    QString online_appdata_root;  // 空 = %APPDATA%\拉片软件\online
   };
 
   explicit SnapshotService(QString pictures_root = QString(), QObject* parent = nullptr);
@@ -44,6 +54,8 @@ class SnapshotService : public QObject {
   void snapshotSaved(const QString& path, bool used_fallback, qint64 frame_index,
                      qint64 encode_ms);
   void snapshotFailed(const QString& error);
+  // T8.7：PNG 已保存但 index.jsonl 追加失败；截图本身仍算成功。
+  void snapshotIndexWarning(const QString& warning);
 
  private:
   struct Task {
@@ -53,7 +65,7 @@ class SnapshotService : public QObject {
 
   void WorkerLoop();
   bool ProcessTask(const Task& task, QString* path, bool* used_fallback, QString* error,
-                   qint64* encode_ms);
+                   qint64* encode_ms, QString* index_warning);
 
   QString pictures_root_;
   mutable std::mutex mutex_;

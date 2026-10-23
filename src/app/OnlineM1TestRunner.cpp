@@ -46,10 +46,12 @@ bool OnlineM1TestRunner::WaitUntil(const std::function<bool()>& predicate,
   QElapsedTimer timer;
   timer.start();
   while (timer.elapsed() < timeout_ms) {
+    // 先让事件循环跑一次：缓存命中的本地 seek 是同步的，predicate 可能立刻为真；
+    // 若直接返回，连续 40 次 seek 会占住 UI 线程，让心跳误报“UI 停顿”。
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     if (predicate()) {
       return true;
     }
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   Print(QStringLiteral("online_m1_wait_timeout label=%1 elapsed=%2ms")
@@ -157,7 +159,13 @@ void OnlineM1TestRunner::Run() {
   QObject::connect(&heartbeat, &QTimer::timeout, [&]() {
     const qint64 now = heartbeat_clock.elapsed();
     if (heartbeat_last > 0) {
-      heartbeat_max = std::max(heartbeat_max, now - heartbeat_last);
+      const qint64 gap = now - heartbeat_last;
+      if (gap > 200) {
+        Print(QStringLiteral("online_m1_ui_gap_event gap_ms=%1 at_ms=%2")
+                  .arg(gap)
+                  .arg(now));
+      }
+      heartbeat_max = std::max(heartbeat_max, gap);
     }
     heartbeat_last = now;
   });
@@ -182,6 +190,10 @@ void OnlineM1TestRunner::Run() {
   Print(QStringLiteral("online_m1_first_frame ms=%1 state=%2")
             .arg(first_frame_ms)
             .arg(window_->OnlineStateForTest()));
+  const bool cache_hit = window_->OnlineCacheHitForTest();
+  Print(QStringLiteral("online_m1_cache_hit cache_hit=%1 path=%2")
+            .arg(cache_hit ? 1 : 0)
+            .arg(window_->OnlineCachePathForTest()));
   check("default_paused", !window_->IsPlayingForTest());
   check("frontend_quality", quality_ > 0,
         QStringLiteral("qn=%1").arg(quality_));
@@ -213,11 +225,18 @@ void OnlineM1TestRunner::Run() {
                   "space_pause"));
 
   // 部分索引至少覆盖 2s 以上，做 20 次 PgUp/PgDn 与 20 次随机 seek。
-  const bool indexed = WaitUntil(
-      [this]() { return window_->OnlineStableFramesForTest() >= 60; },
-      options_.timeout_ms, "online_index");
+  // 完整缓存命中走本地全量索引（IndexReadyForTest），不是在线部分索引。
+  const bool indexed =
+      cache_hit
+          ? WaitUntil([this]() { return window_->IndexReadyForTest(); },
+                      options_.timeout_ms, "cache_index")
+          : WaitUntil(
+                [this]() { return window_->OnlineStableFramesForTest() >= 60; },
+                options_.timeout_ms, "online_index");
   check("index_prefix", indexed,
-        QStringLiteral("stable=%1").arg(window_->OnlineStableFramesForTest()));
+        QStringLiteral("stable=%1 index=%2")
+            .arg(window_->OnlineStableFramesForTest())
+            .arg(window_->IndexFrameCountForTest()));
   qint64 seek_target = 60;
   if (indexed) {
     window_->GoToFrameForTest(20);
@@ -266,8 +285,10 @@ void OnlineM1TestRunner::Run() {
 
     std::vector<qint64> seek_samples;
     int seek_failures = 0;
-    const qint64 range = std::min<qint64>(200,
-                                          window_->OnlineStableFramesForTest() - 2);
+    const qint64 available_frames =
+        cache_hit ? window_->IndexFrameCountForTest()
+                  : window_->OnlineStableFramesForTest();
+    const qint64 range = std::min<qint64>(200, available_frames - 2);
     for (int i = 0; i < 20 && range > 1; ++i) {
       const qint64 target = 5 + (static_cast<qint64>(i) * 37) % (range - 4);
       QElapsedTimer timer;
@@ -299,8 +320,9 @@ void OnlineM1TestRunner::Run() {
   }
 
   // 未缓存 seek：立即显示“缓冲中（目标帧 N）”；改 seek 时旧等待被取消。
+  // 完整缓存命中是全本地文件，没有“未缓存区”，跳过该专项。
   const qint64 container_frames = window_->OnlineContainerFramesForTest();
-  if (container_frames > 120) {
+  if (!cache_hit && container_frames > 120) {
     const qint64 uncached_target = container_frames - 120;
     QElapsedTimer wait_ui_timer;
     wait_ui_timer.start();
@@ -346,6 +368,8 @@ void OnlineM1TestRunner::Run() {
         waveform);
 
   // Ctrl+M：真实键事件。
+  Print(QStringLiteral("online_m1_phase ctrl_m_begin at_ms=%1")
+            .arg(heartbeat_clock.elapsed()));
   window_->FocusVideoForTest();
   window_->PressKeyForTest(Qt::Key_M, Qt::ControlModifier);
   const bool mark_added =
@@ -353,10 +377,16 @@ void OnlineM1TestRunner::Run() {
                 "ctrl_m");
   check("ctrl_m", mark_added,
         QStringLiteral("marks=%1").arg(window_->MarkCountForTest()));
+  Print(QStringLiteral("online_m1_phase ctrl_m_end at_ms=%1")
+            .arg(heartbeat_clock.elapsed()));
 
   // S：真实键事件 + 后台编码；PNG 尺寸=当前流分辨率、无 UI。
+  Print(QStringLiteral("online_m1_phase snapshot_begin at_ms=%1")
+            .arg(heartbeat_clock.elapsed()));
   window_->PressSnapshotKeyForTest();
   window_->DrainSnapshotsForTest();
+  Print(QStringLiteral("online_m1_phase snapshot_end at_ms=%1")
+            .arg(heartbeat_clock.elapsed()));
   const QStringList saved = window_->SnapshotSavedPathsForTest();
   check("snapshot_saved", !saved.isEmpty(), window_->SnapshotStatusForTest());
   if (!saved.isEmpty()) {

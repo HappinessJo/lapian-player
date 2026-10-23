@@ -105,6 +105,43 @@ QString DefaultAppDataMarksDir() {
   return QDir(appdata).filePath(QString::fromUtf8("拉片软件/marks"));
 }
 
+// T8.7：%APPDATA%\拉片软件\online（不叠加第二层“拉片软件”）。
+QString DefaultAppDataOnlineDir() {
+  QString appdata = qEnvironmentVariable("APPDATA");
+  if (appdata.isEmpty()) {
+    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+  }
+  if (appdata.isEmpty()) {
+    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+  }
+  return QDir(appdata).filePath(QString::fromUtf8("拉片软件/online"));
+}
+
+bool IsSafeOnlineBvid(const QString& bvid) {
+  if (bvid.isEmpty() || bvid.size() > 32) {
+    return false;
+  }
+  for (const QChar ch : bvid) {
+    const ushort code = ch.unicode();
+    const bool ascii_alnum =
+        (code >= '0' && code <= '9') || (code >= 'A' && code <= 'Z') ||
+        (code >= 'a' && code <= 'z');
+    if (!ascii_alnum) {
+      return false;
+    }
+  }
+  return true;
+}
+
+QString OnlineRecordPath(const MarkStoreOptions& options, const QString& bvid,
+                         qint64 cid) {
+  const QString root = options.appdata_online_dir.empty()
+                           ? DefaultAppDataOnlineDir()
+                           : FromUtf8(options.appdata_online_dir);
+  return QDir(root).filePath(
+      QStringLiteral("%1-%2.lapian.json").arg(bvid).arg(cid));
+}
+
 std::string NowIso8601() {
   return ToUtf8(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
 }
@@ -181,6 +218,18 @@ bool JsonInt64(const QJsonValue& value, qint64* out) {
   return true;
 }
 
+bool JsonDouble(const QJsonValue& value, double* out) {
+  if (!value.isDouble()) {
+    return false;
+  }
+  const double number = value.toDouble();
+  if (!std::isfinite(number)) {
+    return false;
+  }
+  *out = number;
+  return true;
+}
+
 QJsonObject MarkToJson(const Mark& mark) {
   QJsonObject object;
   object.insert(QStringLiteral("id"), FromUtf8(mark.id));
@@ -190,6 +239,14 @@ QJsonObject MarkToJson(const Mark& mark) {
   object.insert(QStringLiteral("note"), FromUtf8(mark.note));
   object.insert(QStringLiteral("created_at"), FromUtf8(mark.created_at));
   object.insert(QStringLiteral("updated_at"), FromUtf8(mark.updated_at));
+  return object;
+}
+
+QJsonObject OnlineMarkToJson(const Mark& mark, const OnlineMarkMeta& meta) {
+  QJsonObject object = MarkToJson(mark);
+  object.insert(QStringLiteral("fps"), std::isfinite(meta.fps) ? meta.fps : 0.0);
+  object.insert(QStringLiteral("qn"), meta.qn);
+  object.insert(QStringLiteral("codecid"), meta.codecid);
   return object;
 }
 
@@ -805,6 +862,219 @@ bool ParseMarkFile(const std::string& json_utf8, std::vector<Mark>* marks,
   return true;
 }
 
+std::string SerializeOnlineMarkFile(
+    const std::string& bvid, std::int64_t cid, double fps, int qn, int codecid,
+    const std::vector<Mark>& marks,
+    const std::map<std::string, OnlineMarkMeta>& meta) {
+  QJsonObject root;
+  root.insert(QStringLiteral("schema"),
+              QString::fromLatin1(kOnlineMarkSchemaName));
+  root.insert(QStringLiteral("schema_version"), kOnlineMarkSchemaVersion);
+  root.insert(QStringLiteral("bvid"), FromUtf8(bvid));
+  root.insert(QStringLiteral("cid"), static_cast<double>(cid));
+  root.insert(QStringLiteral("qn"), qn);
+  root.insert(QStringLiteral("codecid"), codecid);
+  root.insert(QStringLiteral("fps"), std::isfinite(fps) ? fps : 0.0);
+  root.insert(QStringLiteral("updated_at"), FromUtf8(NowIso8601()));
+
+  QJsonArray mark_array;
+  for (const Mark& mark : marks) {
+    OnlineMarkMeta mark_meta;
+    mark_meta.fps = fps;
+    mark_meta.qn = qn;
+    mark_meta.codecid = codecid;
+    const auto found = meta.find(mark.id);
+    if (found != meta.end()) {
+      mark_meta = found->second;
+    }
+    mark_array.append(OnlineMarkToJson(mark, mark_meta));
+  }
+  root.insert(QStringLiteral("marks"), mark_array);
+
+  const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+  return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+}
+
+bool ParseOnlineMarkFile(
+    const std::string& json_utf8, const std::string& expected_bvid,
+    std::int64_t expected_cid, std::vector<Mark>* marks,
+    std::map<std::string, OnlineMarkMeta>* meta, double* stored_fps,
+    int* stored_qn, int* stored_codecid, std::string* error,
+    bool* unsupported_schema) {
+  if (marks != nullptr) {
+    marks->clear();
+  }
+  if (meta != nullptr) {
+    meta->clear();
+  }
+  if (stored_fps != nullptr) {
+    *stored_fps = 0.0;
+  }
+  if (stored_qn != nullptr) {
+    *stored_qn = 0;
+  }
+  if (stored_codecid != nullptr) {
+    *stored_codecid = 0;
+  }
+  if (unsupported_schema != nullptr) {
+    *unsupported_schema = false;
+  }
+
+  auto fail = [&](const QString& message) {
+    if (error != nullptr) {
+      *error = ToUtf8(message);
+    }
+    return false;
+  };
+
+  QJsonParseError parse_error;
+  const QJsonDocument document =
+      QJsonDocument::fromJson(QByteArray::fromStdString(json_utf8), &parse_error);
+  if (parse_error.error != QJsonParseError::NoError) {
+    return fail(QStringLiteral("JSON 解析失败：") + parse_error.errorString());
+  }
+  if (!document.isObject()) {
+    return fail(QStringLiteral("JSON 根不是对象"));
+  }
+  const QJsonObject root = document.object();
+  if (root.value(QStringLiteral("schema")).toString() !=
+      QString::fromLatin1(kOnlineMarkSchemaName)) {
+    return fail(QStringLiteral("schema 不是 lapian-online-1"));
+  }
+
+  qint64 version = 0;
+  if (!JsonInt64(root.value(QStringLiteral("schema_version")), &version)) {
+    return fail(QStringLiteral("schema_version 缺失或不是整数"));
+  }
+  if (version > kOnlineMarkSchemaVersion) {
+    if (unsupported_schema != nullptr) {
+      *unsupported_schema = true;
+    }
+    return fail(QStringLiteral("schema_version %1 高于支持的 %2")
+                    .arg(version)
+                    .arg(kOnlineMarkSchemaVersion));
+  }
+  if (version != kOnlineMarkSchemaVersion) {
+    return fail(QStringLiteral("schema_version 不受支持：") + QString::number(version));
+  }
+
+  const QString bvid = root.value(QStringLiteral("bvid")).toString();
+  qint64 cid = 0;
+  if (!JsonInt64(root.value(QStringLiteral("cid")), &cid) || cid <= 0) {
+    return fail(QStringLiteral("cid 缺失或不是正整数"));
+  }
+  if (bvid != FromUtf8(expected_bvid) || cid != expected_cid) {
+    return fail(QStringLiteral("bvid/cid 与记录文件名不一致（%1 / %2）")
+                    .arg(bvid)
+                    .arg(cid));
+  }
+
+  double fps = 0.0;
+  if (root.contains(QStringLiteral("fps"))) {
+    if (!JsonDouble(root.value(QStringLiteral("fps")), &fps) || fps < 0.0) {
+      return fail(QStringLiteral("fps 不是非负数字"));
+    }
+  }
+  qint64 qn = 0;
+  if (root.contains(QStringLiteral("qn"))) {
+    if (!JsonInt64(root.value(QStringLiteral("qn")), &qn) || qn < 0) {
+      return fail(QStringLiteral("qn 不是非负整数"));
+    }
+  }
+  qint64 codecid = 0;
+  if (root.contains(QStringLiteral("codecid"))) {
+    if (!JsonInt64(root.value(QStringLiteral("codecid")), &codecid) ||
+        codecid < 0) {
+      return fail(QStringLiteral("codecid 不是非负整数"));
+    }
+  }
+
+  const QJsonValue marks_value = root.value(QStringLiteral("marks"));
+  if (!marks_value.isArray()) {
+    return fail(QStringLiteral("marks 缺失或不是数组"));
+  }
+  const QJsonArray mark_array = marks_value.toArray();
+  std::vector<Mark> parsed_marks;
+  std::map<std::string, OnlineMarkMeta> parsed_meta;
+  std::map<std::string, std::size_t> index_by_id;
+  parsed_marks.reserve(static_cast<std::size_t>(mark_array.size()));
+  for (int i = 0; i < mark_array.size(); ++i) {
+    const QJsonValue item = mark_array.at(i);
+    if (!item.isObject()) {
+      return fail(QStringLiteral("marks[%1] 不是对象").arg(i));
+    }
+    const QJsonObject object = item.toObject();
+    Mark mark;
+    mark.id = object.value(QStringLiteral("id")).toString().toUtf8().toStdString();
+    if (mark.id.empty()) {
+      return fail(QStringLiteral("marks[%1].id 缺失").arg(i));
+    }
+    if (!JsonInt64(object.value(QStringLiteral("frame")), &mark.frame) ||
+        mark.frame < 0) {
+      return fail(QStringLiteral("marks[%1].frame 缺失或不是非负整数").arg(i));
+    }
+    if (!JsonInt64(object.value(QStringLiteral("pts")), &mark.pts_us)) {
+      return fail(QStringLiteral("marks[%1].pts 缺失或不是整数").arg(i));
+    }
+    mark.label = object.value(QStringLiteral("label")).toString().toUtf8().toStdString();
+    mark.note = object.value(QStringLiteral("note")).toString().toUtf8().toStdString();
+    mark.created_at =
+        object.value(QStringLiteral("created_at")).toString().toUtf8().toStdString();
+    mark.updated_at =
+        object.value(QStringLiteral("updated_at")).toString().toUtf8().toStdString();
+
+    OnlineMarkMeta mark_meta;
+    mark_meta.fps = fps;
+    mark_meta.qn = static_cast<int>(qn);
+    mark_meta.codecid = static_cast<int>(codecid);
+    double mark_fps = 0.0;
+    if (object.contains(QStringLiteral("fps")) &&
+        JsonDouble(object.value(QStringLiteral("fps")), &mark_fps) &&
+        mark_fps >= 0.0) {
+      mark_meta.fps = mark_fps;
+    }
+    qint64 mark_qn = 0;
+    if (object.contains(QStringLiteral("qn")) &&
+        JsonInt64(object.value(QStringLiteral("qn")), &mark_qn) && mark_qn >= 0) {
+      mark_meta.qn = static_cast<int>(mark_qn);
+    }
+    qint64 mark_codecid = 0;
+    if (object.contains(QStringLiteral("codecid")) &&
+        JsonInt64(object.value(QStringLiteral("codecid")), &mark_codecid) &&
+        mark_codecid >= 0) {
+      mark_meta.codecid = static_cast<int>(mark_codecid);
+    }
+
+    const auto found = index_by_id.find(mark.id);
+    if (found == index_by_id.end()) {
+      index_by_id.emplace(mark.id, parsed_marks.size());
+      parsed_marks.push_back(std::move(mark));
+      parsed_meta[parsed_marks.back().id] = mark_meta;
+    } else if (IsNewer(mark, parsed_marks[found->second])) {
+      parsed_marks[found->second] = std::move(mark);
+      parsed_meta[parsed_marks[found->second].id] = mark_meta;
+    }
+  }
+  SortMarks(&parsed_marks);
+
+  if (marks != nullptr) {
+    *marks = std::move(parsed_marks);
+  }
+  if (meta != nullptr) {
+    *meta = std::move(parsed_meta);
+  }
+  if (stored_fps != nullptr) {
+    *stored_fps = fps;
+  }
+  if (stored_qn != nullptr) {
+    *stored_qn = static_cast<int>(qn);
+  }
+  if (stored_codecid != nullptr) {
+    *stored_codecid = static_cast<int>(codecid);
+  }
+  return true;
+}
+
 MarkStore MarkStore::Open(const std::string& video_path_utf8,
                           std::int64_t duration_us,
                           const MarkStoreOptions& options,
@@ -888,6 +1158,132 @@ MarkStore MarkStore::Open(const std::string& video_path_utf8,
   return store;
 }
 
+MarkStore MarkStore::OpenOnline(const std::string& bvid, std::int64_t cid,
+                                double fps, int qn, int codecid,
+                                const MarkStoreOptions& options,
+                                const FrameLookup& lookup) {
+  MarkStore store;
+  store.options_ = options;
+  store.online_ = true;
+  store.online_bvid_ = bvid;
+  store.online_cid_ = cid;
+  store.online_context_.fps = std::isfinite(fps) && fps > 0.0 ? fps : 0.0;
+  store.online_context_.qn = qn;
+  store.online_context_.codecid = codecid;
+  store.video_.path = bvid + "-" + std::to_string(cid);
+  store.video_.path_key = store.video_.path;
+
+  const QString bvid_text = FromUtf8(bvid);
+  if (!IsSafeOnlineBvid(bvid_text) || cid <= 0) {
+    store.warnings_.push_back(
+        {MarkWarningKind::kReadFailed,
+         "在线记录键无效（bvid/cid），标记只在当前会话内可用", {}});
+    return store;
+  }
+  store.valid_ = true;
+  const QString path = OnlineRecordPath(options, bvid_text, cid);
+  store.storage_path_ = ToUtf8(path);
+
+  const QFileInfo info(path);
+  if (!info.exists()) {
+    return store;
+  }
+  if (!info.isFile()) {
+    store.block_save_ = true;
+    store.warnings_.push_back(
+        {MarkWarningKind::kReadFailed, "在线记录路径不是普通文件，已忽略",
+         store.storage_path_});
+    return store;
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    store.block_save_ = true;
+    store.warnings_.push_back(
+        {MarkWarningKind::kReadFailed,
+         "无法读取在线记录：" + ToUtf8(file.errorString()), store.storage_path_});
+    return store;
+  }
+  const QByteArray bytes = file.readAll();
+  const bool read_error = file.error() != QFileDevice::NoError;
+  const QString read_error_text = file.errorString();
+  file.close();
+  if (read_error) {
+    store.block_save_ = true;
+    store.warnings_.push_back(
+        {MarkWarningKind::kReadFailed,
+         "读取在线记录失败：" + ToUtf8(read_error_text), store.storage_path_});
+    return store;
+  }
+
+  std::vector<Mark> parsed_marks;
+  std::map<std::string, OnlineMarkMeta> parsed_meta;
+  double stored_fps = 0.0;
+  int stored_qn = 0;
+  int stored_codecid = 0;
+  std::string parse_error;
+  bool unsupported = false;
+  if (!ParseOnlineMarkFile(
+          std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())),
+          bvid, cid, &parsed_marks, &parsed_meta, &stored_fps, &stored_qn,
+          &stored_codecid, &parse_error, &unsupported)) {
+    if (unsupported) {
+      store.block_save_ = true;
+      store.warnings_.push_back(
+          {MarkWarningKind::kUnsupportedSchema,
+           "在线记录由更新版本创建，暂不读取且不会覆盖：" + parse_error,
+           store.storage_path_});
+      return store;
+    }
+
+    QString backup_path;
+    std::string backup_error;
+    if (BackupCorruptFile(path, &backup_path, &backup_error)) {
+      store.warnings_.push_back(
+          {MarkWarningKind::kCorruptBackup,
+           "在线记录损坏，已备份为 " + ToUtf8(backup_path) +
+               "；按无标记继续播放：" + parse_error,
+           store.storage_path_});
+    } else {
+      store.block_save_ = true;
+      store.warnings_.push_back(
+          {MarkWarningKind::kReadFailed,
+           "在线记录损坏且备份失败，已阻止覆盖：" + backup_error + "；" +
+               parse_error,
+           store.storage_path_});
+    }
+    return store;
+  }
+
+  store.marks_ = std::move(parsed_marks);
+  store.online_meta_ = std::move(parsed_meta);
+  if (stored_fps > 0.0 && store.online_context_.fps > 0.0 &&
+      std::fabs(stored_fps - store.online_context_.fps) > 0.01) {
+    store.warnings_.push_back(
+        {MarkWarningKind::kPtsMismatch,
+         QStringLiteral("在线记录来自 %1fps，当前流为 %2fps；标记按 PTS 映射并提示")
+             .arg(QString::number(stored_fps, 'f', 3),
+                  QString::number(store.online_context_.fps, 'f', 3))
+             .toUtf8()
+             .toStdString(),
+         store.storage_path_});
+  }
+  // 若调用方已经有索引（同步打开），在加载时完成一次 PTS 校正。
+  const std::vector<Mark> before_reconcile = store.marks_;
+  ReconcileMarks(&store.marks_, lookup, &store.warnings_);
+  if (store.marks_ != before_reconcile) {
+    for (const Mark& mark : store.marks_) {
+      store.online_meta_[mark.id] = store.online_context_;
+    }
+  }
+
+  if (store.marks_.empty() && !store.block_save_) {
+    std::string remove_error;
+    RemoveRegularFile(path, "删除空的在线记录失败", &store.warnings_, &remove_error);
+  }
+  return store;
+}
+
 MarkStore MarkStore::OpenSessionOnly(const std::string& video_path_utf8,
                                      std::int64_t duration_us) {
   MarkStore store;
@@ -928,6 +1324,9 @@ bool MarkStore::AddMark(std::int64_t frame, std::int64_t pts_us,
   mark.updated_at = now;
   marks_.push_back(mark);
   SortMarks(&marks_);
+  if (online_) {
+    online_meta_[mark.id] = online_context_;
+  }
   if (out_id != nullptr) {
     *out_id = mark.id;
   }
@@ -954,7 +1353,59 @@ bool MarkStore::SetMarkText(const std::string& id, const std::string& label,
 bool MarkStore::RemoveMark(const std::string& id) {
   const auto removed =
       std::erase_if(marks_, [&](const Mark& mark) { return mark.id == id; });
+  if (removed > 0) {
+    online_meta_.erase(id);
+  }
   return removed > 0;
+}
+
+const OnlineMarkMeta* MarkStore::OnlineMetaForMark(const std::string& id) const {
+  const auto found = online_meta_.find(id);
+  return found == online_meta_.end() ? nullptr : &found->second;
+}
+
+void MarkStore::SetOnlineContext(double fps, int qn, int codecid) {
+  if (!online_) {
+    return;
+  }
+  online_context_.fps = std::isfinite(fps) && fps > 0.0 ? fps : 0.0;
+  online_context_.qn = qn;
+  online_context_.codecid = codecid;
+}
+
+bool MarkStore::ReconcileFrames(const FrameLookup& lookup,
+                                std::vector<MarkWarning>* warnings,
+                                bool* changed) {
+  if (!online_) {
+    if (changed != nullptr) {
+      *changed = false;
+    }
+    return false;
+  }
+  if (!lookup.pts_of_frame && !lookup.frame_of_pts) {
+    if (changed != nullptr) {
+      *changed = false;
+    }
+    return false;
+  }
+  const std::vector<Mark> before = marks_;
+  std::vector<MarkWarning> local_warnings;
+  ReconcileMarks(&marks_, lookup, &local_warnings);
+  const bool did_change = marks_ != before;
+  if (did_change) {
+    for (const Mark& mark : marks_) {
+      online_meta_[mark.id] = online_context_;
+    }
+  }
+  if (warnings != nullptr) {
+    warnings->insert(warnings->end(), local_warnings.begin(), local_warnings.end());
+  } else {
+    warnings_.insert(warnings_.end(), local_warnings.begin(), local_warnings.end());
+  }
+  if (changed != nullptr) {
+    *changed = did_change;
+  }
+  return did_change;
 }
 
 SaveResult MarkStore::Save() {
@@ -975,6 +1426,53 @@ SaveResult MarkStore::Save() {
     result.ok = true;
     result.wrote = false;
     result.path.clear();
+    return result;
+  }
+  if (online_) {
+    result.path = storage_path_;
+    if (marks_.empty()) {
+      const QFileInfo info(FromUtf8(storage_path_));
+      if (!info.exists()) {
+        result.ok = true;
+        return result;
+      }
+      if (!info.isFile()) {
+        result.ok = false;
+        result.error = "在线记录路径不是普通文件，未删除";
+        warnings_.push_back(
+            {MarkWarningKind::kSaveFailed, result.error, storage_path_});
+        return result;
+      }
+      if (QFile::remove(FromUtf8(storage_path_))) {
+        result.ok = true;
+        result.removed = true;
+        return result;
+      }
+      result.ok = false;
+      result.error = "删除空的在线记录失败";
+      warnings_.push_back(
+          {MarkWarningKind::kSaveFailed, result.error, storage_path_});
+      return result;
+    }
+    if (storage_path_.empty()) {
+      result.ok = false;
+      result.error = "在线记录路径为空";
+      return result;
+    }
+    const QByteArray bytes = QByteArray::fromStdString(SerializeOnlineMarkFile(
+        online_bvid_, online_cid_, online_context_.fps, online_context_.qn,
+        online_context_.codecid, marks_, online_meta_));
+    std::string write_error;
+    if (!WriteAtomically(FromUtf8(storage_path_), bytes, &write_error)) {
+      result.ok = false;
+      result.error = write_error.empty() ? "在线记录写入失败" : write_error;
+      warnings_.push_back(
+          {MarkWarningKind::kSaveFailed, "在线记录保存失败：" + result.error,
+           storage_path_});
+      return result;
+    }
+    result.ok = true;
+    result.wrote = true;
     return result;
   }
 

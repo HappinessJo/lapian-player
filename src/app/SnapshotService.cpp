@@ -317,6 +317,7 @@ void SnapshotService::WorkerLoop() {
 
     QString path;
     QString error;
+    QString index_warning;
     bool fallback = false;
     qint64 encode_ms = 0;
     bool saved = false;
@@ -324,7 +325,8 @@ void SnapshotService::WorkerLoop() {
       error = QStringLiteral("截图线程 COM 初始化失败（%1）").arg(HResultText(com_result));
     } else {
       try {
-        saved = ProcessTask(task, &path, &fallback, &error, &encode_ms);
+        saved = ProcessTask(task, &path, &fallback, &error, &encode_ms,
+                            &index_warning);
       } catch (const std::exception& exception) {
         error = QStringLiteral("截图线程异常：%1")
                     .arg(QString::fromUtf8(exception.what()));
@@ -338,6 +340,9 @@ void SnapshotService::WorkerLoop() {
     // 若反过来先置 idle，Drain() 可能抢在信号入队前返回（4K 编码更长时可见）。
     if (saved) {
       emit snapshotSaved(path, fallback, static_cast<qint64>(task.request.frame), encode_ms);
+      if (!index_warning.isEmpty()) {
+        emit snapshotIndexWarning(index_warning);
+      }
     } else {
       emit snapshotFailed(error);
     }
@@ -356,7 +361,8 @@ void SnapshotService::WorkerLoop() {
 }
 
 bool SnapshotService::ProcessTask(const Task& task, QString* path, bool* used_fallback,
-                                  QString* error, qint64* encode_ms) {
+                                  QString* error, qint64* encode_ms,
+                                  QString* index_warning) {
   const auto started = std::chrono::steady_clock::now();
   AVFrame* cpu_frame = nullptr;
   const AVFrame* source = task.frame;
@@ -411,21 +417,45 @@ bool SnapshotService::ProcessTask(const Task& task, QString* path, bool* used_fa
     std::lock_guard<std::mutex> lock(mutex_);
     pictures_root = pictures_root_;
   }
-  const lapian::snapshot::SnapshotDirectory directory =
-      lapian::snapshot::ResolveSnapshotDirectory(task.request.video_path, pictures_root,
-                                                 &directory_error);
-  if (directory.path.isEmpty()) {
-    *error = directory_error.isEmpty() ? QStringLiteral("截图目录不可写") : directory_error;
-    return false;
+  QString directory_path;
+  bool directory_fallback = false;
+  if (task.request.online) {
+    const lapian::snapshot::OnlineSnapshotDirectory directory =
+        lapian::snapshot::ResolveOnlineSnapshotDirectory(
+            task.request.online_bvid, pictures_root,
+            task.request.online_appdata_root, &directory_error);
+    if (directory.path.isEmpty()) {
+      *error = directory_error.isEmpty() ? QStringLiteral("在线截图目录不可写")
+                                         : directory_error;
+      return false;
+    }
+    directory_path = directory.path;
+    directory_fallback = directory.fallback;
+  } else {
+    const lapian::snapshot::SnapshotDirectory directory =
+        lapian::snapshot::ResolveSnapshotDirectory(task.request.video_path,
+                                                   pictures_root, &directory_error);
+    if (directory.path.isEmpty()) {
+      *error = directory_error.isEmpty() ? QStringLiteral("截图目录不可写")
+                                         : directory_error;
+      return false;
+    }
+    directory_path = directory.path;
+    directory_fallback = directory.fallback;
   }
 
-  const QString base_name = lapian::snapshot::BuildSnapshotBaseName(
-      task.request.video_path, task.request.frame, task.request.fps_num,
-      task.request.fps_den);
+  const QString base_name =
+      task.request.online
+          ? lapian::snapshot::BuildOnlineSnapshotBaseName(
+                task.request.online_bvid, task.request.frame, task.request.fps_num,
+                task.request.fps_den)
+          : lapian::snapshot::BuildSnapshotBaseName(
+                task.request.video_path, task.request.frame, task.request.fps_num,
+                task.request.fps_den);
 
   for (int sequence = 0; sequence < 1000; ++sequence) {
     const QString candidate =
-        lapian::snapshot::SnapshotFilePath(directory.path, base_name, sequence);
+        lapian::snapshot::SnapshotFilePath(directory_path, base_name, sequence);
     QFile file(candidate);
     if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
       if (QFileInfo::exists(candidate)) {
@@ -446,8 +476,22 @@ bool SnapshotService::ProcessTask(const Task& task, QString* path, bool* used_fa
       return false;
     }
 
+    if (task.request.online) {
+      QString index_error;
+      if (!lapian::snapshot::AppendOnlineSnapshotIndex(
+              directory_path, task.request.online_bvid, task.request.online_cid,
+              task.request.online_qn, task.request.online_codecid,
+              task.request.online_fps, task.request.frame,
+              task.request.online_pts_us, candidate, &index_error)) {
+        // 截图文件已经落盘；清单失败只提示，不把成功截图报成失败。
+        if (index_warning != nullptr) {
+          *index_warning = index_error;
+        }
+      }
+    }
+
     *path = candidate;
-    *used_fallback = directory.fallback;
+    *used_fallback = directory_fallback;
     *encode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - started)
                      .count();

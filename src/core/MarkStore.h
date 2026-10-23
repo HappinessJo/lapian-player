@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,11 @@ namespace lapian::core {
 
 inline constexpr int kMarkSchemaVersion = 1;
 inline constexpr const char* kMarkSchemaName = "lapian.marks";
+
+// T8.7 在线记录（delta O10）：与 v1 sidecar 完全分开的 schema。
+// 键为 bvid+cid；文件在 %APPDATA%\拉片软件\online\<bvid>-<cid>.lapian.json。
+inline constexpr int kOnlineMarkSchemaVersion = 1;
+inline constexpr const char* kOnlineMarkSchemaName = "lapian-online-1";
 
 // 视频标识。path 保留磁盘大小写便于阅读；path_key 小写、反斜杠、绝对路径，
 // 用于身份比较与回退文件哈希。
@@ -54,6 +60,15 @@ struct MarkPaths {
 struct MarkStoreOptions {
   // 空表示真实 `%APPDATA%\拉片软件\marks`；测试注入临时目录，避免污染用户数据。
   std::string appdata_marks_dir;
+  // T8.7：空表示真实 `%APPDATA%\拉片软件\online`；测试注入临时目录。
+  std::string appdata_online_dir;
+};
+
+// 每条在线标记在创建时记录的实际流信息；换档后用 PTS 映射帧号，不静默复用。
+struct OnlineMarkMeta {
+  double fps = 0.0;
+  int qn = 0;
+  int codecid = 0;
 };
 
 // T5.2 用 FrameIndex 提供；T5.1 只定义接口与纯函数，不依赖 media。
@@ -125,8 +140,23 @@ class MarkStore {
   // Save() 只返回成功且不落盘。
   static MarkStore OpenSessionOnly(const std::string& video_path_utf8,
                                    std::int64_t duration_us);
+  // T8.7：在线记录（lapian-online-1）。键为 bvid+cid；fps/qn/codecid 是本次
+  // 实际流的上下文，AddMark 时写进每条标记。损坏文件备份后按空记录继续。
+  static MarkStore OpenOnline(const std::string& bvid, std::int64_t cid,
+                              double fps, int qn, int codecid,
+                              const MarkStoreOptions& options = {},
+                              const FrameLookup& lookup = {});
 
   bool valid() const { return valid_; }
+  bool online() const { return online_; }
+  const std::string& online_bvid() const { return online_bvid_; }
+  std::int64_t online_cid() const { return online_cid_; }
+  const OnlineMarkMeta* OnlineMetaForMark(const std::string& id) const;
+  // 换档/索引就绪后按 PTS 校正；changed 为 true 时调用方应保存并刷新 UI。
+  bool ReconcileFrames(const FrameLookup& lookup, std::vector<MarkWarning>* warnings,
+                       bool* changed = nullptr);
+  // 当前流上下文（同一次打开内不变；换档时更新，后续新标记使用新值）。
+  void SetOnlineContext(double fps, int qn, int codecid);
   const VideoIdentity& video() const { return video_; }
   const MarkPaths& paths() const { return paths_; }
   const std::vector<Mark>& marks() const { return marks_; }
@@ -158,6 +188,12 @@ class MarkStore {
   bool valid_ = false;
   bool block_save_ = false;  // 读到更高 schema/读失败时禁止覆盖
   bool session_only_ = false;  // T8.6：在线会话内，不落盘
+  // T8.7 在线记录：bvid+cid 键、当前流上下文与逐条标记的实际流信息。
+  bool online_ = false;
+  std::string online_bvid_;
+  std::int64_t online_cid_ = 0;
+  OnlineMarkMeta online_context_;
+  std::map<std::string, OnlineMarkMeta> online_meta_;
 };
 
 }  // namespace lapian::core

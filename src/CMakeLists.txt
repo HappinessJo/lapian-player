@@ -216,6 +216,8 @@ qt_add_executable(lapian WIN32
   app/OnlineBufferTestRunner.h
   app/OnlineM1TestRunner.cpp
   app/OnlineM1TestRunner.h
+  app/OnlineOfflineTestRunner.cpp
+  app/OnlineOfflineTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
   app/OnlineHttpSelfCheckRunner.h
   app/OnlineQrTestRunner.cpp

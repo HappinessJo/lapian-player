@@ -127,6 +127,15 @@ set_tests_properties(lapian_online_m1_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# T8.7 缓存命中与在线记录：完整缓存直接打开（0 playurl/0 .part）、
+# lapian-online-1 记录/损坏/清缓存保留/重建回访、截图目录/命名/index.jsonl。
+add_executable(lapian_online_records_test online_records_test.cpp)
+lapian_apply_common_options(lapian_online_records_test)
+target_link_libraries(lapian_online_records_test PRIVATE lapian_online lapian_marks lapian_snapshot)
+add_test(NAME lapian_online_records_test COMMAND lapian_online_records_test)
+set_tests_properties(lapian_online_records_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T8.2.2 扫码登录：QR 本地渲染、generate/poll 解析、4 态/过期/取消、
 # 只提取 SESSDATA、DPAPI、nav 通过才 success；fake HTTP，无网络/GUI。
 add_executable(lapian_online_qr_test online_qr_test.cpp)

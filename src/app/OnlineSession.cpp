@@ -32,6 +32,8 @@ QString OnlineStateName(OnlineState state) {
       return QStringLiteral("preparing");
     case OnlineState::kBuffering:
       return QStringLiteral("buffering");
+    case OnlineState::kCacheHit:
+      return QStringLiteral("cache_hit");
     case OnlineState::kReady:
       return QStringLiteral("ready");
     case OnlineState::kStalled:
@@ -114,6 +116,11 @@ lapian::online::DownloadState OnlineSession::job_state() const {
 QString OnlineSession::part_path() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return part_path_;
+}
+
+QString OnlineSession::cache_mp4_path() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return cache_hit_ ? part_path_ : QString();
 }
 
 bool OnlineSession::HasPendingFinalize() const {
@@ -229,6 +236,113 @@ void OnlineSession::JoinPlayUrlWorker() {
   }
 }
 
+OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
+    const OnlineRequest& request, QString* error) {
+  if (cache_ == nullptr || error == nullptr) {
+    return CacheLookupResult::kMiss;
+  }
+  error->clear();
+  QVector<lapian::online::CacheEntry> entries;
+  QVector<lapian::online::CacheEntry> broken;
+  QString scan_error;
+  if (!cache_->Scan(&entries, &broken, &scan_error)) {
+    // 缓存根不可读不应阻止在线播放；按未命中继续取流。
+    return CacheLookupResult::kMiss;
+  }
+
+  const lapian::online::CacheEntry* best = nullptr;
+  for (const lapian::online::CacheEntry& entry : entries) {
+    if (!entry.complete || entry.broken) {
+      continue;
+    }
+    if (entry.key.bvid != request.bvid || entry.key.cid != request.cid) {
+      continue;
+    }
+    if (best == nullptr || entry.last_access_at > best->last_access_at ||
+        (entry.last_access_at == best->last_access_at &&
+         entry.key.qn > best->key.qn)) {
+      best = &entry;
+    }
+  }
+  if (best == nullptr) {
+    for (const lapian::online::CacheEntry& entry : broken) {
+      if (entry.key.bvid == request.bvid && entry.key.cid == request.cid) {
+        *error = QStringLiteral("缓存损坏，需要重建：%1")
+                     .arg(entry.broken_reason.isEmpty()
+                              ? QStringLiteral("data.mp4/meta.json 校验失败")
+                              : entry.broken_reason);
+        return CacheLookupResult::kError;
+      }
+    }
+    return CacheLookupResult::kMiss;
+  }
+
+  QString mp4_path;
+  QString open_error;
+  if (!cache_->OpenComplete(best->key, &mp4_path, &open_error)) {
+    *error = QStringLiteral("缓存条目存在但无法打开：%1").arg(open_error);
+    return CacheLookupResult::kError;
+  }
+
+  cache_entry_ = *best;
+  cache_hit_ = true;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    part_path_ = mp4_path;
+    total_ = cache_entry_.total_bytes;
+    qn_ = cache_entry_.key.qn;
+    codecid_ = cache_entry_.key.codecid;
+    progress_.published = cache_entry_.total_bytes;
+    progress_.total = cache_entry_.total_bytes;
+    progress_.bps = 0.0;
+    progress_.job_state = QStringLiteral("cache_hit");
+    progress_.qn = qn_;
+    progress_.codecid = codecid_;
+    progress_.complete = true;
+    progress_.awaiting_finalize = false;
+    progress_.error.clear();
+  }
+  SetState(OnlineState::kCacheHit,
+           QStringLiteral("缓存命中：直接打开本地 data.mp4（0 网络）"));
+  const std::uint64_t generation = generation_;
+  QTimer::singleShot(0, this, [this, generation]() {
+    if (generation == generation_ && active_.load() && !closing_.load()) {
+      EmitCacheHitReady();
+    }
+  });
+  PublishProgress();
+  return CacheLookupResult::kHit;
+}
+
+void OnlineSession::EmitCacheHitReady() {
+  if (ready_emitted_ || !cache_hit_) {
+    return;
+  }
+  ready_emitted_ = true;
+  SetState(OnlineState::kReady, QStringLiteral("缓存命中，已打开"));
+  if (!ready_callback_) {
+    return;
+  }
+  OnlineReadyInfo info;
+  info.cache_hit = true;
+  info.cache_mp4_path = cache_mp4_path();
+  info.part_path = info.cache_mp4_path;
+  info.request = request_;
+  info.title = request_.title.isEmpty() ? cache_entry_.title : request_.title;
+  info.owner = request_.owner.isEmpty() ? cache_entry_.owner : request_.owner;
+  info.duration_ms =
+      request_.duration_ms > 0 ? request_.duration_ms : cache_entry_.duration_ms;
+  info.total_bytes = cache_entry_.total_bytes;
+  info.qn = cache_entry_.key.qn;
+  info.codecid = cache_entry_.key.codecid;
+  info.fps = cache_entry_.fps;
+  info.playurl.quality = info.qn;
+  info.playurl.codecid = info.codecid;
+  info.playurl.format = QStringLiteral("mp4");
+  info.playurl.timelength_ms = info.duration_ms;
+  ready_callback_(info);
+}
+
 bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   if (error == nullptr) {
     return false;
@@ -262,8 +376,23 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
     part_path_.clear();
     last_error_.clear();
   }
+  cache_hit_ = false;
+  cache_mp4_path_.clear();
+  cache_entry_ = lapian::online::CacheEntry{};
   if (state_callback_) {
     state_callback_(OnlineState::kPreparing, QStringLiteral("准备取流…"));
+  }
+
+  // T8.7：完整缓存命中优先于 playurl/DownloadJob。命中时 0 网络；损坏条目
+  // 直接报“需要重建”，不联网重下、不覆盖坏数据。
+  const CacheLookupResult cache_result = TryCacheHit(request, error);
+  if (cache_result == CacheLookupResult::kError) {
+    active_.store(false);
+    SetState(OnlineState::kError, *error);
+    return false;
+  }
+  if (cache_result == CacheLookupResult::kHit) {
+    return true;
   }
 
   if (has_injected_playurl_) {
@@ -377,7 +506,7 @@ void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
   }
   job_ = std::move(job);
   if (job_->state() == lapian::online::DownloadState::kCompleted) {
-    Fail(QStringLiteral("该视频已完整缓存；缓存命中打开将在 T8.7 接入"));
+    Fail(QStringLiteral("该视频已完整缓存，但本次未走缓存命中路径；请重新打开"));
     return;
   }
   {

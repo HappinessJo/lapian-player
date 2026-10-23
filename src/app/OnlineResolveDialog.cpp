@@ -177,7 +177,7 @@ void OnlineResolveDialog::SetupUi() {
   confirm_button_ = new QPushButton(QStringLiteral("确认"), this);
   confirm_button_->setObjectName(QStringLiteral("onlineConfirmButton"));
   confirm_button_->setToolTip(
-      QStringLiteral("确认后 T8.5 才取流；本任务确认只记录选择，不播放"));
+      QStringLiteral("确认后在线取流并播放；若该 BV 已完整缓存，则直接打开本地缓存（0 网络）"));
   buttons->addWidget(cancel_button_);
   buttons->addWidget(confirm_button_);
   root->addLayout(buttons);
@@ -303,6 +303,7 @@ void OnlineResolveDialog::StartResolve() {
   ResetResult();
   last_http_requests_ = 0;
   last_resolve_ms_ = 0;
+  last_cache_hit_ = false;
 
   QElapsedTimer local_timer;
   local_timer.start();
@@ -316,6 +317,46 @@ void OnlineResolveDialog::StartResolve() {
     status_label_->setText(QStringLiteral("本地校验未通过：未发起网络请求"));
     emit resolveCompleted(false);
     return;
+  }
+
+  // T8.7：已完整缓存的同 BV 优先离线打开；这一步只读磁盘，不发任何请求。
+  // 带 ?p=N（N>1）的输入不做缓存探测：缓存 meta 没有分P 号，不能用猜测的
+  // 分P 覆盖用户明确选择的页。
+  if (cache_probe_ && (!input.page_from_input || input.page == 1)) {
+    OnlineCacheSummary summary;
+    QString probe_error;
+    QElapsedTimer cache_timer;
+    cache_timer.start();
+    if (cache_probe_(input.bvid, &summary, &probe_error) && summary.cid > 0) {
+      lapian::online::BiliVideo video;
+      video.bvid = input.bvid;
+      video.title = summary.title.isEmpty() ? input.bvid : summary.title;
+      video.owner = summary.owner;
+      video.duration_seconds = summary.duration_ms / 1000;
+      lapian::online::BiliPage page;
+      page.page = 1;
+      page.cid = summary.cid;
+      page.title = QStringLiteral("缓存");
+      page.duration_seconds = summary.duration_ms / 1000;
+      video.pages.push_back(page);
+      video.selected_index = 0;
+      ShowResult(video);
+      last_cache_hit_ = true;
+      last_http_requests_ = 0;
+      last_resolve_ms_ = cache_timer.elapsed();
+      status_label_->setText(
+          QStringLiteral("缓存命中：离线打开，不发起网络请求；点“确认”开始"));
+      if (quality_label_ != nullptr) {
+        quality_label_->setText(
+            QStringLiteral("缓存命中：qn=%1 · codecid=%2 · %3fps")
+                .arg(summary.qn)
+                .arg(summary.codecid)
+                .arg(QString::number(summary.fps, 'f', 1)));
+        quality_label_->show();
+      }
+      emit resolveCompleted(true);
+      return;
+    }
   }
 
   // T8.2 / DEC-3：有凭据时，用户首次提交合法 BV/URL 后才自检一次；与 view
@@ -423,10 +464,12 @@ void OnlineResolveDialog::OnConfirm() {
   confirmed_ = true;
   UpdateConfirmState();
   status_label_->setText(
-      QStringLiteral("已确认：%1 · P%2 · cid %3（取流将在 T8.5 接入）")
+      QStringLiteral("已确认：%1 · P%2 · cid %3%4")
           .arg(video_.bvid)
           .arg(page->page)
-          .arg(page->cid));
+          .arg(page->cid)
+          .arg(last_cache_hit_ ? QStringLiteral("（缓存命中，离线打开）")
+                               : QString()));
   emit confirmed(video_.bvid, page->cid, page->page);
 }
 
@@ -705,7 +748,7 @@ void OnlineResolveDialog::UpdateQualityHint() {
   QString text;
   switch (auth_.state()) {
     case lapian::online::AuthState::kLoggedIn:
-      text = QStringLiteral("已登录：清晰度以取流时返回为准（T8.5 接入）");
+      text = QStringLiteral("已登录：清晰度以取流时返回为准");
       break;
     case lapian::online::AuthState::kChecking:
       text = QStringLiteral("登录检查中…；当前按未登录清晰度解析");

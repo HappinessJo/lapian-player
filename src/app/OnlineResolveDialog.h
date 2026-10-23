@@ -8,6 +8,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -44,6 +45,18 @@ struct OnlineConfirmInfo {
   QString page_title;
 };
 
+// T8.7：解析前先查本地完整缓存；命中则不发 view/playurl 请求。
+struct OnlineCacheSummary {
+  QString bvid;
+  qint64 cid = 0;
+  QString title;
+  QString owner;
+  qint64 duration_ms = 0;
+  int qn = 0;
+  int codecid = 0;
+  double fps = 0.0;
+};
+
 class OnlineResolveDialog : public QDialog {
   Q_OBJECT
 
@@ -53,6 +66,14 @@ class OnlineResolveDialog : public QDialog {
 
   // 产品入口：MainWindow 的 Ctrl+U 调用 OpenOnlineDialog()。
   void StartResolve();
+
+  // T8.7：完整缓存探测（不联网）。命中时直接回显缓存元数据，确认后由
+  // OnlineSession 的 OpenComplete 路径打开；探测失败/未命中才走 view。
+  using CacheProbe =
+      std::function<bool(const QString& bvid, OnlineCacheSummary* summary,
+                         QString* error)>;
+  void SetCacheProbe(CacheProbe probe) { cache_probe_ = std::move(probe); }
+  bool CacheHitForTest() const { return last_cache_hit_; }
 
   // 测试入口（不绕过产品路径）：注入 fake HTTP、同步等待、读取回显字段。
   void SetHttpClientForTest(std::unique_ptr<lapian::online::IHttpClient> client);
@@ -211,6 +232,8 @@ class OnlineResolveDialog : public QDialog {
   std::shared_ptr<lapian::online::HttpCancelToken> cancel_;
   std::shared_ptr<ResolveOutcome> outcome_;
   std::thread worker_;
+  CacheProbe cache_probe_;
+  bool last_cache_hit_ = false;
 
   lapian::online::CredentialStore credentials_;
   lapian::online::BiliAuthSession auth_;

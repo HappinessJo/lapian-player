@@ -1,11 +1,16 @@
 #include "media/SnapshotNaming.h"
 
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 
 #include <algorithm>
+#include <cmath>
 
 #include "core/FrameMath.h"
 
@@ -69,6 +74,17 @@ bool IsWritableDirectory(const QString& path) {
     return false;
   }
   return probe.flush();
+}
+
+QString DefaultAppDataOnlineRoot() {
+  QString appdata = qEnvironmentVariable("APPDATA");
+  if (appdata.isEmpty()) {
+    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+  }
+  if (appdata.isEmpty()) {
+    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+  }
+  return QDir(appdata).filePath(QString::fromUtf8("拉片软件/online"));
 }
 
 }  // namespace
@@ -193,6 +209,117 @@ SnapshotDirectory ResolveSnapshotDirectory(const QString& video_path,
                       QDir::toNativeSeparators(fallback));
   }
   return result;
+}
+
+OnlineSnapshotDirectory ResolveOnlineSnapshotDirectory(
+    const QString& bvid, const QString& pictures_root,
+    const QString& appdata_online_root, QString* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+
+  OnlineSnapshotDirectory result;
+  const QString safe_bvid = SanitizeSnapshotBaseName(bvid);
+  if (safe_bvid.isEmpty() || safe_bvid == QStringLiteral("snapshot")) {
+    if (error != nullptr) {
+      *error = QStringLiteral("在线截图缺少有效 bvid");
+    }
+    return result;
+  }
+
+  QString pictures = pictures_root;
+  if (pictures.isEmpty()) {
+    pictures = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+  }
+  if (pictures.isEmpty()) {
+    pictures = QDir::homePath() + QStringLiteral("/Pictures");
+  }
+  pictures = QFileInfo(pictures).absoluteFilePath();
+  const QString primary =
+      QDir(pictures).filePath(QStringLiteral("拉片软件/%1").arg(safe_bvid));
+  if (IsWritableDirectory(primary)) {
+    result.path = primary;
+    return result;
+  }
+
+  const QString appdata = appdata_online_root.isEmpty()
+                              ? DefaultAppDataOnlineRoot()
+                              : appdata_online_root;
+  const QString fallback = QDir(appdata).filePath(
+      QStringLiteral("snapshots/%1").arg(safe_bvid));
+  if (IsWritableDirectory(fallback)) {
+    result.path = fallback;
+    result.fallback = true;
+    result.reason = QStringLiteral("图片目录不可写，已回退 %APPDATA% 在线目录");
+    return result;
+  }
+
+  if (error != nullptr) {
+    *error = QStringLiteral("在线截图目录不可写：\n%1\n%2")
+                 .arg(QDir::toNativeSeparators(primary),
+                      QDir::toNativeSeparators(fallback));
+  }
+  return result;
+}
+
+QString BuildOnlineSnapshotBaseName(const QString& bvid, std::int64_t frame,
+                                    int fps_num, int fps_den) {
+  const QString base = SanitizeSnapshotBaseName(bvid);
+  return QStringLiteral("%1_f%2_%3")
+      .arg(base)
+      .arg(static_cast<qlonglong>(frame))
+      .arg(FormatSnapshotTimecode(frame, fps_num, fps_den));
+}
+
+bool AppendOnlineSnapshotIndex(const QString& directory, const QString& bvid,
+                               std::int64_t cid, int qn, int codecid, double fps,
+                               std::int64_t frame, std::int64_t pts_us,
+                               const QString& png_path, QString* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (directory.isEmpty()) {
+    if (error != nullptr) {
+      *error = QStringLiteral("在线截图目录为空");
+    }
+    return false;
+  }
+  QJsonObject object;
+  object.insert(QStringLiteral("bvid"), bvid);
+  object.insert(QStringLiteral("cid"), static_cast<double>(cid));
+  object.insert(QStringLiteral("qn"), qn);
+  object.insert(QStringLiteral("codecid"), codecid);
+  object.insert(QStringLiteral("fps"), std::isfinite(fps) && fps > 0.0 ? fps : 0.0);
+  object.insert(QStringLiteral("frame"), static_cast<double>(frame));
+  object.insert(QStringLiteral("pts"), static_cast<double>(pts_us));
+  object.insert(QStringLiteral("path"),
+                QDir::toNativeSeparators(QFileInfo(png_path).absoluteFilePath()));
+  object.insert(QStringLiteral("saved_at"),
+                QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+  QByteArray line = QJsonDocument(object).toJson(QJsonDocument::Compact);
+  line.append('\n');
+
+  const QString index_path = QDir(directory).filePath(QStringLiteral("index.jsonl"));
+  QFile index(index_path);
+  if (!index.open(QIODevice::ReadWrite | QIODevice::Append)) {
+    if (error != nullptr) {
+      *error = QStringLiteral("无法打开截图清单：%1").arg(index.errorString());
+    }
+    return false;
+  }
+  const qint64 before = index.size();
+  const bool written = index.write(line) == line.size() && index.flush();
+  if (!written) {
+    const QString detail = index.errorString();
+    index.resize(before);
+    index.close();
+    if (error != nullptr) {
+      *error = QStringLiteral("写入截图清单失败：%1").arg(detail);
+    }
+    return false;
+  }
+  index.close();
+  return true;
 }
 
 }  // namespace lapian::snapshot
