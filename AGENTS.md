@@ -234,6 +234,7 @@
 - **“分镜识别”定义不清。** 硬切检测 ≠ 分镜；镜头内推拉/特效/构图变化算不算，要先定义。本地模型 vs 云端还会冲击轻量化/隐私/成本。
 - **竞品基线别低估。** PotPlayer、mpv、IINA 已有逐帧、帧号、A-B 循环。差异化是“帧时间轴 + 音频对齐 + 零加载”的组合，不是“能逐帧”本身。
 - **吸管颜色口径容易翻车。** 吸的是源 YUV 还是显示 sRGB？10-bit/HDR 下差别很大。候选阶段就要先定色彩口径。
+- **从 DSH 工作区直接启动的 exe 是 Low integrity。** `dist` / `build\release\bin` 的 `lapian.exe` 继承工作区 `Mandatory Label\Low Mandatory Level`，进程以 Low 运行，不能写 Medium 的 `%LOCALAPPDATA%` / `%APPDATA%`；在线会话会报“无法创建缓存目录：<path>”。默认路径验收/正常使用必须用 `%LOCALAPPDATA%\Programs\拉片软件`（T7.6 installer 或整目录复制）的 Medium 副本；以管理员运行是 High 向下写，不是修复。T8.8 的 M1 默认路径证据本来就来自 Medium 副本。
 
 ---
 

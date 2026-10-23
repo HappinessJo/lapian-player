@@ -497,6 +497,7 @@ build\release\bin\lapian.exe --online-fetch-test --real --bvid <BV> --cid <cid> 
 - P1/P2 命令：`powershell -File scripts\startup-bench.ps1 -Exe dist\lapian.exe -File media\proxy\proxy-V1.mp4 -Runs 20 -OutDir build\t8.8-m1\bench-startup`。
 - P7 命令：`dist\lapian.exe --gop-boundary-test --file build\test-media\real-gop2s-full.mp4 --gop-boundary-samples 20 --gop-boundary-tag t88-p7`。
 - 零网络轮询不是 ProcMon/ETW；与 T7.6/T8.6/T8.7 口径一致（40–500ms 轮询 + 模块检查 + 计数 HTTP 客户端）。
+- **工作区 exe 是 Low integrity**：本轮 A/B 同一 `lapian.exe` 在工作区启动 IL=4096，在线打开报“无法创建缓存目录”；复制到 `%LOCALAPPDATA%\...` 启动 IL=8192，同一路径写入成功。M1 的默认路径证据全部来自 Medium 副本，不影响 M1 结论；正常使用应从 `%LOCALAPPDATA%\Programs\拉片软件` 启动。
 
 ---
 
