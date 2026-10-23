@@ -1,7 +1,7 @@
 # 拉片软件 v2 在线模式任务拆分（tasks-v2.md）
 
-- **版本**：v0.6（2026-10-23 T8.3 完成：缓存存储/配额/LRU/续传/损坏重建）
-- **状态**：**S3 定稿**；**T8.1/T8.2/T8.3 完成**；T8.4 待开；DEC-1…5 已拍板；M1/M2 已锁定；B 条件验收保留（非 MVP 门）。
+- **版本**：v0.7（2026-10-23 DEC-6：扫码登录并入 v2，新增 T8.2.2，非门）
+- **状态**：**S3 定稿**；**T8.1/T8.2/T8.3 完成**；T8.4 待开；T8.2.2（扫码）已入计划，排 T8.4 之后；DEC-1…**6** 已拍板；M1/M2 已锁定；B 条件验收保留（非 MVP 门）。
 - **依据**：[spec-v1.0-delta.md](docs/spec-v1.0-delta.md) v0.3、[plan.md](plan.md) v2 章节、[ADR-007 草案](docs/adr/ADR-007-bilibili-online.md)、[v2-online-spike.md](docs/perf/v2-online-spike.md)、[product-v2-vision.md](docs/product-v2-vision.md)、[T8.1 证据](docs/perf/v2-online-resolve.md)、[T8.3 证据](docs/perf/v2-online-cache.md)
 - **范围**：只覆盖在线模式。v1 任务台账 `tasks.md` **只读**；本文件不重复 T0–T7，不改 v1 验收值。
 - **硬约束**：4K / 1080P60 / 720P60 **不进任何 M1/M2 验收项**；B 另设 T8.15 独立条件验收（非门）；未缓存区不承诺 P7/P9；本地模式零网络不退化；Cookie 不入库/不回显/不写日志。
@@ -23,6 +23,7 @@
 `T8.1 → T8.2 → T8.5`
 
 - T8.2 与 T8.3 可并行；T8.4 只依赖 T8.3；T8.5 依赖 T8.2（HTTP）与 T8.4（写入/发布）。
+- **T8.2.2（扫码登录，DEC-6）不在 M1/M2 门内**：只依赖 T8.2（已完成），排在 T8.4 之后、T8.6 之前（可与 T8.5 并行）；失败不得影响 M1/M2 判定。
 - T8.6 是第一次“真实窗口跑通”；T8.7 补缓存命中与记录；T8.8 是 M1 门。
 
 **M2**：
@@ -47,6 +48,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | **T8.0**（完成 2026-10-23） | S3 收口：DEC-1…DEC-5 拍板落地；ADR-007 附条件接受；delta v0.3/tasks v0.3；锁定 M1 范围 | S3 文档 | 5 项决策已记录；ADR-007 评审记录已写；delta/tasks v0.3；tasks ID 不变；**不写代码** | 决策表（delta §9.1）；ADR 评审记录；`docs/handoff-2026-10-23-s3.md` | 无 |
 | **T8.1**（完成 2026-10-23） | 解析层：BV/URL 归一化与本地校验；`view` 元数据（标题/UP/时长/分P）；错误码映射；回显确认；未登录提示 | T8.0 | 单测：BV/URL 解析、分P、非法输入；手测：OB-1/2/3 元数据；OB-5 五类失败码；非法输入 ≤100ms 且 0 网络；串片样本必须回显标题/时长；解析取消 ≤100ms（DEC-2 已拍板） | `--online-resolve-test`；`docs/perf/v2-online-resolve.md` | API 变动；串片；多P 歧义 |
 | **T8.2**（完成 2026-10-23） | HTTP 栈自检 + 凭据：`IHttpClient` 抽象；WinHTTP 优先、libcurl 备选；带 SESSDATA 的 `nav` 自检；DPAPI 存储/清除；日志脱敏；-101 映射；DEC-3 时机 | T8.1 | **门：至少一种产品实际栈 nav `code=0/isLogin=true`**（WinHTTP 通过：5 次 161–202ms，`cookie_sent=1`，`vip_status=0`）；否则停线重决策；磁盘无明文；哨兵 Cookie 不出现在日志/弹窗；清除后按匿名；超时/取消可用；TLS 校验开启 | `--online-http-selfcheck`；`docs/perf/v2-online-http-selfcheck.md`；DPAPI 单测（`lapian_online_auth_test` 104/0）；`docs/handoff-2026-10-23-t8.2.md` | 两种栈都 -101；代理/TLS；libcurl 体积/许可（未构建，T8.16 再定） |
+| **T8.2.2**（DEC-6 拍板；非门） | 扫码登录：`passport.bilibili.com` 二维码 `generate`/`poll`；二维码本地渲染（vendored MIT 单文件，不引入 WebEngine/新 DLL）；状态机（等待/已扫待确认/过期/成功/失败）、180s 过期可刷新、可取消；成功只提取 SESSDATA → 复用 `CredentialStore`（DPAPI）+ nav 自检；失败回退 SESSDATA 粘贴（含剪贴板一键/图文引导） | T8.2 | 单测（fake HTTP）：4 态、过期、取消、坏 JSON、412/429 风控码、只提取 SESSDATA、日志无凭据；`--online-qr-test`（无 GUI、不写真账号）；真实扫码 1 次（用户手机）成功且 nav 通过；过期/取消 ≤100ms；失败不显示假登录态；本地模式仍 0 请求 | `--online-qr-test`；`docs/perf/v2-online-qr.md`；`docs/handoff-*-t8.2.2.md`；`lapian_online_qr_test` | 风控 412/429；网页接口变动；二维码依赖许可；真实扫码样本有限 |
 | **T8.3**（完成 2026-10-23） | 缓存存储与配额：缓存根/目录结构；`meta.json`；`.part`→`.mp4` 原子改名；20GB 可配置；LRU；占用/清空；空间预检；孤儿清理；续传 | T8.1 | 单测（300MB 配额）：LRU 顺序、当前不淘汰、总占用 ≤配额；杀进程后续传；损坏检测/重建；清空保留在线记录；磁盘满 ≤5s 可读错误；路径/配额跨会话。**结果**：`lapian_online_cache_test` 366/0/0 skip；300MB 占用 283,116,589→188,744,706（配额 314,572,800、只淘汰最旧 90MB）；20GB 记账 21→16→10 GiB（`10,737,418,599 ≤ 21,474,836,480`）；续传 5,242,880；8 类损坏不可播放；清空保存 records sentinel；空间预检 0.082–0.115ms；长路径 301/312 字符；meta 无明文 | `lapian_online_cache_test`；`--online-cache-test`（32/0，verdict=pass）；`docs/perf/v2-online-cache.md`；`docs/handoff-2026-10-23-t8.3.md` | 文件锁/杀软；长路径；磁盘空间计算 |
 | **T8.4** | 可增长读层（关键路径）：`GrowingSource` + 每读者 `Cursor`/AVIO；已知总大小；阻塞读/发布；取消；EOF/错误语义；多读者；统计 | T8.3 | 0.3MB 可出首帧；100 次 seek 落点 0；已缓存 seek 零阻塞；未缓存等待 ≈剩余/速率（记录）；取消 ≤100ms；4 读者×10min 无死锁/丢唤醒；关窗 ≤1s；内存有界；无 busy loop | `lapian_growing_source_test`；`docs/perf/v2-online-growing.md` | 死锁/丢唤醒；FFmpeg EOF/seek；锁竞争；int64 |
 | **T8.5** | durl 取流：`playurl(fnval=0)`；M1 档位（720p/可用最高）；顺序下载；Range 续传；3 备份 URL；重试/退避；URL 过期刷新；吞吐统计；暂停/取消；完成改名 | T8.2、T8.4 | 3/3 登录样本 720p；首 0.3MB 出首帧；断网 5s 后续传；杀进程后续传；模拟 403/过期刷新；备份切换；无重复/损坏字节；产物可被 ffprobe 正常打开 | `docs/perf/v2-online-m1.md`；故障日志 | durl 档位不可预期；Range 被忽略；CDN 限速；120min 过期 |
@@ -62,6 +64,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 4. 失败矩阵（格式/不存在/不可见/未登录/断网/磁盘满）5s 内可读，不崩。
 5. 缓存/记录可恢复：杀进程续传、清缓存不丢记录。
 6. **没有** 4K/1080P60 验收项；**没有** 未缓存区 80ms 承诺。
+7. **扫码登录（T8.2.2）不是 M1 门**：M1 的“登录后 3/3 720p”用 SESSDATA 粘贴即可满足；T8.2.2 失败/未做不影响 M1 判定。
 
 ---
 
@@ -91,7 +94,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 
 ## 两周排期（DEC-1 已拍板：M1→M2）
 
-> 详细见 [plan.md](plan.md) §12.12。**前提已满足**：DEC-1…5 已拍板、ADR-007 附条件接受；**无缓冲日**；M1 可独立交付，M2 可滑。
+> 详细见 [plan.md](plan.md) §12.12。**前提已满足**：DEC-1…6 已拍板、ADR-007 附条件接受；**无缓冲日**；M1 可独立交付，M2 可滑。
 
 | 天 | 任务 | 门/证据 |
 |---|---|---|
@@ -100,6 +103,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | D1–D2 | T8.2 | **HTTP 自检门**；`v2-online-http-selfcheck.md` |
 | D2 | T8.3（完成） | `v2-online-cache.md` |
 | D2–D3 | T8.4 | `v2-online-growing.md`（关键路径） |
+| D3–D4（与 T8.5 并行） | T8.2.2（非门，DEC-6） | 扫码登录；`v2-online-qr.md`；`--online-qr-test` |
 | D3–D4 | T8.5 | `v2-online-m1.md` |
 | D4–D5 | T8.6 | E2E 3 条；`--online-m1-test` |
 | D5 | T8.7 + T8.8 | **M1 门**；M1 交接 |
@@ -127,7 +131,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 
 ## 审核门
 
-1. **DEC-1…DEC-5 已拍板；ADR-007 附条件接受**；T8.2/T8.4 通过后回填评审记录。
+1. **DEC-1…DEC-6 已拍板；ADR-007 附条件接受**；T8.2/T8.4 通过后回填评审记录。
 2. M1 门通过后才进 M2；M2 门通过后才谈 Beta/发布。
 3. 每个里程碑必须有：性能证据、失败矩阵、本地回归、网络审计（本地 0 请求）、缓存/记录恢复证据。
 4. 任何“4K 可达/60fps 可达”的结论只能进 T8.15（B 条件验收，非门），不得写成 MVP 通过。
@@ -142,6 +146,7 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | **DEC-3 登录自检时机** | T8.2、O8/O9 | 已拍板 A：首次在线打开 |
 | **DEC-4 60fps 提示形态** | T8.12、O6 | 已拍板 A：横幅 + 常驻角标 |
 | **DEC-5 配额验收方式** | T8.3/T8.8 | 已拍板 A：300MB + 20GB 记账单测 |
+| **DEC-6 扫码登录** | T8.2.2、O8/§6.1、vision §3/§5 | 已拍板 B：官方网页二维码流程，非门，失败回退 SESSDATA 粘贴 |
 
 ## 版本记录
 
@@ -153,4 +158,5 @@ M2  T8.9 → T8.10 → T8.11 → T8.12 → T8.13 → T8.14
 | v0.4 | 2026-10-23 | T8.1 完成：BV/URL 归一化、匿名 view、分P、错误映射、回显确认、`--online-resolve-test`；证据 `docs/perf/v2-online-resolve.md`；M1/M2 门与验收数字未改 |
 | v0.5 | 2026-10-23 | T8.2 完成：WinHTTP nav `code=0/isLogin=true`（普通用户，161–202ms）；SESSDATA/DPAPI/凭据 UI/DEC-3/脱敏；`--online-http-selfcheck`、`--online-auth-test`；libcurl 未构建；M1/M2 门与验收数字未改 |
 | v0.6 | 2026-10-23 | T8.3 完成：`CacheStore`（默认根/默认 20GiB/meta/.part→.mp4/配额 LRU/续传/损坏重建/清空/孤儿/长路径）；300MB LRU + 20GB 记账单测；`lapian_online_cache_test` 366/0、`--online-cache-test` 32/0；settings 新增 `cache_root/cache_quota_gb`；M1/M2 门与验收数字未改 |
-| v0.7（待） | — | M1/M2 实测后修正（只改 v2 任务） |
+| v0.7 | 2026-10-23 | **DEC-6 拍板**：扫码登录并入 v2，新增 **T8.2.2**（非 M1/M2 门；依赖 T8.2；排 T8.4 之后、可与 T8.5 并行）；只走官方网页二维码流程、只保留 SESSDATA、失败回退粘贴；M1/M2 门与全部数字未改 |
+| v0.8（待） | — | M1/M2 实测后修正（只改 v2 任务） |
