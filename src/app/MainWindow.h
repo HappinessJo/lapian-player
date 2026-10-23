@@ -300,6 +300,10 @@ class MainWindow : public QMainWindow {
   void ResetOnlineStepTraceForTest();
   int OnlineStepBoundaryStopsForTest() const;
   int OnlineStepRetargetCountForTest() const;
+  // 自动化模拟“物理键仍按住时收到伪 KeyRelease”；-1 走真实 GetAsyncKeyState。
+  void SetStepKeyPhysicalDownForTest(int state) {
+    step_key_physical_down_for_test_ = state;
+  }
 
  signals:
   // T7.1：每一帧真正 Present 后转发一次（GfxWidget::framePresented）。
@@ -451,7 +455,8 @@ class MainWindow : public QMainWindow {
   bool CanStepFrames() const;
   bool HandleGlobalKey(QKeyEvent* event);
   void StartStepRepeat(int delta);
-  void StopStepRepeat();
+  void StopStepRepeat(const char* reason = "unspecified");
+  bool IsStepKeyPhysicallyDown(int key) const;
   void SendKeyPressForTest(int key, int modifiers, bool auto_repeat);
   void SendKeyReleaseForTest(int key, int modifiers, bool auto_repeat = false);
   // T6.3：加载/应用/保存设置。只在 UI 构造完成后、首次打开文件前应用；
@@ -529,6 +534,8 @@ class MainWindow : public QMainWindow {
   // T7.11.1：后退跨 GOP 第一步的硬解窗口延后回拷（呈现后再填缓存）。
   QTimer* cache_fill_timer_ = nullptr;
   int step_direction_ = 0;
+  int step_key_physical_down_for_test_ = -1;
+  QString step_stop_reason_;
   AVFrame* displayed_frame_ = nullptr;
   std::int64_t current_frame_ = 0;
   std::int64_t current_pts_us_ = 0;

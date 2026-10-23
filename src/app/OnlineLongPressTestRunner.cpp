@@ -259,8 +259,8 @@ void OnlineLongPressTestRunner::Run() {
           after_hold_status != before_hold_status,
           QStringLiteral("before=%1 after=%2")
               .arg(before_hold_status, after_hold_status));
-    check("uncached_hold_retargets",
-          window_->OnlineStepRetargetCountForTest() > retarget_before,
+    check("uncached_hold_no_retarget",
+          window_->OnlineStepRetargetCountForTest() == retarget_before,
           QStringLiteral("before=%1 after=%2")
               .arg(retarget_before)
               .arg(window_->OnlineStepRetargetCountForTest()));
@@ -284,7 +284,8 @@ void OnlineLongPressTestRunner::Run() {
               .arg(window_->CurrentFrameForTest()));
     check("back_to_cached_le_1500ms", back_ms <= 1500,
           QStringLiteral("ms=%1").arg(back_ms));
-    check("retarget_occurred", window_->OnlineStepRetargetCountForTest() > 0,
+    check("uncached_hold_no_retarget_after_cancel",
+          window_->OnlineStepRetargetCountForTest() == retarget_before,
           window_->OnlineStepStateForTest());
     Print(QStringLiteral(
               "online_longpress_uncached target=%1 jump_ui_ms=%2 step_ui_ms=%3 "
@@ -321,8 +322,14 @@ void OnlineLongPressTestRunner::Run() {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   const bool forward_active_during = window_->StepRepeatActiveForTest();
+  // 物理长按会混入 OS 自动重复的 KeyPress/KeyRelease；连发不能被它停掉。
+  window_->PressAutoRepeatKeyForTest(Qt::Key_PageDown);
+  window_->PressAutoRepeatReleaseForTest(Qt::Key_PageDown);
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  const bool forward_active_after_auto = window_->StepRepeatActiveForTest();
   window_->PressKeyUpForTest(Qt::Key_PageDown);
   check("forward_repeat_started", forward_active_before);
+  check("forward_autorepeat_keeps_repeat", forward_active_after_auto);
   check("forward_repeat_active_2s", forward_active_during);
   check("forward_release_stops", !window_->StepRepeatActiveForTest());
   WaitStepIdle(5000, "forward_idle");
@@ -413,6 +420,42 @@ void OnlineLongPressTestRunner::Run() {
             .arg(static_cast<qint64>(backward_trace.size()))
             .arg(backward_bad)
             .arg(options_.hold_ms));
+
+  // ---- 伪 KeyRelease：物理键仍按住时，不能停连发 ----
+  // Qt/Windows 在极少数时序下会在键仍按下时补一个非 autoRepeat 的 release；
+  // 该场景无法用普通 QKeyEvent 表示“物理键仍按下”，用测试钩子模拟。
+  window_->SetStepKeyPhysicalDownForTest(1);
+  window_->FocusVideoForTest();
+  window_->ResetOnlineStepTraceForTest();
+  const std::int64_t spurious_start = window_->CurrentFrameForTest();
+  window_->PressKeyDownForTest(Qt::Key_PageDown);
+  QElapsedTimer spurious_timer;
+  spurious_timer.start();
+  while (spurious_timer.elapsed() < 400) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  window_->PressKeyUpForTest(Qt::Key_PageDown);  // 伪 release：物理键仍按住
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  const bool spurious_survives = window_->StepRepeatActiveForTest();
+  while (spurious_timer.elapsed() < 800) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const int spurious_frames =
+      static_cast<int>(window_->OnlineStepTraceForTest().size());
+  window_->SetStepKeyPhysicalDownForTest(0);
+  window_->PressKeyUpForTest(Qt::Key_PageDown);  // 真正的 keyup
+  const bool spurious_stopped = !window_->StepRepeatActiveForTest();
+  window_->SetStepKeyPhysicalDownForTest(-1);
+  WaitStepIdle(5000, "spurious_release_idle");
+  check("spurious_release_keeps_repeat", spurious_survives,
+        QStringLiteral("frame=%1").arg(window_->CurrentFrameForTest()));
+  check("spurious_release_still_steps", spurious_frames >= 1,
+        QStringLiteral("frames=%1 start=%2")
+            .arg(spurious_frames)
+            .arg(spurious_start));
+  check("physical_release_stops", spurious_stopped);
 
   // ---- 短按回归：单次 ±1、松开不走帧、快速双击不丢 ----
   const std::int64_t short_base = window_->CurrentFrameForTest();

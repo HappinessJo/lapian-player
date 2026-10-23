@@ -1,16 +1,75 @@
 # T8.6.1a 在线长按步进证据（2026-10-24）
 
+- **版本**：v1.1（2026-10-24 实机回归 hotfix；原 v1.0 数字保留为修复前记录）
 - **范围**：只做 **T8.6.1a 在线长按 PgUp/PgDn**（非门任务，M1 后）。把在线步进从
   “同步 `current_frame_` 检查”改为异步步进状态机；seek 合并/取消；边界停止；
   未缓存区“缓冲中（目标帧 N）”且可取消，不阻塞 UI。**不做** T8.3.1、T8.6.1b、
   M2/DASH、T8.9、扫码、4K/1080P60。**未改 M1/M2 门、验收数字与 OB 样本定义。**
-- **提交**：本任务一个 commit（hash 见 `git log -1`）；基线 HEAD `5c5dddc`。
+- **提交**：初始实现 commit `3859822`；实机回归 hotfix 一个 commit（hash 见 `git log -1`）；基线 HEAD `5c5dddc`。
 - **依据**：[tasks-v2.md](../tasks-v2.md) T8.6.1a、[delta v0.4](../spec-v1.0-delta.md)
   OP2/OP3/OP5/O10、[T8.6 证据](v2-online-session.md) §5、[T8.6.1a 交接](../handoff-2026-10-24-t8.6.1a.md)。
 - **一句话**：真实 3 条样本（Medium 副本）各 2 轮、构建目录副本 1 轮，长按 2s
   前进/后退逐帧连续（25–26 帧、0 跳帧），UI 最大间隔 37–77ms，未缓存提示 0ms、
   取消/回到已缓存 4–17ms 调用 + 31–51ms 落点，首末帧边界均停止；本地模式与
   `ctest` 无回退。
+- **2026-10-24 实机回归修复（v1.1）**：初始实现提交后，实机首次在线播放发现长按
+  只走 1 帧、慢拖只变帧号。已定位并修复两条代码路径（见 §0.1）：未缓存区
+  70ms tick 反复取消在途 seek 造成 starvation；物理键仍按住时的伪 `KeyRelease`/
+  焦点变化停连发。修复后探针 **54 项/0**，并新增伪 release 用例；**慢拖预览仍属
+  T8.6.1b，未在本 hotfix 实现**。
+
+---
+
+## 0.1 实机回归修复（2026-10-24 晚）
+
+### 根因
+
+1. **未缓存长按 starvation（主因）**：旧 `ApplyOnlineStep` 在“在途未缓存 + 下一帧
+   未缓存”时每个 70ms tick 都取消旧等待并重定向。只要在线 seek 慢于 70ms
+   （部分索引、慢网、会话重建），每一步都会在落地前被下一步取消；松手后只有
+   最后一步落地，表现就是“按住 2 秒只走 1 帧”。暂停/全屏/焦点都不是必要条件。
+2. **真实按键伪 release / 焦点停连发**：Qt/Windows 在物理长按时可能插入非
+   `autoRepeat` 的 `KeyRelease`；另有 `focusChanged`/窗口失活直接 `StopStepRepeat`。
+   这类停止在合成 KeyDown 探针里不会出现，所以初始探针 50/0 未覆盖。
+3. **慢拖 clamp/提示**：增长会话 `preview_ == nullptr`，拖动本来只有帧号变化；
+   `OnScrubFinished` 又用部分索引长度 clamp，拖到未缓存区会被截到索引末尾。
+
+### 修复
+
+- 未缓存步进改为**单格排队**：不取消在途 seek，落地后再走下一格；提示跟随排队
+  目标，不承诺逐帧立即呈现（OP3 不变）。`retargets` 不再增长。
+- `KeyRelease` 前查 Windows `GetAsyncKeyState`：物理键仍按住时忽略伪 release；
+  下一次 OS 自动重复 KeyPress 在物理键仍按下时恢复连发（边界/seek 失败不恢复）。
+- `StopStepRepeat` 增加 reason 日志；`step_start`/`focus_changed`/`step_release_ignored`/
+  `online_step_tick`（last/stable/eligible/inflight/queued）可用于实机定位。
+- `OnScrubFinished` 增长会话改用 `OnlineLastFrame()`；增长会话不再显示“拖动预览”
+  假提示；**拖动预览仍未实现**。
+
+### 证据（用户样本 `BV1PAnt6qEga`/cid `42971761157`，720P，5,169,220B，2327 帧）
+
+| 项 | 修复后 |
+|---|---|
+| `--online-longpress-test` | **54/0** |
+| 已缓存前进 2s | 30→56，26 帧，bad=0 |
+| 已缓存后退 2s | 56→30，26 帧，bad=0 |
+| 未缓存长按 retargets | **0**（修复前 6） |
+| 伪 release 后连发 | 保持 active，继续 8 帧；真正 keyup 停止 |
+| auto-repeat KeyPress/Release | 连发不被停 |
+| `ctest` | 30/30（30.93s） |
+| 本地 `--key-test` | 77/0；2s 27 帧 |
+
+探针用测试钩子模拟“物理键仍按住”的伪 release（`SetStepKeyPhysicalDownForTest`），
+真实 `GetAsyncKeyState` 仍是薄 OS 调用；实机键盘确认是可选项，不是代码正确性的前提。
+**M1/M2 门、验收数字与 OB 样本未改。**
+
+### 仍未做
+
+- T8.6.1b 拖动预览（依赖 T8.11）。
+- 首帧 open 阻塞**已量**：44MB/720P 慢样本 `open_ms=38.07`、`first_frame_ms=27.34`、
+  `published=524288/44257060`、online first_frame **634ms**；5MB 样本 706ms。首帧仍
+  在 512KB 返回，`OpenGrowing` 不是长等待主因；用户感知的“缓存几十秒”是下载/
+  播放缓冲，不改 open 架构，最多改首帧可播提示。
+
 
 ---
 
@@ -52,7 +111,7 @@ T8.6 的 `StartStepRepeat` 在 `GoToFrameForStep` 后比较 `current_frame_` 是
 | 场景 | 行为 |
 |---|---|
 | 已缓存区 | 单格排队：在途 seek 未完成时到来的 tick 只排 **1** 步；落地后再走，屏幕序列逐帧连续，不合并跳帧。 |
-| 未缓存区 | 不承诺逐帧呈现（OP3）：按住时每个 tick 把目标 +1，**取消旧等待并重定向**到最新目标；状态栏“缓冲中（目标帧 N）”跟随最新目标。有在途已缓存步时先让它落地再进入等待，避免跳过已缓存帧。 |
+| 未缓存区 | 不承诺逐帧呈现（OP3）：在途 seek 未完成时只排 **1** 格，不取消在途 seek；落地后再走下一格。**不要每 70ms 取消重定向**——慢 seek 会被下一步反复取消，长按会退化成“只走 1 帧”。状态栏“缓冲中（目标帧 N）”跟随排队目标。有在途已缓存步时先让它落地再进入等待，避免跳过已缓存帧。 |
 | 边界 | 0 / 末帧（口径与 T8.6 `GoToFrameInternal` 相同：完整索引→容器总帧数→部分索引）立即停止连发；在途的一步仍允许落地；不向越界帧 seek。 |
 | 短按 | 单次按键 = ±1；松开只停连发，不取消已请求的那一步；快速双击在途时排 1 格，结果为 ±2，不丢短按。 |
 | 外来 seek 在途 | 时间轴/Home/End/标记跳转未落地时，步进从“已请求的目标帧”±1（状态栏显示的就是该目标），并取消旧等待。 |
@@ -76,18 +135,22 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 
 ## 3. 探针 `--online-longpress-test`
 
-新增产品探针（真实网络 + 真实窗口，不注入假数据），50 项检查：
+新增产品探针（真实网络 + 真实窗口，不注入假数据），修复后 **54 项检查**：
 
 1. 解析确认 → 首帧 → 默认暂停 → 等部分索引 ≥60 帧；
 2. 远端未缓存目标：跳转提示 0ms → 单次 PgDn 从目标 +1（提示/≤100ms）→ 按住 600ms
-   （提示跟随、重定向 ≥6 次）→ 跳回已缓存帧（取消 ≤100ms，落点精确 ≤1.5s）；
+   （提示跟随、**retargets=0**、在途 seek 不被取消）→ 跳回已缓存帧（取消 ≤100ms，
+   落点精确 ≤1.5s）；
 3. 已缓存区 PgDn 按住 2s：连发期间 active、松开停止、落地轨迹逐帧 +1、≥20 帧；
+   期间注入 OS 自动重复 KeyPress/KeyRelease，连发不被停；
 4. 已缓存区 PgUp 按住 2s：逐帧 −1、≥20 帧、不碰 0 边界；
-5. 短按：单次 +1 且 350ms 无残留；快速双击 +2；快速双击 PgUp −2；
-6. 0 边界：按住 PgUp 不启动连发、帧号不变、不产生 seek；
-7. 末帧边界：先请求 last−2（可能未缓存），按住 PgDn；连发在越界前停止，
+5. **伪 KeyRelease**：物理键仍按住时收到非 autoRepeat release，连发保持并继续走帧；
+   真正 keyup 后停止；
+6. 短按：单次 +1 且 350ms 无残留；快速双击 +2；快速双击 PgUp −2；
+7. 0 边界：按住 PgUp 不启动连发、帧号不变、不产生 seek；
+8. 末帧边界：先请求 last−2（可能未缓存），按住 PgDn；连发在越界前停止，
    帧号不越过 last；
-8. 全程 16ms UI 心跳；关窗 ≤1s。
+9. 全程 16ms UI 心跳；关窗 ≤1s。
 
 命令（Medium 副本，OB-1；OB-2/OB-3 换 `--bvid/--cid/--tag`）：
 
@@ -100,7 +163,7 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
   --longpress-fresh-cache
 ```
 
-### 3.1 真实三样本（Medium 副本，第 2 轮，50 checks / 0 failures）
+### 3.1 真实三样本（Medium 副本，第 2 轮，实现完成时 50 checks / 0 failures）
 
 | 项 | OB-1 | OB-2 | OB-3 |
 |---|---:|---:|---:|
@@ -110,7 +173,7 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 | 未缓存目标 | 3193 | 2746 | 5185 |
 | 未缓存跳转提示/UI | 0ms | 0ms | 0ms |
 | 未缓存**步进**提示/UI | 0ms（目标 3194） | 0ms（2747） | 0ms（5186） |
-| 未缓存重定向次数（600ms 按住） | 6 | 6 | 6 |
+| 未缓存重定向次数（600ms 按住，修复前语义） | 6 | 6 | 6 |
 | 取消旧等待（改 seek 调用） | 4ms | 5ms | 4ms |
 | 取消→回到已缓存 30 帧 | **31ms** | **51ms** | **37ms** |
 | 已缓存前进 2s | 30→56，**26 帧**，bad=0 | 30→55，**25 帧**，bad=0 | 30→56，**26 帧**，bad=0 |
@@ -120,7 +183,7 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 | 末帧边界 | 停止，boundary=2，frame≤last | 同左 | 同左 |
 | UI 心跳最大间隔 | **46ms** | **77ms** | **51ms** |
 | 关窗 | 543ms | 496ms | 377ms |
-| 判定 | **50/0 pass** | **50/0 pass** | **50/0 pass** |
+| 判定 | **50/0 pass**（修复前） | **50/0 pass**（修复前） | **50/0 pass**（修复前） |
 
 说明：
 
@@ -149,6 +212,24 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 第 1 轮没有 `back_to_cached_le_1500ms` 检查，所以是 49；第 2 轮为 50。两轮均 0 失败。
 首轮/复跑都使用 `--longpress-fresh-cache`，保证是增长会话。
 
+### 3.3 实机回归修复后复跑（用户样本，54 checks）
+
+| 项 | 值 |
+|---|---|
+| 样本 | `BV1PAnt6qEga`/cid `42971761157`，720P，5,169,220B，2327 帧 |
+| 首帧 / qn | 706ms / 64（720P） |
+| 索引前缀（开始时） | stable=193，container=2327 |
+| 已缓存前进 / 后退 | 30→56 / 56→30，各 26 帧，bad=0 |
+| 未缓存长按 retargets | **0**（修复前 6） |
+| 伪 release | 连发保持，继续 8 帧；真正 keyup 停止 |
+| auto-repeat | 连发保持 |
+| 结果 | **54/0 pass** |
+| `ctest` | 30/30（30.93s） |
+| 本地 `--key-test` | 77/0；2s 27 帧 |
+
+修复前的 50/0 只覆盖“合成 KeyDown + 已缓存区”，不覆盖“慢 seek 未缓存长按”和
+“伪 release”；这两项是实机 1 帧的根因，现已加入探针。
+
 ---
 
 ## 4. 逐项对照 T8.6.1a 验收
@@ -159,12 +240,14 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 | 无 UI >200ms | 16ms 心跳最大 37–77ms；0 次 >200ms 事件 | **pass** |
 | 到边界停止 | 0 边界：不启动连发、0 seek；末帧：连发停止、frame≤last | **pass** |
 | 短按行为不回退 | 单次 ±1、350ms 无残留；快速双击 ±2（不丢键） | **pass** |
-| 未缓存区“缓冲中（目标帧 N）”且可取消 | 提示 0ms；取消调用 4–17ms；回到已缓存 31–51ms；600ms 按住重定向 6 次 | **pass**（毫秒不承诺，OP3） |
+| 未缓存区“缓冲中（目标帧 N）”且可取消 | 提示 0ms；取消调用 4–17ms；回到已缓存 31–51ms；修复后 600ms 按住 retargets=0，慢 seek 不被反复取消 | **pass**（毫秒不承诺，OP3） |
 | 不阻塞 UI / 不把网络等待放 UI | 状态机 + 既有 worker；心跳见上 | **pass** |
 | 证据落 `docs/perf/v2-online-interaction.md` | 本文件 | **pass** |
 
 **不改变 M1/M2**：本任务不是门；没有改 qn/样本/OP 数字，没有把未缓存步进写成 P7 或
 1080P 保证。OB-2 的 1080P 只说明“当前流可逐帧步进”，不是 M2/DASH 结论。
+**2026-10-24 实机回归 hotfix** 只修异步步进状态机/伪 release/拖动 clamp，不改任何
+门或数字；修复后 54/0，仍未重跑三样本全矩阵（历史 50/0 仍作为修复前记录保留）。
 
 ---
 
@@ -172,7 +255,7 @@ join 发生在 UI 线程；单次等待被 25ms 为粒度的 `GrowingCursor` int
 
 | 项 | 结果 |
 |---|---|
-| `ctest` | **30/30**（31.85s） |
+| `ctest` | **30/30**（30.93s，hotfix 后复跑） |
 | 本地 `--key-test`（`build\t6.2-key\A.mp4`） | **77/0**；2s 27 帧；本地同步步进语义未变 |
 | 在线 M1 E2E（OB-1，新缓存） | **28/0 pass**；首帧 657ms；P7 p50/p95 13/18ms；cached seek p50/p95 24/74ms；UI gap 66ms；关窗 38ms |
 | 在线 M1 E2E + 未缓存落点 | **29/0 pass**；未缓存目标 3194 → 3194（7758ms）；P7 p95 18ms；UI gap 56ms |
@@ -232,6 +315,6 @@ $exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
 # OB-2 / OB-3 换 bvid/cid/tag；复跑必须重新 --longpress-fresh-cache
 ```
 
-关键日志行：`online_longpress_result checks=50 failures=0 verdict=pass`、
+关键日志行：`online_longpress_result checks=54 failures=0 verdict=pass`、
 `online_longpress_cached dir=...`、`online_longpress_uncached ...`、
 `online_longpress_ui_gap max_ms=...`、`online_longpress_close ms=...`。

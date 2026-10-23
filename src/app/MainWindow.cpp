@@ -51,6 +51,16 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/frame.h>
@@ -517,15 +527,24 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
       if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
         std::fprintf(stderr,
                      "T8.6.1a online_step_tick dir=%d desired=%lld frame=%lld "
-                     "keep=%d active=%d\n",
+                     "keep=%d active=%d last=%lld stable=%lld eligible=%d "
+                     "inflight=%d target=%lld seek_running=%d queued=%d "
+                     "retargets=%d seeks=%d\n",
                      step_direction_,
                      static_cast<long long>(online_step_.desired),
                      static_cast<long long>(current_frame_), keep_going ? 1 : 0,
-                     step_repeat_timer_->isActive() ? 1 : 0);
+                     step_repeat_timer_->isActive() ? 1 : 0,
+                     static_cast<long long>(OnlineLastFrame()),
+                     static_cast<long long>(online_stable_frames_),
+                     OnlineStepEligible() ? 1 : 0,
+                     online_step_.inflight ? 1 : 0,
+                     static_cast<long long>(online_step_.inflight_target),
+                     online_seek_running_ ? 1 : 0, online_step_.queued ? 1 : 0,
+                     online_step_.retargets, online_step_.seeks);
         std::fflush(stderr);
       }
       if (!keep_going) {
-        StopStepRepeat();
+        StopStepRepeat("tick_keep_false");
       }
       return;
     }
@@ -539,15 +558,31 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root)
       std::fflush(stderr);
     }
     if (current_frame_ == before) {
-      StopStepRepeat();  // 到边界：不再重复 seek 同一帧
+      StopStepRepeat("local_boundary");  // 到边界：不再重复 seek 同一帧
     }
   });
   connect(qApp, &QApplication::focusChanged, this,
-          [this](QWidget*, QWidget*) { StopStepRepeat(); });
+          [this](QWidget* old_widget, QWidget* now_widget) {
+            if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+              std::fprintf(stderr,
+                           "T8.6.1a focus_changed old=%s new=%s dir=%d "
+                           "frame=%lld\n",
+                           old_widget != nullptr
+                               ? old_widget->metaObject()->className()
+                               : "null",
+                           now_widget != nullptr
+                               ? now_widget->metaObject()->className()
+                               : "null",
+                           step_direction_,
+                           static_cast<long long>(current_frame_));
+              std::fflush(stderr);
+            }
+            StopStepRepeat("focus_changed");
+          });
   connect(qApp, &QGuiApplication::applicationStateChanged, this,
           [this](Qt::ApplicationState state) {
             if (state != Qt::ApplicationActive) {
-              StopStepRepeat();
+              StopStepRepeat("app_inactive");
             }
           });
   qApp->installEventFilter(this);
@@ -575,7 +610,7 @@ MainWindow::~MainWindow() {
   CancelIndexBuild();
   // 先落盘设置（不等待截图/标记），再停掉可能还在跑的步进连发并摘掉应用级过滤器。
   FlushSettings();
-  StopStepRepeat();
+  StopStepRepeat("shutdown");
   if (QCoreApplication::instance() != nullptr) {
     QCoreApplication::instance()->removeEventFilter(this);
   }
@@ -2087,11 +2122,31 @@ void MainWindow::IssueOnlineStepSeek(std::int64_t target, bool cached) {
 }
 
 bool MainWindow::ApplyOnlineStep(int direction) {
-  if (direction == 0 || !OnlineStepEligible()) {
+  if (direction == 0) {
+    return false;
+  }
+  if (!OnlineStepEligible()) {
+    if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+      std::fprintf(stderr,
+                   "T8.6.1a step_reject eligible=0 online=%d ready=%d cache_hit=%d "
+                   "open=%d growing=%d\n",
+                   online_mode_ ? 1 : 0, online_ready_ ? 1 : 0,
+                   online_cache_hit_ ? 1 : 0,
+                   session_ != nullptr && session_->IsOpen() ? 1 : 0,
+                   session_ != nullptr && session_->IsGrowing() ? 1 : 0);
+      std::fflush(stderr);
+    }
     return false;
   }
   const std::int64_t last = OnlineLastFrame();
   if (last < 0) {
+    if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+      std::fprintf(stderr,
+                   "T8.6.1a step_reject last=-1 stable=%lld container_has=%d\n",
+                   static_cast<long long>(online_stable_frames_),
+                   ContainerTotal().has_value() ? 1 : 0);
+      std::fflush(stderr);
+    }
     statusBar()->showMessage(
         QStringLiteral("在线索引扫描中，目标帧尚不可定位"), 3000);
     return false;  // 调用方停止连发
@@ -2115,6 +2170,16 @@ bool MainWindow::ApplyOnlineStep(int direction) {
   const std::int64_t next = base + delta;
   if (next < 0 || next > last) {
     ++online_step_.boundary_stops;
+    if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+      std::fprintf(stderr,
+                   "T8.6.1a step_boundary dir=%d base=%lld next=%lld last=%lld "
+                   "stable=%lld frame=%lld\n",
+                   direction, static_cast<long long>(base),
+                   static_cast<long long>(next), static_cast<long long>(last),
+                   static_cast<long long>(online_stable_frames_),
+                   static_cast<long long>(current_frame_));
+      std::fflush(stderr);
+    }
     if (!online_step_.inflight) {
       statusBar()->showMessage(
           direction > 0 ? QStringLiteral("已是最后一帧")
@@ -2151,11 +2216,16 @@ bool MainWindow::ApplyOnlineStep(int direction) {
   }
 
   if (!online_step_.inflight_cached && !next_cached) {
-    // 未缓存区：不承诺逐帧呈现（OP3），只保留最新目标；重定向 = 取消旧等待。
-    online_step_.inflight_target = next;
-    online_step_.inflight_cached = false;
-    ++online_step_.retargets;
-    IssueOnlineStepSeek(next, false);
+    // 未缓存区：不要在 70ms tick 上反复取消在途 seek。seek 慢于 tick 时，
+    // “最新目标重定向”会让每一步都被下一步取消，长按永远只落 1 帧。
+    // 单格排队让当前 seek 有机会落地，落地后再走下一格；不承诺逐帧立即呈现
+    // （OP3），但不会因为互相取消而停住。
+    online_step_.queued = true;
+    online_step_.queued_target = next;
+    online_step_.queued_cached = false;
+    online_step_.queued_direction = direction;
+    online_step_.desired = next;
+    ShowOnlineWaitPrompt(next);
     return true;
   }
 
@@ -2191,7 +2261,7 @@ void MainWindow::OnOnlineStepFailed(std::int64_t target) {
     return;
   }
   ResetOnlineStepState();
-  StopStepRepeat();  // 失败后不要继续按 70ms 重试
+  StopStepRepeat("seek_failed");  // 失败后不要继续按 70ms 重试
 }
 
 void MainWindow::RequestOnlineSeek(std::int64_t target,
@@ -3373,7 +3443,7 @@ bool MainWindow::OnlineStepIdleForTest() const {
 QString MainWindow::OnlineStepStateForTest() const {
   return QStringLiteral(
              "dir=%1 desired=%2 inflight=%3 target=%4 cached=%5 queued=%6 "
-             "qtarget=%7 seeks=%8 retargets=%9 boundary=%10 trace=%11")
+             "qtarget=%7 seeks=%8 retargets=%9 boundary=%10 trace=%11 stop=%12")
       .arg(step_direction_)
       .arg(online_step_.desired)
       .arg(online_step_.inflight ? 1 : 0)
@@ -3384,7 +3454,9 @@ QString MainWindow::OnlineStepStateForTest() const {
       .arg(online_step_.seeks)
       .arg(online_step_.retargets)
       .arg(online_step_.boundary_stops)
-      .arg(static_cast<qint64>(online_step_.trace.size()));
+      .arg(static_cast<qint64>(online_step_.trace.size()))
+      .arg(step_stop_reason_.isEmpty() ? QStringLiteral("none")
+                                       : step_stop_reason_);
 }
 
 std::vector<qint64> MainWindow::OnlineStepTraceForTest() const {
@@ -3844,8 +3916,12 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     if (preview_timer_ != nullptr && !preview_timer_->isActive()) {
       preview_timer_->start();
     }
+    statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
+  } else if (OnlineStepEligible()) {
+    // T8.6.1b 之前，增长会话没有本地 PreviewDecoder；不要谎称“拖动预览”。
+    statusBar()->showMessage(
+        QStringLiteral("在线增长会话暂无拖动预览；松开后跳转到目标帧"), 3000);
   }
-  statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
 }
 
 void MainWindow::OnScrubTargetChanged(qint64 frame) {
@@ -3869,7 +3945,11 @@ void MainWindow::OnScrubFinished(qint64 frame) {
     preview_->End();
   }
   const std::int64_t last_frame =
-      static_cast<std::int64_t>(session_->index().size()) - 1;
+      OnlineStepEligible() ? OnlineLastFrame()
+                           : static_cast<std::int64_t>(session_->index().size()) - 1;
+  if (last_frame < 0) {
+    return;
+  }
   const std::int64_t target =
       lapian::core::ClampFrame(frame, last_frame);
   // 预览帧可能是降采样的，且不一定正好是目标帧；松手必须回到精确帧。
@@ -4166,7 +4246,20 @@ bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
       if (event->isAutoRepeat()) {
         return true;
       }
-      StopStepRepeat();
+      // Windows/Qt 在某些时序下会在物理键仍按住时补一个非 autoRepeat 的
+      // release；只认真正的松开，避免长按在第一步后停住。
+      if (IsStepKeyPhysicallyDown(key)) {
+        if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+          std::fprintf(stderr,
+                       "T8.6.1a step_release_ignored physical_down key=%d "
+                       "dir=%d frame=%lld\n",
+                       key, step_direction_,
+                       static_cast<long long>(current_frame_));
+          std::fflush(stderr);
+        }
+        return true;
+      }
+      StopStepRepeat("keyup");
       return true;
     }
     return false;
@@ -4205,6 +4298,21 @@ bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
     return false;
   }
   if (event->isAutoRepeat()) {
+    // 物理长按期间若连发被焦点/伪 release 停掉，OS 自动重复的 KeyPress 是
+    // 恢复连发的可靠信号；只恢复“可恢复”的停止原因，边界/seek 失败不重试。
+    const bool recoverable = step_stop_reason_ == QStringLiteral("keyup") ||
+                             step_stop_reason_ == QStringLiteral("focus_changed") ||
+                             step_stop_reason_ == QStringLiteral("window_deactivate") ||
+                             step_stop_reason_ == QStringLiteral("app_inactive");
+    const int direction =
+        (key == Qt::Key_PageUp || key == Qt::Key_Left) ? -1 : 1;
+    if (step_direction_ != 0 && step_repeat_timer_ != nullptr &&
+        !step_repeat_timer_->isActive()) {
+      step_repeat_timer_->start(70);
+    } else if (step_direction_ == 0 && recoverable &&
+               IsStepKeyPhysicallyDown(key)) {
+      StartStepRepeat(direction);
+    }
     return true;  // OS 自动重复不额外走帧；连发由 step_repeat_timer_ 控制
   }
   if (is_nav) {
@@ -4220,7 +4328,7 @@ bool MainWindow::HandleGlobalKey(QKeyEvent* event) {
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
   if (event != nullptr) {
     if (event->type() == QEvent::WindowDeactivate) {
-      StopStepRepeat();
+      StopStepRepeat("window_deactivate");
     } else if (event->type() == QEvent::KeyPress ||
                event->type() == QEvent::KeyRelease) {
       if (HandleGlobalKey(static_cast<QKeyEvent*>(event))) {
@@ -4236,11 +4344,22 @@ void MainWindow::StartStepRepeat(int delta) {
     return;
   }
   step_direction_ = delta;
+  step_stop_reason_.clear();
+  if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG")) {
+    std::fprintf(stderr,
+                 "T8.6.1a step_start dir=%d online=%d frame=%lld last=%lld "
+                 "stable=%lld\n",
+                 delta, OnlineStepEligible() ? 1 : 0,
+                 static_cast<long long>(current_frame_),
+                 static_cast<long long>(OnlineLastFrame()),
+                 static_cast<long long>(online_stable_frames_));
+    std::fflush(stderr);
+  }
   // T8.6.1a：在线步进的目标/在途/排队由状态机维护；这里不能用 current_frame_
   // 的同步变化判断“是否走了一帧”，否则第一步还没落地就误判为边界。
   if (OnlineStepEligible()) {
     if (!ApplyOnlineStep(delta)) {
-      StopStepRepeat();  // 已在边界（或索引尚不可定位）：不启动连发
+      StopStepRepeat("start_boundary");  // 已在边界（或索引尚不可定位）：不启动连发
       return;
     }
     step_repeat_timer_->start(300);
@@ -4250,17 +4369,62 @@ void MainWindow::StartStepRepeat(int delta) {
   // T7.2：后退键先预热最近一窗帧，后续连发可直接命中缓存。
   GoToFrameForStep(before + delta, delta < 0);
   if (current_frame_ == before) {
-    StopStepRepeat();  // 已在边界：不启动连发
+    StopStepRepeat("start_boundary");  // 已在边界：不启动连发
     return;
   }
   step_repeat_timer_->start(300);
 }
 
-void MainWindow::StopStepRepeat() {
+void MainWindow::StopStepRepeat(const char* reason) {
+  if (qEnvironmentVariableIsSet("LAPIAN_KEY_LOG") && step_direction_ != 0) {
+    std::fprintf(stderr,
+                 "T8.6.1a step_stop reason=%s dir=%d frame=%lld desired=%lld "
+                 "inflight=%d target=%lld seek_running=%d queued=%d active=%d\n",
+                 reason != nullptr ? reason : "null", step_direction_,
+                 static_cast<long long>(current_frame_),
+                 static_cast<long long>(online_step_.desired),
+                 online_step_.inflight ? 1 : 0,
+                 static_cast<long long>(online_step_.inflight_target),
+                 online_seek_running_ ? 1 : 0, online_step_.queued ? 1 : 0,
+                 step_repeat_timer_ != nullptr && step_repeat_timer_->isActive()
+                     ? 1
+                     : 0);
+    std::fflush(stderr);
+  }
+  step_stop_reason_ = QString::fromLatin1(reason != nullptr ? reason : "");
   step_direction_ = 0;
   if (step_repeat_timer_ != nullptr) {
     step_repeat_timer_->stop();
   }
+}
+
+bool MainWindow::IsStepKeyPhysicallyDown(int key) const {
+  if (step_key_physical_down_for_test_ >= 0) {
+    return step_key_physical_down_for_test_ != 0;
+  }
+#ifdef _WIN32
+  UINT vk = 0;
+  switch (key) {
+    case Qt::Key_PageUp:
+      vk = VK_PRIOR;
+      break;
+    case Qt::Key_PageDown:
+      vk = VK_NEXT;
+      break;
+    case Qt::Key_Left:
+      vk = VK_LEFT;
+      break;
+    case Qt::Key_Right:
+      vk = VK_RIGHT;
+      break;
+    default:
+      return false;
+  }
+  return (::GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+#else
+  (void)key;
+  return false;
+#endif
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
