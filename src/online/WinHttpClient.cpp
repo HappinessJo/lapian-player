@@ -11,8 +11,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 #include <winhttp.h>
@@ -76,6 +78,10 @@ struct WinHttpState {
 
   int http_status = 0;
   QByteArray body;
+  // T8.2.2：只有 passport 的 QR poll 才解析 Set-Cookie，且只保留 SESSDATA。
+  bool capture_sessdata = false;
+  bool sessdata_header_parsed = false;
+  QString response_sessdata;
   std::array<char, 16 * 1024> read_buffer{};
   QString error;
   DWORD win32_error = 0;
@@ -123,6 +129,55 @@ void StartRead(WinHttpState* state, HINTERNET request) {
     state->reading = false;
     FailWithLastError(state);
   }
+}
+
+// T8.2.2：passport QR poll 的成功 SESSDATA 可能只在 Set-Cookie 里。
+// 这里只解析原始头中的 SESSDATA，其它 Set-Cookie/cookie 字段全部丢弃；
+// 不建立 cookie jar、不把 header 写日志、不改变请求侧行为。
+QString ExtractSessdataFromSetCookie(const QString& raw_headers) {
+  const QStringList lines = raw_headers.split(QStringLiteral("\r\n"));
+  for (const QString& line : lines) {
+    if (!line.startsWith(QStringLiteral("Set-Cookie:"), Qt::CaseInsensitive)) {
+      continue;
+    }
+    const QString value = line.mid(static_cast<int>(std::strlen("Set-Cookie:")));
+    const QStringList parts = value.split(QLatin1Char(';'));
+    for (const QString& part : parts) {
+      const QString trimmed = part.trimmed();
+      if (!trimmed.startsWith(QStringLiteral("SESSDATA="), Qt::CaseInsensitive)) {
+        continue;
+      }
+      const QString candidate = trimmed.mid(9).trimmed();
+      if (IsSafeSessdataValue(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return QString();
+}
+
+void CaptureSessdataFromHeaders(WinHttpState* state, HINTERNET request) {
+  if (!state->capture_sessdata || state->sessdata_header_parsed) {
+    return;
+  }
+  state->sessdata_header_parsed = true;
+  detail::WinHttpApi& api = detail::WinHttpApiInstance();
+  DWORD size = 0;
+  api.query_headers(request, WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                    WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &size,
+                    WINHTTP_NO_HEADER_INDEX);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || size < 4 ||
+      size > 64 * 1024) {
+    return;
+  }
+  std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+  if (!api.query_headers(request, WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                         WINHTTP_HEADER_NAME_BY_INDEX, buffer.data(), &size,
+                         WINHTTP_NO_HEADER_INDEX)) {
+    return;
+  }
+  state->response_sessdata =
+      ExtractSessdataFromSetCookie(QString::fromWCharArray(buffer.data()));
 }
 
 void OnRequestError(WinHttpState* state, void* info) {
@@ -197,6 +252,7 @@ void HandleCallback(HINTERNET handle, DWORD_PTR context, DWORD code, void* info,
         break;
       }
       state->http_status = static_cast<int>(status);
+      CaptureSessdataFromHeaders(state, handle);
       StartRead(state, handle);
       break;
     }
@@ -355,6 +411,12 @@ HttpResponse WinHttpClient::Get(const HttpRequest& request,
 
   const int timeout_ms = request.timeout_ms > 0 ? request.timeout_ms : kDefaultTimeoutMs;
   auto* state = new WinHttpState();
+  // T8.2.2：只对 passport.bilibili.com 的 HTTPS 响应解析 Set-Cookie 中的
+  // SESSDATA；其它 host 完全不读取 cookie 头。
+  state->capture_sessdata =
+      parsed.secure &&
+      parsed.host.compare(QStringLiteral("passport.bilibili.com"),
+                          Qt::CaseInsensitive) == 0;
 
   auto fail = [&](const QString& message, DWORD code) {
     response.error = message;
@@ -515,6 +577,7 @@ HttpResponse WinHttpClient::Get(const HttpRequest& request,
 
   response.http_status = state->http_status;
   response.body = state->body;
+  response.response_sessdata = state->response_sessdata;
   response.win32_error = static_cast<int>(state->win32_error);
   response.elapsed_ms = timer.elapsed();
   if (state->cancelled || cancel.IsCancelled()) {

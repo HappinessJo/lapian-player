@@ -86,14 +86,23 @@ add_library(lapian_online STATIC
   online/IHttpClient.h
   online/PlayUrl.cpp
   online/PlayUrl.h
+  online/QrCode.cpp
+  online/QrCode.h
+  online/QrLogin.cpp
+  online/QrLogin.h
+  online/QrLoginController.cpp
+  online/QrLoginController.h
   online/Sessdata.h
   online/WinHttpApi.h
   online/WinHttpClient.cpp
   online/WinHttpClient.h
-  online/WinHttpDownloadTransport.cpp)
+  online/WinHttpDownloadTransport.cpp
+  online/qrcodegen/qrcodegen.cpp)
 lapian_apply_common_options(lapian_online)
 target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_online PUBLIC Qt6::Core PRIVATE crypt32 lapian::ffmpeg)
+target_include_directories(lapian_online PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/online/qrcodegen")
+target_link_libraries(lapian_online PUBLIC Qt6::Core Qt6::Gui PRIVATE crypt32 lapian::ffmpeg)
 
 # T7.3 长时浸泡：采样趋势/阈值判定，纯 C++，产品与单测共用。
 add_library(lapian_soak STATIC
@@ -198,6 +207,8 @@ qt_add_executable(lapian WIN32
   app/OnlineGrowingTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
   app/OnlineHttpSelfCheckRunner.h
+  app/OnlineQrTestRunner.cpp
+  app/OnlineQrTestRunner.h
   app/OnlineResolveDialog.cpp
   app/OnlineResolveDialog.h
   app/OnlineResolveTestRunner.cpp

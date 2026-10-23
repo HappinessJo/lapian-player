@@ -8,8 +8,10 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -22,6 +24,7 @@
 #include <utility>
 
 #include "online/BiliResolveClient.h"
+#include "online/QrLoginController.h"
 #include "online/Sessdata.h"
 #include "online/WinHttpClient.h"
 
@@ -57,6 +60,9 @@ OnlineResolveDialog::OnlineResolveDialog(QWidget* parent) : QDialog(parent) {
 }
 
 OnlineResolveDialog::~OnlineResolveDialog() {
+  if (qr_controller_ != nullptr) {
+    qr_controller_->Close();
+  }
   if (cancel_ != nullptr) {
     cancel_->Cancel();
   }
@@ -85,6 +91,8 @@ void OnlineResolveDialog::SetupUi() {
   privacy_label_ = new QLabel(
       QStringLiteral(
           "隐私说明：在线模式只在你提交 BV/URL 后访问 api.bilibili.com；"
+          "点击“扫码登录”时才访问 passport.bilibili.com 的官方二维码接口"
+          "（generate/poll，不带 Cookie，本地渲染）。"
           "SESSDATA 可选用 Windows DPAPI 加密保存在 "
           "%APPDATA%\\拉片软件\\credentials.dat，只发送给 api.bilibili.com，"
           "不写入日志/缓存/截图；可随时点“清除”。本地模式不联网。"),
@@ -225,6 +233,50 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
   hint->setStyleSheet(QStringLiteral("color:#666;"));
   box_layout->addWidget(hint);
 
+  // T8.2.2：扫码是并存的第二条入口；粘贴入口永远是主路径，不删除/不降级。
+  auto* qr_row = new QHBoxLayout();
+  auto* qr_hint = new QLabel(
+      QStringLiteral("或使用 B 站手机客户端扫码登录（官方网页二维码，本地渲染）："),
+      box);
+  qr_hint->setWordWrap(true);
+  qr_hint->setTextFormat(Qt::PlainText);
+  qr_hint->setStyleSheet(QStringLiteral("color:#666;"));
+  qr_start_button_ = new QPushButton(QStringLiteral("扫码登录"), box);
+  qr_start_button_->setObjectName(QStringLiteral("onlineQrStart"));
+  qr_row->addWidget(qr_hint, 1);
+  qr_row->addWidget(qr_start_button_);
+  box_layout->addLayout(qr_row);
+
+  qr_panel_ = new QWidget(box);
+  qr_panel_->setObjectName(QStringLiteral("onlineQrPanel"));
+  auto* qr_panel_layout = new QVBoxLayout(qr_panel_);
+  qr_panel_layout->setContentsMargins(0, 0, 0, 0);
+  qr_image_label_ = new QLabel(qr_panel_);
+  qr_image_label_->setObjectName(QStringLiteral("onlineQrImage"));
+  qr_image_label_->setFixedSize(240, 240);
+  qr_image_label_->setAlignment(Qt::AlignCenter);
+  qr_image_label_->setStyleSheet(
+      QStringLiteral("background:#fff; border:1px solid #ccc;"));
+  qr_image_label_->setToolTip(
+      QStringLiteral("用 B 站手机客户端扫描；本图由本地渲染，不联网加载"));
+  qr_panel_layout->addWidget(qr_image_label_, 0, Qt::AlignHCenter);
+  qr_status_label_ = new QLabel(QStringLiteral("尚未开始扫码"), qr_panel_);
+  qr_status_label_->setObjectName(QStringLiteral("onlineQrStatus"));
+  qr_status_label_->setWordWrap(true);
+  qr_status_label_->setTextFormat(Qt::PlainText);
+  qr_panel_layout->addWidget(qr_status_label_);
+  auto* qr_buttons = new QHBoxLayout();
+  qr_buttons->addStretch(1);
+  qr_refresh_button_ = new QPushButton(QStringLiteral("刷新二维码"), qr_panel_);
+  qr_refresh_button_->setObjectName(QStringLiteral("onlineQrRefresh"));
+  qr_cancel_button_ = new QPushButton(QStringLiteral("取消扫码"), qr_panel_);
+  qr_cancel_button_->setObjectName(QStringLiteral("onlineQrCancel"));
+  qr_buttons->addWidget(qr_refresh_button_);
+  qr_buttons->addWidget(qr_cancel_button_);
+  qr_panel_layout->addLayout(qr_buttons);
+  box_layout->addWidget(qr_panel_);
+  qr_panel_->hide();
+
   root->addWidget(box);
 
   connect(credential_save_button_, &QPushButton::clicked, this,
@@ -235,6 +287,12 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
           &OnlineResolveDialog::OnSaveCredential);
   connect(privacy_hide_button_, &QPushButton::clicked, this,
           &OnlineResolveDialog::OnHidePrivacy);
+  connect(qr_start_button_, &QPushButton::clicked, this,
+          &OnlineResolveDialog::OnStartQrLogin);
+  connect(qr_refresh_button_, &QPushButton::clicked, this,
+          &OnlineResolveDialog::OnQrRefresh);
+  connect(qr_cancel_button_, &QPushButton::clicked, this,
+          &OnlineResolveDialog::OnQrCancel);
 }
 
 void OnlineResolveDialog::StartResolve() {
@@ -410,6 +468,9 @@ void OnlineResolveDialog::CancelResolve() {
 }
 
 void OnlineResolveDialog::closeEvent(QCloseEvent* event) {
+  if (qr_controller_ != nullptr) {
+    qr_controller_->Close();
+  }
   if (resolving_) {
     CancelResolve();
   }
@@ -420,6 +481,9 @@ void OnlineResolveDialog::closeEvent(QCloseEvent* event) {
 }
 
 void OnlineResolveDialog::Shutdown() {
+  if (qr_controller_ != nullptr) {
+    qr_controller_->Close();
+  }
   if (resolving_) {
     CancelResolve();
   }
@@ -768,6 +832,12 @@ bool OnlineResolveDialog::SaveCredentialText(const QString& text, QString* error
   if (auth_checking_) {
     CancelAuthCheck();
   }
+  if (qr_controller_ != nullptr && qr_controller_->IsBusy()) {
+    qr_controller_->Cancel();
+    if (qr_panel_ != nullptr) {
+      qr_panel_->hide();
+    }
+  }
   QString save_error;
   if (!credentials_.Save(text, &save_error)) {
     if (error != nullptr) {
@@ -785,6 +855,13 @@ bool OnlineResolveDialog::SaveCredentialText(const QString& text, QString* error
 bool OnlineResolveDialog::ClearCredentialNow() {
   if (auth_checking_) {
     CancelAuthCheck();
+  }
+  if (qr_controller_ != nullptr) {
+    qr_controller_->Close();
+    qr_controller_.reset();
+  }
+  if (qr_panel_ != nullptr) {
+    qr_panel_->hide();
   }
   QString clear_error;
   if (!credentials_.Clear(&clear_error)) {
@@ -832,6 +909,128 @@ void OnlineResolveDialog::OnHidePrivacy() {
   }
   if (privacy_hide_button_ != nullptr) {
     privacy_hide_button_->hide();
+  }
+}
+
+void OnlineResolveDialog::EnsureQrController() {
+  if (http_ == nullptr) {
+    http_ = std::make_unique<lapian::online::WinHttpClient>();
+  }
+  if (qr_controller_ != nullptr) {
+    return;
+  }
+  qr_controller_ = std::make_unique<lapian::online::QrLoginController>(
+      http_.get(), &credentials_, this);
+  connect(qr_controller_.get(), &lapian::online::QrLoginController::stateChanged,
+          this, &OnlineResolveDialog::OnQrStateChanged);
+  connect(qr_controller_.get(), &lapian::online::QrLoginController::qrImageChanged,
+          this, &OnlineResolveDialog::OnQrImageChanged);
+  connect(qr_controller_.get(), &lapian::online::QrLoginController::loginSucceeded,
+          this, &OnlineResolveDialog::OnQrLoginSucceeded);
+}
+
+void OnlineResolveDialog::OnStartQrLogin() {
+  EnsureQrController();
+  if (qr_panel_ != nullptr) {
+    qr_panel_->show();
+  }
+  if (qr_status_label_ != nullptr) {
+    qr_status_label_->setText(QStringLiteral("正在生成二维码…"));
+  }
+  if (qr_start_button_ != nullptr) {
+    qr_start_button_->setEnabled(false);
+  }
+  qr_controller_->Start();
+}
+
+void OnlineResolveDialog::OnQrStateChanged(int state, const QString& message) {
+  const auto qr_state = static_cast<lapian::online::QrLoginState>(state);
+  if (qr_status_label_ != nullptr) {
+    QString text = message;
+    if (qr_state == lapian::online::QrLoginState::kExpired ||
+        qr_state == lapian::online::QrLoginState::kFailed ||
+        qr_state == lapian::online::QrLoginState::kCancelled) {
+      text += QStringLiteral("；仍可用上方粘贴 SESSDATA");
+    }
+    qr_status_label_->setText(text);
+  }
+  if (qr_start_button_ != nullptr) {
+    qr_start_button_->setEnabled(
+        qr_state == lapian::online::QrLoginState::kSuccess ||
+        qr_state == lapian::online::QrLoginState::kExpired ||
+        qr_state == lapian::online::QrLoginState::kFailed ||
+        qr_state == lapian::online::QrLoginState::kCancelled);
+  }
+  if (qr_refresh_button_ != nullptr) {
+    qr_refresh_button_->setEnabled(
+        qr_state == lapian::online::QrLoginState::kExpired ||
+        qr_state == lapian::online::QrLoginState::kFailed ||
+        qr_state == lapian::online::QrLoginState::kCancelled ||
+        qr_state == lapian::online::QrLoginState::kSuccess);
+  }
+  if (qr_cancel_button_ != nullptr) {
+    qr_cancel_button_->setEnabled(
+        qr_state == lapian::online::QrLoginState::kGenerating ||
+        qr_state == lapian::online::QrLoginState::kWaiting ||
+        qr_state == lapian::online::QrLoginState::kScanned ||
+        qr_state == lapian::online::QrLoginState::kVerifying);
+  }
+  if (qr_state == lapian::online::QrLoginState::kSuccess &&
+      qr_image_label_ != nullptr) {
+    qr_image_label_->clear();
+  }
+}
+
+void OnlineResolveDialog::OnQrImageChanged(const QImage& image) {
+  if (qr_image_label_ == nullptr) {
+    return;
+  }
+  if (image.isNull()) {
+    qr_image_label_->clear();
+    return;
+  }
+  qr_image_label_->setPixmap(QPixmap::fromImage(image).scaled(
+      220, 220, Qt::KeepAspectRatio, Qt::FastTransformation));
+}
+
+void OnlineResolveDialog::OnQrLoginSucceeded() {
+  if (qr_controller_ == nullptr) {
+    return;
+  }
+  const lapian::online::AuthResult result = qr_controller_->authResult();
+  credential_corrupt_ = false;
+  auth_.SetCredentialPresent(true);
+  if (auth_.BeginCheck()) {
+    auth_.CompleteCheck(result);
+  }
+  UpdateAuthUi();
+  UpdateQualityHint();
+  if (qr_status_label_ != nullptr) {
+    qr_status_label_->setText(
+        QStringLiteral("已登录（扫码）；SESSDATA 已用 DPAPI 保存"));
+  }
+}
+
+void OnlineResolveDialog::OnQrRefresh() {
+  if (qr_controller_ == nullptr) {
+    return;
+  }
+  if (qr_panel_ != nullptr) {
+    qr_panel_->show();
+  }
+  qr_controller_->Refresh();
+}
+
+void OnlineResolveDialog::OnQrCancel() {
+  if (qr_controller_ == nullptr) {
+    return;
+  }
+  qr_controller_->Cancel();
+  if (qr_panel_ != nullptr) {
+    qr_panel_->hide();
+  }
+  if (qr_start_button_ != nullptr) {
+    qr_start_button_->setEnabled(true);
   }
 }
 
@@ -884,6 +1083,48 @@ void OnlineResolveDialog::SetAuthTimeoutForTest(int timeout_ms) {
   auth_timeout_ms_ = std::clamp(timeout_ms, 100, 10000);
 }
 
+void OnlineResolveDialog::StartQrLoginForTest() { OnStartQrLogin(); }
+
+void OnlineResolveDialog::SetQrPollIntervalForTest(int ms) {
+  EnsureQrController();
+  qr_controller_->SetPollIntervalForTest(ms);
+}
+
+void OnlineResolveDialog::SetQrExpiryForTest(int ms) {
+  EnsureQrController();
+  qr_controller_->SetExpiryMsForTest(ms);
+}
+
+QString OnlineResolveDialog::QrStateForTest() const {
+  return qr_controller_ == nullptr
+             ? QStringLiteral("idle")
+             : lapian::online::QrLoginStateName(qr_controller_->state());
+}
+
+QString OnlineResolveDialog::QrStatusTextForTest() const {
+  return qr_status_label_ == nullptr ? QString() : qr_status_label_->text();
+}
+
+QSize OnlineResolveDialog::QrImageSizeForTest() const {
+  if (qr_image_label_ == nullptr) {
+    return QSize();
+  }
+  const QPixmap pixmap = qr_image_label_->pixmap();
+  return pixmap.isNull() ? QSize() : pixmap.size();
+}
+
+bool OnlineResolveDialog::QrPanelVisibleForTest() const {
+  return qr_panel_ != nullptr && !qr_panel_->isHidden();
+}
+
+qint64 OnlineResolveDialog::CancelQrForTest() {
+  if (qr_controller_ == nullptr) {
+    return -1;
+  }
+  qr_controller_->Cancel();
+  return qr_controller_->lastCancelMsForTest();
+}
+
 bool OnlineResolveDialog::WaitForResolveForTest(int timeout_ms) {
   QElapsedTimer timer;
   timer.start();
@@ -898,6 +1139,10 @@ void OnlineResolveDialog::SetHttpClientForTest(
     std::unique_ptr<lapian::online::IHttpClient> client) {
   if (resolving_ || auth_checking_) {
     return;
+  }
+  if (qr_controller_ != nullptr) {
+    qr_controller_->Close();
+    qr_controller_.reset();
   }
   http_ = client != nullptr ? std::move(client)
                             : std::make_unique<lapian::online::WinHttpClient>();

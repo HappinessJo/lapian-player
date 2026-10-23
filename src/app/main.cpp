@@ -46,6 +46,7 @@
 #include "app/OnlineFetchTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
+#include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
 
@@ -260,6 +261,45 @@ int main(int argc, char* argv[]) {
       options.timeout_ms = 120000;
     }
     return lapian::app::RunOnlineFetchTest(options);
+  }
+
+  // T8.2.2：扫码登录探针；默认离线 fake HTTP，`--real-generate` 只验证官方
+  // generate/poll 字段（不扫码、不保存凭据），无 GUI。
+  if (HasArgument(argc, argv, "--online-qr-test")) {
+    const bool ui_smoke = HasArgument(argc, argv, "--ui");
+    std::unique_ptr<QCoreApplication> app;
+    if (ui_smoke) {
+      app = std::make_unique<QApplication>(argc, argv);
+    } else {
+      app = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineQrTestOptions options;
+    options.real_generate = HasArgument(argc, argv, "--real-generate");
+    options.ui_smoke = ui_smoke;
+    const QStringList qr_args = QCoreApplication::arguments();
+    for (int i = 1; i < qr_args.size(); ++i) {
+      if (qr_args[i] == QStringLiteral("--timeout-ms") &&
+          i + 1 < qr_args.size()) {
+        options.timeout_ms = qr_args[++i].toInt();
+      } else if (qr_args[i].startsWith(QStringLiteral("--timeout-ms="))) {
+        options.timeout_ms =
+            qr_args[i]
+                .mid(static_cast<int>(std::strlen("--timeout-ms=")))
+                .toInt();
+      }
+    }
+    if (options.timeout_ms < 1000) {
+      options.timeout_ms = 1000;
+    }
+    if (options.timeout_ms > 30000) {
+      options.timeout_ms = 30000;
+    }
+    return lapian::app::RunOnlineQrTest(options);
   }
 
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。

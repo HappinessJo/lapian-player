@@ -4,6 +4,7 @@
 // 本任务不取流、不播放、不缓存；确认只发信号，T8.5 再接“开始取流”。
 
 #include <QDialog>
+#include <QSize>
 #include <QString>
 
 #include <cstdint>
@@ -17,15 +18,19 @@
 
 class QCloseEvent;
 class QComboBox;
+class QGroupBox;
+class QImage;
 class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTimer;
 class QVBoxLayout;
+class QWidget;
 
 namespace lapian::online {
 class HttpCancelToken;
 class IHttpClient;
+class QrLoginController;
 }  // namespace lapian::online
 
 class OnlineResolveDialog : public QDialog {
@@ -86,6 +91,16 @@ class OnlineResolveDialog : public QDialog {
   void HidePrivacyNoticeForTest();
   void SetAuthTimeoutForTest(int timeout_ms);
 
+  // T8.2.2 扫码登录测试入口（仍走产品控件/控制器）。
+  void StartQrLoginForTest();
+  void SetQrPollIntervalForTest(int ms);
+  void SetQrExpiryForTest(int ms);
+  QString QrStateForTest() const;
+  QString QrStatusTextForTest() const;
+  QSize QrImageSizeForTest() const;
+  bool QrPanelVisibleForTest() const;
+  qint64 CancelQrForTest();
+
   // 主窗口关窗/析构时调用：取消并 join 工作线程，不留下挂起请求。
   void Shutdown();
 
@@ -104,6 +119,12 @@ class OnlineResolveDialog : public QDialog {
   void OnSaveCredential();
   void OnClearCredential();
   void OnHidePrivacy();
+  void OnStartQrLogin();
+  void OnQrStateChanged(int state, const QString& message);
+  void OnQrImageChanged(const QImage& image);
+  void OnQrLoginSucceeded();
+  void OnQrRefresh();
+  void OnQrCancel();
 
  private:
   struct ResolveOutcome {
@@ -139,6 +160,7 @@ class OnlineResolveDialog : public QDialog {
   void JoinAuthWorker();
   bool SaveCredentialText(const QString& text, QString* error);
   bool ClearCredentialNow();
+  void EnsureQrController();
 
   QLineEdit* input_ = nullptr;
   QPushButton* resolve_button_ = nullptr;
@@ -162,6 +184,15 @@ class OnlineResolveDialog : public QDialog {
   QLabel* auth_status_label_ = nullptr;
   QLabel* privacy_label_ = nullptr;
   QPushButton* privacy_hide_button_ = nullptr;
+
+  // T8.2.2 扫码登录：粘贴入口永久保留；这是并存的第二条入口。
+  QPushButton* qr_start_button_ = nullptr;
+  QWidget* qr_panel_ = nullptr;
+  QLabel* qr_image_label_ = nullptr;
+  QLabel* qr_status_label_ = nullptr;
+  QPushButton* qr_refresh_button_ = nullptr;
+  QPushButton* qr_cancel_button_ = nullptr;
+  std::unique_ptr<lapian::online::QrLoginController> qr_controller_;
 
   std::unique_ptr<lapian::online::IHttpClient> http_;
   std::shared_ptr<lapian::online::HttpCancelToken> cancel_;

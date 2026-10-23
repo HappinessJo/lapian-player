@@ -59,6 +59,10 @@ struct HttpResponse {
   qint64 elapsed_ms = 0;
   // 只用于诊断：本次请求是否实际加了 SESSDATA 头（不含值，不是 secret）。
   bool request_cookie_sent = false;
+  // T8.2.2：仅对 passport.bilibili.com 的二维码 poll 成功响应填充。
+  // 由 WinHTTP 从 Set-Cookie 中**只**提取 SESSDATA（已校验安全字符）；
+  // 其它 cookie/refresh_token/UID 一律丢弃且不暴露。值为 secret，不得打印/落盘。
+  QString response_sessdata;
 };
 
 class IHttpClient {

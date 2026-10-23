@@ -116,6 +116,16 @@ set_tests_properties(lapian_online_fetch_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# T8.2.2 扫码登录：QR 本地渲染、generate/poll 解析、4 态/过期/取消、
+# 只提取 SESSDATA、DPAPI、nav 通过才 success；fake HTTP，无网络/GUI。
+add_executable(lapian_online_qr_test online_qr_test.cpp)
+lapian_apply_common_options(lapian_online_qr_test)
+target_link_libraries(lapian_online_qr_test PRIVATE lapian_online lapian::ffmpeg)
+lapian_copy_ffmpeg_dlls(lapian_online_qr_test)
+add_test(NAME lapian_online_qr_test COMMAND lapian_online_qr_test)
+set_tests_properties(lapian_online_qr_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)
