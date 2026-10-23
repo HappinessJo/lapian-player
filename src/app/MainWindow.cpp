@@ -23,6 +23,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMimeData>
@@ -487,6 +488,22 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   connect(cache_settings_button_, &QPushButton::clicked, this,
           &MainWindow::ShowCacheSettingsDialog);
   statusBar()->addPermanentWidget(cache_settings_button_);
+
+  // T8.9：清晰度入口。只列示 playurl 实际返回的档位；DASH 播放/切档属
+  // T8.10/T8.12，本任务不假装切换。本地模式隐藏。
+  // 注意：不要用 QPushButton::setMenu()——实测（T8.9）状态栏里的带菜单按钮首次
+  // 绘制会阻塞 UI ~620ms（M1 E2E 的 ui_gap 从 62ms 变成 679ms）。这里用普通按钮
+  // + 点击时弹出 QMenu（菜单按需创建），保持首帧路径不碰菜单绘制。
+  quality_button_ = new QPushButton(QStringLiteral("清晰度"), this);
+  quality_button_->setObjectName(QStringLiteral("onlineQualityButton"));
+  quality_button_->setFlat(true);
+  quality_button_->setToolTip(
+      QStringLiteral("在线清晰度（以 playurl 实际返回为准；T8.9 只列档）"));
+  quality_button_->setVisible(false);
+  quality_button_->setEnabled(false);
+  connect(quality_button_, &QPushButton::clicked, this,
+          &MainWindow::ShowOnlineQualityMenu);
+  statusBar()->addPermanentWidget(quality_button_);
 
   mute_action_ = new QAction(QStringLiteral("静音"), this);
   mute_action_->setShortcut(Qt::Key_M);
@@ -1425,6 +1442,11 @@ void MainWindow::EnsureOnlineSession() {
   if (online_test_threshold_ > 0) {
     online_->SetReadyThresholdForTest(online_test_threshold_);
   }
+  // T8.9：档位目录默认首帧后异步取；测试可关/注入（注入不联网）。
+  online_->SetQualityCatalogEnabledForTest(online_quality_enabled_);
+  if (has_online_test_quality_) {
+    online_->SetQualityCatalogForTest(online_test_quality_);
+  }
   online_->SetCallbacks(
       [this](lapian::app::OnlineState state, const QString& message) {
         ApplyOnlineState(state, message);
@@ -1441,11 +1463,22 @@ void MainWindow::EnsureOnlineSession() {
           info_bar_->SetError(message);
         }
         statusBar()->showMessage(QStringLiteral("在线错误：%1").arg(message), 12000);
+      },
+      [this](const lapian::app::OnlineQualityCatalog& info) {
+        ApplyOnlineQuality(info);
       });
 }
 
 bool MainWindow::StartOnlineSession(const lapian::app::OnlineRequest& request) {
+  QElapsedTimer start_timer;
+  start_timer.start();
   BeginOnlineRequest(request);
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr, "T8.9 online_start_ui ms=%lld active=%d\n",
+                 static_cast<long long>(start_timer.elapsed()),
+                 online_ != nullptr && online_->IsActive() ? 1 : 0);
+    std::fflush(stderr);
+  }
   return online_ != nullptr && online_->IsActive();
 }
 
@@ -1757,6 +1790,8 @@ void MainWindow::SetCacheMaintenanceEnabledForTest(bool enabled) {
 }
 
 void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
+  QElapsedTimer begin_timer;
+  begin_timer.start();
   if (request.bvid.isEmpty() || request.cid <= 0) {
     online_last_error_ = QStringLiteral("在线请求缺少 bvid/cid");
     statusBar()->showMessage(online_last_error_, 8000);
@@ -1801,6 +1836,7 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_status_detail_.clear();
   online_gate_published_ = 0;
   online_gate_readpos_ = 0;
+  ResetOnlineQuality();
   if (online_cancel_action_ != nullptr) {
     online_cancel_action_->setEnabled(true);
   }
@@ -1821,12 +1857,28 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     }
     statusBar()->showMessage(online_last_error_, 10000);
   }
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr, "T8.9 online_begin_done elapsed_ms=%lld ok=%d\n",
+                 static_cast<long long>(begin_timer.elapsed()),
+                 online_mode_ && online_ready_ ? 1 : 0);
+    std::fflush(stderr);
+  }
 }
 
 bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   if (!online_mode_) {
     return false;
   }
+  // T8.9 诊断：记录首帧就绪路径的分段耗时（只在 LAPIAN_ONLINE_LOG 下打印）。
+  QElapsedTimer ready_steps;
+  ready_steps.start();
+  auto ready_step = [&ready_steps](const char* name) {
+    if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+      std::fprintf(stderr, "T8.9 online_ready step=%s ms=%.1f\n", name,
+                   static_cast<double>(ready_steps.elapsed()));
+      std::fflush(stderr);
+    }
+  };
   if (info.cache_hit) {
     return ApplyOnlineCacheHit(info);
   }
@@ -1834,6 +1886,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
       gfx_->d3d_device() == nullptr) {
     online_last_error_ = QStringLiteral("在线首帧打开缺少数据源/图形设备");
     statusBar()->showMessage(online_last_error_, 8000);
+    ready_step("early_no_source");
     return false;
   }
   // 在线记录：bvid+cid 持久化；截图在 T8.7 走图片目录 + index.jsonl。
@@ -1873,6 +1926,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     if (online_) {
       online_->Cancel();
     }
+    ready_step("early_open_failed");
     return false;
   }
   if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG") || startup_log_) {
@@ -1900,8 +1954,10 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     if (online_cancel_action_ != nullptr) {
       online_cancel_action_->setEnabled(false);
     }
+    ready_step("early_marks_flush_failed");
     return false;
   }
+  ready_step("media_opened");
 
   // 旧本地/在线会话的 reader 必须全部停掉，再替换。
   if (playback_) {
@@ -2007,6 +2063,14 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   status_label_->setText(base_info_ + online_detail);
   // T8.6.1a：seek 落地后用它把状态栏从“缓冲中（目标帧 N）”恢复成档位/帧率。
   online_status_detail_ = online_detail;
+  // T8.9：档位按钮在首帧后可见；目录稍后异步补齐（先显示当前播放档位）。
+  if (quality_button_ != nullptr) {
+    quality_button_->setVisible(true);
+    quality_button_->setEnabled(true);
+    quality_button_->setText(
+        QStringLiteral("清晰度：%1").arg(lapian::online::QualityName(online_qn_)));
+  }
+  RebuildOnlineQualityMenu();
   statusBar()->showMessage(QStringLiteral("在线首帧已呈现，默认暂停"), 6000);
   play_action_->setEnabled(true);
   if (snapshot_action_ != nullptr) {
@@ -2047,6 +2111,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   mark_context.total_bytes = info.source->Size();
   mark_context.cache_hit = false;
   LoadOnlineMarks(mark_context);
+  ready_step("marks_loaded");
 
   // 音频跟随：AudioEngine 自己打开另一个 GrowingFormat；读到 frontier 会等待。
   if (media.has_audio) {
@@ -2072,6 +2137,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   } else {
     audio_label_->setText(QStringLiteral("无音频"));
   }
+  ready_step("audio_opened");
   if (playback_) {
     playback_->SetAudioEngine(audio_.get());
     playback_->SetRate(rate_);
@@ -2109,8 +2175,10 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     waveform_label_->setText(QStringLiteral("波形：无音频"));
     timeline_->SetWaveformMessage(QStringLiteral("无音频"));
   }
+  ready_step("waveform_started");
 
   StartOnlineIndexBuild();
+  ready_step("index_started");
   return true;
 }
 
@@ -2994,6 +3062,7 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
   online_status_detail_.clear();
+  ResetOnlineQuality();
   mark("end");
 }
 
@@ -3050,10 +3119,246 @@ bool MainWindow::WaitForOnlineReadyForTest(int timeout_ms) {
                                           lapian::app::OnlineState::kError)) {
       return false;
     }
+    QElapsedTimer pump;
+    pump.start();
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    const qint64 pump_ms = pump.elapsed();
+    if (pump_ms > 50 && qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+      std::fprintf(stderr,
+                   "T8.9 wait_ready pump_ms=%lld total_ms=%lld ready=%d\n",
+                   static_cast<long long>(pump_ms),
+                   static_cast<long long>(timer.elapsed()),
+                   online_ready_ ? 1 : 0);
+      std::fflush(stderr);
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   return online_ready_;
+}
+
+// ---------------------------------------------------------------- T8.9 档位菜单
+
+lapian::online::QualityMenuContext MainWindow::CurrentQualityMenuContext() const {
+  lapian::online::QualityMenuContext context;
+  context.current_qn = online_qn_;
+  context.current_codecid = online_codecid_;
+  context.current_from_cache = online_cache_hit_;
+  // T8.9 只解析/列档：DASH 双输入（T8.10）未接入，菜单项不得假装可切。
+  context.dash_playback_available = false;
+  context.error = online_quality_.error;
+  return context;
+}
+
+QVector<lapian::online::QualityMenuEntry>
+MainWindow::OnlineQualityMenuEntriesForTest() const {
+  return lapian::online::BuildQualityMenuModel(online_quality_.catalog,
+                                               CurrentQualityMenuContext());
+}
+
+QString MainWindow::OnlineQualityMenuTextForTest() const {
+  return lapian::online::QualityMenuModelText(OnlineQualityMenuEntriesForTest());
+}
+
+QStringList MainWindow::OnlineQualityMenuActionsForTest() const {
+  QStringList lines;
+  if (quality_menu_ == nullptr) {
+    return lines;
+  }
+  for (QAction* action : quality_menu_->actions()) {
+    lines.append(QStringLiteral("%1|enabled=%2|checked=%3")
+                     .arg(action->text())
+                     .arg(action->isEnabled() ? 1 : 0)
+                     .arg(action->isChecked() ? 1 : 0));
+  }
+  return lines;
+}
+
+void MainWindow::RebuildOnlineQualityMenu() {
+  if (quality_menu_ == nullptr) {
+    quality_menu_ = new QMenu(this);
+    quality_menu_->setObjectName(QStringLiteral("onlineQualityMenu"));
+  }
+  quality_menu_->clear();
+  const QVector<lapian::online::QualityMenuEntry> entries =
+      OnlineQualityMenuEntriesForTest();
+  for (const lapian::online::QualityMenuEntry& entry : entries) {
+    QAction* action = quality_menu_->addAction(entry.text);
+    action->setEnabled(entry.enabled);
+    if (entry.kind == lapian::online::QualityMenuKind::kTier) {
+      action->setCheckable(entry.checkable);
+      action->setChecked(entry.checked);
+      action->setData(entry.qn);
+      const int qn = entry.qn;
+      connect(action, &QAction::triggered, this,
+              [this, qn]() { OnOnlineQualityChosen(qn); });
+    }
+    QString tip = entry.tooltip;
+    if (!entry.disabled_reason.isEmpty()) {
+      tip = tip.isEmpty()
+                ? entry.disabled_reason
+                : tip + QStringLiteral(" · ") + entry.disabled_reason;
+    }
+    action->setToolTip(tip);
+  }
+}
+
+void MainWindow::ShowOnlineQualityMenu() {
+  if (quality_button_ == nullptr) {
+    return;
+  }
+  RebuildOnlineQualityMenu();
+  if (quality_menu_ == nullptr || quality_menu_->isEmpty()) {
+    return;
+  }
+  // 状态栏按钮在上方弹出：用按钮左上角作为锚点，Qt 会按屏幕边界修正。
+  const QPoint anchor =
+      quality_button_->mapToGlobal(QPoint(0, -quality_menu_->sizeHint().height()));
+  quality_menu_->popup(anchor);
+}
+
+void MainWindow::ApplyOnlineQuality(
+    const lapian::app::OnlineQualityCatalog& info) {
+  online_quality_ = info;
+  online_quality_.fetched = true;
+  if (quality_button_ != nullptr) {
+    quality_button_->setVisible(online_mode_ && online_ready_);
+    quality_button_->setEnabled(true);
+    const int shown_qn =
+        online_qn_ > 0 ? online_qn_ : info.catalog.DefaultQn();
+    QString text = QStringLiteral("清晰度：%1")
+                       .arg(lapian::online::QualityName(shown_qn));
+    if (info.cache_hit) {
+      text += QStringLiteral("（缓存）");
+    }
+    quality_button_->setText(text);
+  }
+  RebuildOnlineQualityMenu();
+  if (!info.ok && !info.error.isEmpty()) {
+    // 档位目录失败不改变会话状态：播放/缓存/首帧都不受影响。
+    statusBar()->showMessage(
+        QStringLiteral("档位获取失败（不影响播放）：%1").arg(info.error), 8000);
+  }
+}
+
+void MainWindow::ResetOnlineQuality() {
+  online_quality_ = lapian::app::OnlineQualityCatalog{};
+  if (quality_menu_ != nullptr) {
+    quality_menu_->clear();
+  }
+  if (quality_button_ != nullptr) {
+    quality_button_->setVisible(false);
+    quality_button_->setEnabled(false);
+    quality_button_->setText(QStringLiteral("清晰度"));
+  }
+}
+
+void MainWindow::OnOnlineQualityChosen(int qn) {
+  if (qn <= 0) {
+    return;
+  }
+  if (qn == online_qn_) {
+    statusBar()->showMessage(
+        QStringLiteral("已经是当前播放档位：%1")
+            .arg(lapian::online::QualityName(qn)),
+        6000);
+    return;
+  }
+  // T8.9 只列档：不重取流、不改变播放；T8.10 双输入 / T8.12 策略才接切档。
+  statusBar()->showMessage(
+      QStringLiteral("DASH 档位切换尚未接入（T8.10 双输入 / T8.12 策略）："
+                     "%1 只列示，当前仍播放 %2")
+          .arg(lapian::online::QualityName(qn),
+               lapian::online::QualityName(online_qn_)),
+      12000);
+}
+
+void MainWindow::SetOnlineQualityCatalogEnabledForTest(bool enabled) {
+  online_quality_enabled_ = enabled;
+  if (online_ != nullptr) {
+    online_->SetQualityCatalogEnabledForTest(enabled);
+  }
+}
+
+void MainWindow::SetOnlineQualityForTest(
+    const lapian::app::OnlineQualityCatalog& info) {
+  online_test_quality_ = info;
+  online_test_quality_.fetched = true;
+  has_online_test_quality_ = true;
+  if (online_ != nullptr) {
+    online_->SetQualityCatalogForTest(online_test_quality_);
+  } else {
+    // 没有活动会话时也把模型/菜单更新出来，供 --ui 断言（不代表已联网）。
+    ApplyOnlineQuality(online_test_quality_);
+  }
+}
+
+bool MainWindow::OnlineQualityButtonVisibleForTest() const {
+  return quality_button_ != nullptr && quality_button_->isVisible();
+}
+
+int MainWindow::OnlineQualityRequestsForTest() const {
+  return online_ != nullptr ? online_->QualityRequestsForTest() : 0;
+}
+
+QString MainWindow::OnlineQualitySummaryForTest() const {
+  return QStringLiteral(
+             "ok=%1 cache_hit=%2 fetched=%3 http_status=%4 elapsed_ms=%5 "
+             "requests=%6 error=%7 %8")
+      .arg(online_quality_.ok ? 1 : 0)
+      .arg(online_quality_.cache_hit ? 1 : 0)
+      .arg(online_quality_.fetched ? 1 : 0)
+      .arg(online_quality_.http_status)
+      .arg(online_quality_.elapsed_ms)
+      .arg(OnlineQualityRequestsForTest())
+      .arg(online_quality_.error.isEmpty() ? QStringLiteral("-")
+                                           : online_quality_.error)
+      .arg(online_quality_.catalog.Summary());
+}
+
+bool MainWindow::WaitForOnlineQualityForTest(int timeout_ms) {
+  QElapsedTimer timer;
+  timer.start();
+  while (timer.elapsed() < timeout_ms) {
+    if (online_quality_.fetched) {
+      return true;
+    }
+    if (!online_mode_ ||
+        (online_ && online_->state() == lapian::app::OnlineState::kError)) {
+      return online_quality_.fetched;
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return online_quality_.fetched;
+}
+
+bool MainWindow::TriggerOnlineQualityEntryForTest(int qn, QString* status) {
+  if (status != nullptr) {
+    status->clear();
+  }
+  if (quality_menu_ == nullptr) {
+    return false;
+  }
+  for (QAction* action : quality_menu_->actions()) {
+    if (!action->data().isValid() || action->data().toInt() != qn) {
+      continue;
+    }
+    if (!action->isEnabled()) {
+      if (status != nullptr) {
+        *status = QStringLiteral("disabled: %1").arg(action->toolTip());
+      }
+      return false;
+    }
+    action->trigger();
+    if (status != nullptr) {
+      *status = StatusMessageForTest();
+    }
+    return true;
+  }
+  if (status != nullptr) {
+    *status = QStringLiteral("not_found");
+  }
+  return false;
 }
 
 void MainWindow::OpenFile(const QString& path) {
@@ -3266,6 +3571,14 @@ void MainWindow::OpenLocalMedia(const QString& path,
     status_label_->setText(base_info_ + online_detail);
     statusBar()->showMessage(
         QStringLiteral("缓存命中：已打开本地 data.mp4（0 网络）"), 8000);
+    // T8.9：缓存命中也显示清晰度按钮；档位来自 meta（未联网）。
+    if (quality_button_ != nullptr) {
+      quality_button_->setVisible(true);
+      quality_button_->setEnabled(true);
+      quality_button_->setText(QStringLiteral("清晰度：%1").arg(
+          lapian::online::QualityName(online_qn_)));
+    }
+    RebuildOnlineQualityMenu();
   } else {
     status_label_->setText(base_info_ + QStringLiteral(" · ") +
                            (frame.hardware ? QStringLiteral("硬解")

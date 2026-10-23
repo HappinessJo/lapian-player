@@ -50,6 +50,7 @@
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineLongPressTestRunner.h"
 #include "app/OnlineM1TestRunner.h"
+#include "app/OnlineQualityTestRunner.h"
 #include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
@@ -188,6 +189,74 @@ int main(int argc, char* argv[]) {
     }
     options.ui_smoke = ui_smoke;
     return lapian::app::RunOnlineCacheManageTest(options);
+  }
+
+  // T8.9：DASH 解析与档位探针（默认无 GUI；`--ui` 走下面的真实窗口分支）。
+  // 只读 .secrets/--sessdata-file，不打印凭据/签名 URL。
+  if (HasArgument(argc, argv, "--online-quality-test") &&
+      !HasArgument(argc, argv, "--ui")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineQualityTestOptions options;
+    const QStringList quality_args = QCoreApplication::arguments();
+    for (int i = 1; i < quality_args.size(); ++i) {
+      const QString& arg = quality_args[i];
+      auto take = [&](QString* target) {
+        if (i + 1 < quality_args.size()) {
+          *target = quality_args[++i];
+          return true;
+        }
+        return false;
+      };
+      if (arg == QStringLiteral("--bvid")) {
+        take(&options.bvid);
+      } else if (arg.startsWith(QStringLiteral("--bvid="))) {
+        options.bvid = arg.mid(static_cast<int>(std::strlen("--bvid=")));
+      } else if (arg == QStringLiteral("--cid")) {
+        take(&options.cid_text);
+      } else if (arg.startsWith(QStringLiteral("--cid="))) {
+        options.cid_text = arg.mid(static_cast<int>(std::strlen("--cid=")));
+      } else if (arg == QStringLiteral("--tag")) {
+        take(&options.tag);
+      } else if (arg.startsWith(QStringLiteral("--tag="))) {
+        options.tag = arg.mid(static_cast<int>(std::strlen("--tag=")));
+      } else if (arg == QStringLiteral("--sessdata-file")) {
+        take(&options.sessdata_file);
+      } else if (arg.startsWith(QStringLiteral("--sessdata-file="))) {
+        options.sessdata_file =
+            arg.mid(static_cast<int>(std::strlen("--sessdata-file=")));
+      } else if (arg == QStringLiteral("--timeout-ms")) {
+        QString text;
+        if (take(&text)) {
+          options.timeout_ms = text.toInt();
+        }
+      } else if (arg.startsWith(QStringLiteral("--timeout-ms="))) {
+        options.timeout_ms =
+            arg.mid(static_cast<int>(std::strlen("--timeout-ms="))).toInt();
+      } else if (arg == QStringLiteral("--anonymous")) {
+        options.anonymous = true;
+      } else if (arg == QStringLiteral("--odd-qn")) {
+        options.odd_qn = true;
+      }
+    }
+    options.cid = options.cid_text.toLongLong();
+    if (options.cid <= 0) {
+      options.cid = 0;
+    }
+    if (options.timeout_ms < 3000) {
+      options.timeout_ms = 3000;
+    }
+    if (options.timeout_ms > 120000) {
+      options.timeout_ms = 120000;
+    }
+    if (options.tag.isEmpty()) {
+      options.tag = options.bvid;
+    }
+    return lapian::app::RunOnlineQualityTest(options);
   }
 
   // T8.4：可增长读层探针同样无 GUI、离线（本地 faststart 样本 + 临时缓存根）。
@@ -462,6 +531,13 @@ int main(int argc, char* argv[]) {
   bool online_buffer_test = false;
   QString online_buffer_media;
   int online_buffer_timeout_ms = 20000;
+  // T8.9：DASH 解析/档位探针（默认无 GUI；`--ui` 走真实窗口/档位菜单）。
+  bool online_quality_test = false;
+  bool online_quality_ui = false;
+  bool online_quality_anonymous = false;
+  bool online_quality_odd_qn = false;
+  bool online_quality_no_catalog = false;
+  QString online_quality_sessdata_file;
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -592,6 +668,20 @@ int main(int argc, char* argv[]) {
       online_m1_uncached_landing = true;
     } else if (arguments[i] == QStringLiteral("--online-buffer-test")) {
       online_buffer_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-quality-test")) {
+      online_quality_test = true;
+    } else if (arguments[i] == QStringLiteral("--ui")) {
+      online_quality_ui = true;
+    } else if (arguments[i] == QStringLiteral("--anonymous")) {
+      online_quality_anonymous = true;
+    } else if (arguments[i] == QStringLiteral("--odd-qn")) {
+      online_quality_odd_qn = true;
+    } else if (arguments[i] == QStringLiteral("--no-quality-catalog")) {
+      // T8.9 诊断：关闭首帧后的 fnval=4048 档位目录请求（A/B 回归用）。
+      online_quality_no_catalog = true;
+    } else if (arguments[i] == QStringLiteral("--sessdata-file") &&
+               i + 1 < arguments.size()) {
+      online_quality_sessdata_file = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--online-offline-test")) {
       online_offline_test = true;
     } else if (arguments[i] == QStringLiteral("--offline-media") &&
@@ -672,7 +762,14 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (online_m1_test || online_offline_test || online_longpress_test) {
+  if (online_m1_test || online_offline_test || online_longpress_test ||
+      online_quality_test) {
+    if (online_quality_test && !online_quality_ui) {
+      // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
+      std::fprintf(stderr, "online_quality_fail reason=ui_flag_required\n");
+      std::fflush(stderr);
+      return 2;
+    }
     bool cid_ok = false;
     online_m1_cid = online_m1_cid_text.toLongLong(&cid_ok);
     if (!cid_ok) {
@@ -693,6 +790,7 @@ int main(int argc, char* argv[]) {
     if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
       const char* name = online_offline_test ? "offline"
                           : online_longpress_test ? "longpress"
+                          : online_quality_test ? "quality"
                                                   : "m1";
       std::fprintf(stderr,
                    "online_%s_fail reason=missing_bvid_cid usage=--online-%s-test "
@@ -735,18 +833,21 @@ int main(int argc, char* argv[]) {
   // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
-       online_longpress_test || online_buffer_test || online_offline_test) &&
+       online_longpress_test || online_buffer_test || online_offline_test ||
+       online_quality_test) &&
       settings_root.isEmpty()) {
     settings_root =
         QDir::currentPath() +
         ((settings_test || settings_expect) ? QStringLiteral("/build/t6.3-settings")
                                            : (banner_test
                                                   ? QStringLiteral("/build/t6.5-settings")
-                                                  : (online_offline_test
-                                                         ? QStringLiteral("/build/t8.7-settings")
-                                                         : (online_longpress_test
-                                                                ? QStringLiteral("/build/t8.6.1a-settings")
-                                                                : QStringLiteral("/build/t8.6-settings")))));
+                                                  : (online_quality_test
+                                                         ? QStringLiteral("/build/t8.9-settings")
+                                                         : (online_offline_test
+                                                                ? QStringLiteral("/build/t8.7-settings")
+                                                                : (online_longpress_test
+                                                                       ? QStringLiteral("/build/t8.6.1a-settings")
+                                                                       : QStringLiteral("/build/t8.6-settings"))))));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
@@ -883,6 +984,11 @@ int main(int argc, char* argv[]) {
   }
   MainWindow window(nullptr, settings_root, !running_test_mode);
   log_startup("window_created");
+  if (online_quality_no_catalog) {
+    window.SetOnlineQualityCatalogEnabledForTest(false);
+    std::fprintf(stderr, "online_quality_catalog disabled=1\n");
+    std::fflush(stderr);
+  }
   // T7.1：旧 GUI 回归在 OpenFile 后立即导航；保持同步索引语义。
   // 产品路径与 --startup-test 走异步索引（首帧先出，后台扫描）。
   const bool legacy_gui_test =
@@ -893,7 +999,7 @@ int main(int argc, char* argv[]) {
   if (legacy_gui_test) {
     window.SetIndexSynchronousForTest(true);
   }
-  if (online_m1_test || online_longpress_test ||
+  if (online_m1_test || online_longpress_test || online_quality_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
       online_m1_cache_root =
@@ -902,7 +1008,9 @@ int main(int argc, char* argv[]) {
                ? QStringLiteral("/build/t8.7-online-cache")
                : (online_longpress_test
                       ? QStringLiteral("/build/t8.6.1a-online-cache")
-                      : QStringLiteral("/build/t8.6-online-cache")));
+                      : (online_quality_test
+                             ? QStringLiteral("/build/t8.9-online-cache")
+                             : QStringLiteral("/build/t8.6-online-cache"))));
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
     // T8.6.1a 可选：长按探针要求增长中的会话（缓存命中会走本地同步步进）。
@@ -918,7 +1026,9 @@ int main(int argc, char* argv[]) {
                ? QStringLiteral("/build/t8.7-online-pictures")
                : (online_longpress_test
                       ? QStringLiteral("/build/t8.6.1a-online-pictures")
-                      : QStringLiteral("/build/t8.6-online-pictures")));
+                      : (online_quality_test
+                             ? QStringLiteral("/build/t8.9-online-pictures")
+                             : QStringLiteral("/build/t8.6-online-pictures"))));
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
@@ -944,7 +1054,7 @@ int main(int argc, char* argv[]) {
       QDir().mkpath(online_records_root);
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
-  } else if (online_m1_test || online_longpress_test) {
+  } else if (online_m1_test || online_longpress_test || online_quality_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
@@ -952,7 +1062,9 @@ int main(int argc, char* argv[]) {
           QDir::currentPath() +
           (online_longpress_test
                ? QStringLiteral("/build/t8.6.1a-online-records")
-               : QStringLiteral("/build/t8.7-online-records-m1"));
+               : (online_quality_test
+                      ? QStringLiteral("/build/t8.9-online-records")
+                      : QStringLiteral("/build/t8.7-online-records-m1")));
     }
     online_records_root = QFileInfo(online_records_root).absoluteFilePath();
     QDir(online_records_root).removeRecursively();
@@ -1099,6 +1211,27 @@ int main(int argc, char* argv[]) {
     online_m1_runner =
         std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
     online_m1_runner->Start();
+  }
+
+  // T8.9：`--online-quality-test --ui`，真实窗口验证档位按钮/菜单与“不假装切档”。
+  std::unique_ptr<lapian::app::OnlineQualityUiTestRunner> online_quality_runner;
+  if (online_quality_test) {
+    lapian::app::OnlineQualityTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.cid_text = online_m1_cid_text;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.sessdata_file = online_quality_sessdata_file;
+    options.anonymous = online_quality_anonymous;
+    options.odd_qn = online_quality_odd_qn;
+    options.ui = true;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    online_quality_runner =
+        std::make_unique<lapian::app::OnlineQualityUiTestRunner>(&window, options);
+    online_quality_runner->Start();
   }
 
   // T8.6.1a：在线长按 PgUp/PgDn（异步步进队列/边界/未缓存提示）。

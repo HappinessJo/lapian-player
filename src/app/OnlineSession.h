@@ -93,6 +93,19 @@ struct OnlineReadyInfo {
   double fps = 0.0;
 };
 
+// T8.9 档位目录结果：DASH playurl(fnval=4048) 的解析结果 + 获取状态。
+// 只用于“列档/菜单/证据”，**不接双输入播放**（T8.10）。
+struct OnlineQualityCatalog {
+  lapian::online::DashCatalog catalog;
+  bool ok = false;
+  bool cache_hit = false;  // 来自完整缓存 meta，未联网
+  bool fetched = false;    // 是否已有结果（成功或失败）
+  int http_status = 0;
+  int http_requests = 0;
+  qint64 elapsed_ms = 0;
+  QString error;
+};
+
 class OnlineSession : public QObject {
   Q_OBJECT
 
@@ -101,6 +114,8 @@ class OnlineSession : public QObject {
   using ProgressCallback = std::function<void(const OnlineProgress&)>;
   using ReadyCallback = std::function<void(const OnlineReadyInfo&)>;
   using ErrorCallback = std::function<void(const QString&)>;
+  // T8.9：档位目录（成功/失败/cache-hit）回到 UI；不改变会话状态。
+  using QualityCallback = std::function<void(const OnlineQualityCatalog&)>;
 
   explicit OnlineSession(lapian::online::CacheStore* cache,
                          QObject* parent = nullptr);
@@ -118,8 +133,16 @@ class OnlineSession : public QObject {
   // 测试注入：跳过 view/playurl 的等待，但仍走同一下载/读层/回调路径。
   void SetReadyThresholdForTest(qint64 bytes);
 
+  // T8.9：档位目录默认在首帧后异步取一次 fnval=4048；测试可关闭或直接注入。
+  void SetQualityCatalogEnabledForTest(bool enabled) {
+    quality_enabled_.store(enabled);
+  }
+  void SetQualityCatalogForTest(const OnlineQualityCatalog& info);
+  OnlineQualityCatalog quality_catalog() const;
+
   void SetCallbacks(StateCallback state, ProgressCallback progress,
-                    ReadyCallback ready, ErrorCallback error);
+                    ReadyCallback ready, ErrorCallback error,
+                    QualityCallback quality = {});
 
   // UI 线程调用。失败返回 false + 可读错误（不启动会话）。
   bool Start(const OnlineRequest& request, QString* error);
@@ -146,6 +169,7 @@ class OnlineSession : public QObject {
 
   QString LastErrorForTest() const { return last_error_; }
   int PlayUrlRequestsForTest() const { return playurl_requests_; }
+  int QualityRequestsForTest() const { return quality_requests_; }
 
  private slots:
   void Poll();
@@ -155,6 +179,13 @@ class OnlineSession : public QObject {
     std::mutex mutex;
     bool done = false;
     lapian::online::PlayUrlFetchResult result;
+    std::uint64_t generation = 0;
+  };
+
+  struct QualityOutcome {
+    std::mutex mutex;
+    bool done = false;
+    OnlineQualityCatalog info;
     std::uint64_t generation = 0;
   };
 
@@ -173,6 +204,13 @@ class OnlineSession : public QObject {
   void OnPlayUrlDone(std::uint64_t generation);
   void CancelJobAndSource();
 
+  // T8.9 档位目录：首帧后起一个独立线程；失败不影响播放/会话状态。
+  void StartQualityWorker(std::uint64_t generation);
+  void JoinQualityWorker();
+  void OnQualityDone(std::uint64_t generation);
+  void EmitQuality(const OnlineQualityCatalog& info);
+  OnlineQualityCatalog CacheQualityFromEntry() const;
+
   lapian::online::CacheStore* cache_ = nullptr;
   std::unique_ptr<lapian::online::IHttpClient> injected_http_;
   std::unique_ptr<lapian::online::IDownloadTransport> injected_transport_;
@@ -190,6 +228,17 @@ class OnlineSession : public QObject {
   std::shared_ptr<PlayUrlOutcome> playurl_outcome_;
   std::shared_ptr<lapian::online::HttpCancelToken> playurl_cancel_;
   std::uint64_t generation_ = 0;
+
+  std::thread quality_thread_;
+  std::shared_ptr<QualityOutcome> quality_outcome_;
+  std::shared_ptr<lapian::online::HttpCancelToken> quality_cancel_;
+  std::atomic<bool> quality_enabled_{true};
+  bool has_injected_quality_ = false;
+  OnlineQualityCatalog injected_quality_;
+  bool quality_started_ = false;
+  bool quality_emitted_ = false;
+  int quality_requests_ = 0;
+  OnlineQualityCatalog quality_;
 
   mutable std::mutex mutex_;
   OnlineState state_ = OnlineState::kIdle;
@@ -213,6 +262,7 @@ class OnlineSession : public QObject {
   ProgressCallback progress_callback_;
   ReadyCallback ready_callback_;
   ErrorCallback error_callback_;
+  QualityCallback quality_callback_;
 };
 
 }  // namespace lapian::app

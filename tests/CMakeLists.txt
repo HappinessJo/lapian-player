@@ -155,6 +155,16 @@ add_test(NAME lapian_online_qr_test COMMAND lapian_online_qr_test)
 set_tests_properties(lapian_online_qr_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.9 DASH 解析与档位：fnval=4048 URL、dash.video[]/audio[] 字段、
+# quality 不可信、AVC 默认/档位顺序、60fps+4K 只手动、坏字段/无音轨不崩、
+# 档位菜单模型（只列示/置灰 T8.10/不把可选写成保证可达）。纯离线。
+add_executable(lapian_online_dash_test online_dash_test.cpp)
+lapian_apply_common_options(lapian_online_dash_test)
+target_link_libraries(lapian_online_dash_test PRIVATE lapian_online)
+add_test(NAME lapian_online_dash_test COMMAND lapian_online_dash_test)
+set_tests_properties(lapian_online_dash_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

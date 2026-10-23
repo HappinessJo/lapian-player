@@ -18,7 +18,9 @@
 #include "core/FrameMath.h"
 #include "core/LoopRange.h"
 #include "core/MarkStore.h"
+#include "app/OnlineSession.h"
 #include "media/OnlineIndexBuilder.h"
+#include "online/QualityMenu.h"
 
 struct AVFrame;
 struct OnlineCacheSummary;
@@ -30,6 +32,7 @@ class QDropEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
+class QMenu;
 class QPushButton;
 class QResizeEvent;
 class QSlider;
@@ -308,6 +311,22 @@ class MainWindow : public QMainWindow {
       std::unique_ptr<lapian::online::IDownloadTransport> transport);
   void SetOnlinePlayUrlForTest(const lapian::online::PlayUrlData& data);
   void SetOnlineReadyThresholdForTest(qint64 bytes);
+  // T8.9 档位目录/菜单：默认在首帧后异步取一次 fnval=4048；测试可关/注入。
+  void SetOnlineQualityCatalogEnabledForTest(bool enabled);
+  void SetOnlineQualityForTest(const lapian::app::OnlineQualityCatalog& info);
+  bool OnlineQualityButtonVisibleForTest() const;
+  bool OnlineQualityReceivedForTest() const { return online_quality_.fetched; }
+  QString OnlineQualityErrorForTest() const { return online_quality_.error; }
+  QString OnlineQualityMenuTextForTest() const;
+  // 真实 QMenu 的 action 快照（text|enabled|checked），证明产品菜单已构建。
+  QStringList OnlineQualityMenuActionsForTest() const;
+  QString OnlineQualitySummaryForTest() const;
+  int OnlineQualityRequestsForTest() const;
+  bool WaitForOnlineQualityForTest(int timeout_ms);
+  // 触发菜单项：返回 false = 不存在/置灰（*status 可读）；true = 已触发。
+  bool TriggerOnlineQualityEntryForTest(int qn, QString* status);
+  // 菜单模型（与产品菜单共用 BuildQualityMenuModel）；T8.9 只列示不切档。
+  QVector<lapian::online::QualityMenuEntry> OnlineQualityMenuEntriesForTest() const;
   bool IsOnlineBufferingForTest() const;
   int OnlineBufferEventCountForTest() const { return online_buffer_event_count_; }
   QString OnlineGateDebugForTest() const;
@@ -403,6 +422,13 @@ class MainWindow : public QMainWindow {
   void BeginOnlineRequest(const lapian::app::OnlineRequest& request);
   bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
   bool ApplyOnlineCacheHit(const lapian::app::OnlineReadyInfo& info);
+  // T8.9：档位目录回调 → 档位按钮/菜单；失败不影响播放。
+  void ApplyOnlineQuality(const lapian::app::OnlineQualityCatalog& info);
+  void ResetOnlineQuality();
+  void RebuildOnlineQualityMenu();
+  void ShowOnlineQualityMenu();
+  lapian::online::QualityMenuContext CurrentQualityMenuContext() const;
+  void OnOnlineQualityChosen(int qn);
   void OpenLocalMedia(const QString& path, const OnlineOpenContext* online);
   void LoadOnlineMarks(const OnlineOpenContext& online);
   void ReconcileOnlineMarks();
@@ -550,6 +576,13 @@ class MainWindow : public QMainWindow {
   QAction* exit_fullscreen_action_ = nullptr;
   QString base_info_;
   QString audio_base_label_;
+  // T8.9 清晰度菜单：只列示 DASH 目录 + 当前播放档位；不接 DASH 播放。
+  QPushButton* quality_button_ = nullptr;
+  QMenu* quality_menu_ = nullptr;
+  lapian::app::OnlineQualityCatalog online_quality_;
+  bool online_quality_enabled_ = true;
+  bool has_online_test_quality_ = false;
+  lapian::app::OnlineQualityCatalog online_test_quality_;
   std::shared_ptr<lapian::media::MediaSession> session_;
   std::unique_ptr<lapian::app::OnlineSession> online_;
   std::unique_ptr<lapian::online::CacheStore> online_cache_;

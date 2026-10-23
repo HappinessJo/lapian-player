@@ -1,0 +1,175 @@
+#include "online/QualityMenu.h"
+
+#include <QStringList>
+
+namespace lapian::online {
+namespace {
+
+QString BandwidthText(qint64 bandwidth) {
+  if (bandwidth <= 0) {
+    return QString();
+  }
+  if (bandwidth >= 1000 * 1000) {
+    return QStringLiteral("%1Mbps").arg(
+        QString::number(static_cast<double>(bandwidth) / 1.0e6, 'f', 2));
+  }
+  return QStringLiteral("%1kbps").arg(bandwidth / 1000);
+}
+
+QString TierTooltip(const QualityTier& tier) {
+  const DashStream* stream = tier.PreferredStream();
+  QStringList parts;
+  if (stream != nullptr) {
+    parts.append(CodecName(stream->codecid));
+    if (!stream->codecs.isEmpty()) {
+      parts.append(stream->codecs);
+    }
+  }
+  const QString bandwidth = BandwidthText(tier.bandwidth);
+  if (!bandwidth.isEmpty()) {
+    parts.append(bandwidth);
+  }
+  if (stream != nullptr) {
+    if (stream->init_ok) {
+      parts.append(QStringLiteral("init %1").arg(stream->init_range.ToString()));
+      parts.append(QStringLiteral("index %1").arg(stream->index_range.ToString()));
+    } else {
+      parts.append(QStringLiteral("init/index 范围缺失"));
+    }
+    parts.append(QStringLiteral("备份 URL %1 个").arg(stream->backup_urls.size()));
+  }
+  return parts.join(QStringLiteral(" · "));
+}
+
+}  // namespace
+
+QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
+                                                const QualityMenuContext& context) {
+  QVector<QualityMenuEntry> entries;
+
+  QualityMenuEntry header;
+  header.kind = QualityMenuKind::kHeader;
+  header.text = context.current_from_cache
+                    ? QStringLiteral("缓存命中档位（未联网；来自缓存 meta）")
+                    : QStringLiteral("实际可用档位（以 playurl 返回为准）");
+  entries.append(header);
+
+  if (!catalog.HasVideo()) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text =
+        context.error.isEmpty()
+            ? QStringLiteral("档位未获取：还没有 DASH 目录（不会伪造档位）")
+            : QStringLiteral("档位获取失败：%1").arg(context.error);
+    entries.append(note);
+    return entries;
+  }
+
+  bool has_unplayable = false;
+  bool current_found = false;
+  for (const QualityTier& tier : catalog.tiers) {
+    QualityMenuEntry entry;
+    entry.kind = QualityMenuKind::kTier;
+    entry.qn = tier.qn;
+    entry.checkable = true;
+    entry.manual_only = IsManualOnlyQuality(tier.qn);
+    const DashStream* stream = tier.PreferredStream();
+    entry.codecid = stream != nullptr ? stream->codecid : 0;
+    entry.text = QualityTierLabel(tier);
+    entry.tooltip = TierTooltip(tier);
+    if (entry.manual_only) {
+      entry.text += QStringLiteral("（仅手动）");
+    }
+    if (tier.qn >= 120) {
+      // 4K/HDR/杜比/8K 是“可用档”，不是 MVP 承诺。
+      entry.text += QStringLiteral("（可用档：性能/颜色不保证）");
+    }
+    entry.checked =
+        context.current_qn == tier.qn &&
+        (context.current_codecid <= 0 || context.current_codecid == entry.codecid);
+    if (entry.checked) {
+      entry.text += QStringLiteral("（当前播放）");
+      entry.enabled = true;
+      entry.tooltip = QStringLiteral("%1 · 已经是当前播放档位")
+                          .arg(entry.tooltip.isEmpty()
+                                   ? QStringLiteral("当前档位")
+                                   : entry.tooltip);
+      current_found = true;
+    } else if (!context.dash_playback_available) {
+      entry.enabled = false;
+      entry.disabled_reason =
+          entry.manual_only
+              ? QStringLiteral("60fps/4K 只允许手动；DASH 双输入在 T8.10 接入"
+                               "（T8.9 只解析/列档，不切档）")
+              : QStringLiteral("DASH 双输入在 T8.10 接入"
+                               "（T8.9 只解析/列档，不切档）");
+      entry.text += QStringLiteral("（需 DASH 播放，T8.10）");
+      has_unplayable = true;
+    } else {
+      // T8.12 起才允许手动切换；即便接入，manual_only 档也绝不自动选。
+      entry.enabled = true;
+      entry.tooltip = entry.manual_only
+                          ? QStringLiteral("仅手动切换（不自动选）")
+                          : QStringLiteral("手动切换档位（重新取流）");
+    }
+    entries.append(entry);
+  }
+
+  if (context.current_qn > 0 && !current_found) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text = QStringLiteral("当前播放 %1 不在 DASH 目录里（durl 与服务端档位不同）")
+                    .arg(QualityName(context.current_qn));
+    entries.append(note);
+  }
+  if (has_unplayable) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text = QStringLiteral(
+        "DASH 档位仅列示：T8.9 不做 DASH 播放/切档（T8.10/T8.12）；"
+        "菜单可选不等于保证可达");
+    entries.append(note);
+  }
+  if (!catalog.HasAudio()) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text = QStringLiteral("DASH 目录没有音频流（无音轨或响应缺 dash.audio）");
+    entries.append(note);
+  }
+  return entries;
+}
+
+QString QualityMenuModelText(const QVector<QualityMenuEntry>& entries) {
+  QStringList lines;
+  for (const QualityMenuEntry& entry : entries) {
+    QString prefix;
+    switch (entry.kind) {
+      case QualityMenuKind::kHeader:
+        prefix = QStringLiteral("[header]");
+        break;
+      case QualityMenuKind::kNote:
+        prefix = QStringLiteral("[note]");
+        break;
+      case QualityMenuKind::kTier:
+        prefix = QStringLiteral("[tier] qn=%1 codec=%2 checked=%3 enabled=%4 "
+                                "manual=%5 text=%6")
+                     .arg(entry.qn)
+                     .arg(entry.codecid)
+                     .arg(entry.checked ? 1 : 0)
+                     .arg(entry.enabled ? 1 : 0)
+                     .arg(entry.manual_only ? 1 : 0)
+                     .arg(entry.text);
+        break;
+    }
+    if (entry.kind != QualityMenuKind::kTier) {
+      prefix += QStringLiteral(" ") + entry.text;
+    }
+    if (!entry.disabled_reason.isEmpty()) {
+      prefix += QStringLiteral(" reason=") + entry.disabled_reason;
+    }
+    lines.append(prefix);
+  }
+  return lines.join(QLatin1Char('\n'));
+}
+
+}  // namespace lapian::online

@@ -14,6 +14,29 @@ namespace {
 
 constexpr qint64 kReadyThresholdBytes = 300 * 1024;
 
+// T8.9 诊断：只对可能压住 UI 线程的同步段计时；>100ms 才打印（LAPIAN_ONLINE_LOG）。
+class ScopedSlowLog {
+ public:
+  explicit ScopedSlowLog(const char* name, qint64 threshold_ms = 100)
+      : name_(name), threshold_ms_(threshold_ms) {
+    timer_.start();
+  }
+  ~ScopedSlowLog() {
+    const qint64 elapsed = timer_.elapsed();
+    if (elapsed < threshold_ms_ || !qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+      return;
+    }
+    std::fprintf(stderr, "T8.9 online_slow section=%s ms=%lld\n", name_,
+                 static_cast<long long>(elapsed));
+    std::fflush(stderr);
+  }
+
+ private:
+  const char* name_ = "";
+  qint64 threshold_ms_ = 100;
+  QElapsedTimer timer_;
+};
+
 lapian::online::CacheMetadata MakeMetadata(const OnlineRequest& request) {
   lapian::online::CacheMetadata metadata;
   metadata.title = request.title;
@@ -79,13 +102,25 @@ void OnlineSession::SetReadyThresholdForTest(qint64 bytes) {
   ready_threshold_ = std::max<qint64>(1, bytes);
 }
 
+void OnlineSession::SetQualityCatalogForTest(const OnlineQualityCatalog& info) {
+  injected_quality_ = info;
+  has_injected_quality_ = true;
+}
+
+OnlineQualityCatalog OnlineSession::quality_catalog() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return quality_;
+}
+
 void OnlineSession::SetCallbacks(StateCallback state,
                                  ProgressCallback progress,
-                                 ReadyCallback ready, ErrorCallback error) {
+                                 ReadyCallback ready, ErrorCallback error,
+                                 QualityCallback quality) {
   state_callback_ = std::move(state);
   progress_callback_ = std::move(progress);
   ready_callback_ = std::move(ready);
   error_callback_ = std::move(error);
+  quality_callback_ = std::move(quality);
 }
 
 void OnlineSession::SetState(OnlineState state, const QString& message) {
@@ -240,6 +275,119 @@ void OnlineSession::JoinPlayUrlWorker() {
   }
 }
 
+void OnlineSession::StartQualityWorker(std::uint64_t generation) {
+  if (quality_started_) {
+    return;
+  }
+  quality_started_ = true;
+  auto outcome = std::make_shared<QualityOutcome>();
+  outcome->generation = generation;
+  quality_outcome_ = outcome;
+  if (has_injected_quality_) {
+    {
+      std::lock_guard<std::mutex> lock(outcome->mutex);
+      outcome->done = true;
+      outcome->info = injected_quality_;
+    }
+    QTimer::singleShot(0, this, [this, generation]() { OnQualityDone(generation); });
+    return;
+  }
+  if (cache_hit_) {
+    // 缓存命中在 EmitCacheHitReady 里用 meta 直接发；不应走到网络。
+    return;
+  }
+  auto cancel = std::make_shared<lapian::online::HttpCancelToken>();
+  quality_cancel_ = cancel;
+  lapian::online::IHttpClient* injected = injected_http_ ? injected_http_.get()
+                                                          : nullptr;
+  const QString bvid = request_.bvid;
+  const qint64 cid = request_.cid;
+  const QString sessdata = request_.sessdata;
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    quality_thread_ = std::thread([this, generation, outcome, cancel, injected,
+                                   bvid, cid, sessdata, started]() {
+      // 独立 WinHttpClient：不与会话的 durl/刷新请求共享对象，避免生命周期
+      // 耦合；WinHttpClient::Get 每次自建 session/连接，调用本身无共享状态。
+      std::unique_ptr<lapian::online::WinHttpClient> owned;
+      lapian::online::IHttpClient* client = injected;
+      if (client == nullptr) {
+        owned = std::make_unique<lapian::online::WinHttpClient>();
+        client = owned.get();
+      }
+      lapian::online::DashFetchOptions options;
+      options.timeout_ms = 6000;
+      options.sessdata = sessdata;
+      // 档位目录请求：封顶 1080P + fourk=1（只让服务端返回账号允许的档位梯，
+      // 不自动选 4K；4K 由菜单手动/条件验收）。
+      options.qn = lapian::online::kDashRequestQn;
+      options.fourk = 1;
+      const lapian::online::DashFetchResult result =
+          lapian::online::FetchDashCatalog(client, bvid, cid, options, *cancel);
+      OnlineQualityCatalog info;
+      info.ok = result.error.ok();
+      info.fetched = true;
+      info.http_status = result.http_status;
+      info.http_requests = result.http_requests;
+      info.catalog = result.catalog;
+      info.elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - started)
+              .count();
+      if (!result.error.ok()) {
+        info.error = result.error.message.isEmpty()
+                         ? QStringLiteral("档位获取失败")
+                         : result.error.message;
+      }
+      {
+        std::lock_guard<std::mutex> lock(outcome->mutex);
+        outcome->done = true;
+        outcome->info = std::move(info);
+      }
+      QMetaObject::invokeMethod(
+          this, [this, generation]() { OnQualityDone(generation); },
+          Qt::QueuedConnection);
+    });
+  } catch (...) {
+    OnlineQualityCatalog info;
+    info.fetched = true;
+    info.error = QStringLiteral("无法创建档位线程");
+    {
+      std::lock_guard<std::mutex> lock(outcome->mutex);
+      outcome->done = true;
+      outcome->info = info;
+    }
+    QTimer::singleShot(0, this, [this, generation]() { OnQualityDone(generation); });
+  }
+}
+
+void OnlineSession::JoinQualityWorker() {
+  if (quality_thread_.joinable()) {
+    quality_thread_.join();
+  }
+}
+
+void OnlineSession::OnQualityDone(std::uint64_t generation) {
+  JoinQualityWorker();
+  if (generation != generation_ || !active_.load() || closing_.load()) {
+    return;
+  }
+  const auto outcome = quality_outcome_;
+  if (!outcome) {
+    return;
+  }
+  OnlineQualityCatalog info;
+  {
+    std::lock_guard<std::mutex> lock(outcome->mutex);
+    if (!outcome->done) {
+      return;
+    }
+    info = outcome->info;
+  }
+  quality_outcome_.reset();
+  EmitQuality(info);
+}
+
 OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
     const OnlineRequest& request, QString* error) {
   if (cache_ == nullptr || error == nullptr) {
@@ -345,6 +493,57 @@ void OnlineSession::EmitCacheHitReady() {
   info.playurl.format = QStringLiteral("mp4");
   info.playurl.timelength_ms = info.duration_ms;
   ready_callback_(info);
+
+  // T8.9：缓存命中不联网；档位来自 meta（qn/codecid；meta 未记录 fps/分辨率时
+  // 菜单只显示档位名，不伪造）。
+  if (!quality_emitted_ && !quality_started_) {
+    quality_started_ = true;
+    EmitQuality(CacheQualityFromEntry());
+  }
+}
+
+OnlineQualityCatalog OnlineSession::CacheQualityFromEntry() const {
+  OnlineQualityCatalog info;
+  info.fetched = true;
+  info.ok = cache_entry_.key.qn > 0;
+  info.cache_hit = true;
+  lapian::online::DashCatalog& catalog = info.catalog;
+  catalog.duration_ms = cache_entry_.duration_ms;
+  catalog.claimed_quality = cache_entry_.key.qn;
+  if (cache_entry_.key.qn > 0) {
+    lapian::online::DashStream stream;
+    stream.qn = cache_entry_.key.qn;
+    stream.codecid = cache_entry_.key.codecid;
+    stream.width = cache_entry_.width;
+    stream.height = cache_entry_.height;
+    stream.fps = cache_entry_.fps;
+    // size 未知：缓存数据总字节不是单流字节（DASH 时更不成立），不填。
+    catalog.videos.append(stream);
+    lapian::online::QualityTier tier;
+    tier.qn = stream.qn;
+    tier.width = stream.width;
+    tier.height = stream.height;
+    tier.fps = stream.fps;
+    tier.bandwidth = 0;
+    tier.streams.append(stream);
+    catalog.tiers.append(tier);
+  }
+  return info;
+}
+
+void OnlineSession::EmitQuality(const OnlineQualityCatalog& info) {
+  if (quality_emitted_) {
+    return;
+  }
+  quality_emitted_ = true;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    quality_ = info;
+  }
+  quality_requests_ += info.http_requests;
+  if (quality_callback_) {
+    quality_callback_(info);
+  }
 }
 
 bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
@@ -372,6 +571,11 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   total_ = 0;
   qn_ = 0;
   codecid_ = 0;
+  quality_started_ = false;
+  quality_emitted_ = false;
+  quality_requests_ = 0;
+  quality_outcome_.reset();
+  quality_cancel_.reset();
   ++generation_;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -379,6 +583,7 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
     progress_ = OnlineProgress{};
     part_path_.clear();
     last_error_.clear();
+    quality_ = OnlineQualityCatalog{};
   }
   cache_hit_ = false;
   cache_mp4_path_.clear();
@@ -416,6 +621,7 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
 }
 
 void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
+  const ScopedSlowLog slow_log("playurl_done");
   JoinPlayUrlWorker();
   if (generation != generation_ || !active_.load()) {
     return;
@@ -460,10 +666,13 @@ void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
     ready_threshold_ = std::min<qint64>(ready_threshold_, total_);
   }
 
-  source_ = std::make_shared<lapian::online::GrowingSource>(total_);
-  if (!source_->IsValid()) {
-    Fail(source_->InvalidReason());
-    return;
+  {
+    const ScopedSlowLog source_log("source_create");
+    source_ = std::make_shared<lapian::online::GrowingSource>(total_);
+    if (!source_->IsValid()) {
+      Fail(source_->InvalidReason());
+      return;
+    }
   }
 
   if (injected_transport_) {
@@ -505,10 +714,13 @@ void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
   auto job = std::make_unique<lapian::online::DownloadJob>(
       cache_, key, source_, transport_.get(), plan, refresh, options);
   QString start_error;
-  if (!job->Start(&start_error)) {
-    Fail(start_error.isEmpty() ? QStringLiteral("无法开始下载") : start_error);
-    job.reset();
-    return;
+  {
+    const ScopedSlowLog job_log("job_start");
+    if (!job->Start(&start_error)) {
+      Fail(start_error.isEmpty() ? QStringLiteral("无法开始下载") : start_error);
+      job.reset();
+      return;
+    }
   }
   job_ = std::move(job);
   if (job_->state() == lapian::online::DownloadState::kCompleted) {
@@ -526,6 +738,7 @@ void OnlineSession::OnPlayUrlDone(std::uint64_t generation) {
 }
 
 void OnlineSession::Poll() {
+  const ScopedSlowLog slow_log("poll");
   if (!active_.load() || closing_.load() || !job_ || !source_) {
     return;
   }
@@ -584,6 +797,11 @@ void OnlineSession::Poll() {
       info.playurl.quality = qn_;
       info.playurl.codecid = codecid_;
       ready_callback_(info);
+    }
+    // T8.9：首帧回调之后再取档位目录，避免把 fnval=4048 的 JSON 拉进 OP1
+    // 的关键路径；失败也不影响播放。
+    if (quality_enabled_.load() && !quality_started_) {
+      StartQualityWorker(generation_);
     }
   }
 
@@ -658,6 +876,12 @@ void OnlineSession::Close() {
   JoinPlayUrlWorker();
   playurl_outcome_.reset();
   playurl_cancel_.reset();
+  if (quality_cancel_) {
+    quality_cancel_->Cancel();
+  }
+  JoinQualityWorker();
+  quality_outcome_.reset();
+  quality_cancel_.reset();
   CancelJobAndSource();
   if (job_) {
     job_->Wait(1000);

@@ -88,6 +88,8 @@ add_library(lapian_online STATIC
   online/IHttpClient.h
   online/PlayUrl.cpp
   online/PlayUrl.h
+  online/QualityMenu.cpp
+  online/QualityMenu.h
   online/QrCode.cpp
   online/QrCode.h
   online/QrLogin.cpp
@@ -230,6 +232,8 @@ qt_add_executable(lapian WIN32
   app/OnlineHttpSelfCheckRunner.h
   app/OnlineQrTestRunner.cpp
   app/OnlineQrTestRunner.h
+  app/OnlineQualityTestRunner.cpp
+  app/OnlineQualityTestRunner.h
   app/OnlineResolveDialog.cpp
   app/OnlineResolveDialog.h
   app/OnlineResolveTestRunner.cpp
