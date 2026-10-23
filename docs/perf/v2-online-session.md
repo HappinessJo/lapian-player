@@ -234,6 +234,29 @@ build\release\bin\lapian.exe --online-buffer-test --buffer-media build\test-medi
 
 冷缓存 20 次：每次先 `Remove-Item -Recurse -Force build\t8.6-online-cache`，再跑完整 E2E，解析 `online_m1_first_frame ms=`。
 
+### 环境校正（2026-10-23 后续）
+
+本会话的 `E:\拉片软件开发` 工作区带 `Mandatory Label\Low Mandatory Level`。从 `dist\lapian.exe` 直接启动时进程为 **Low integrity（RID 4096）**，不能写 Medium 的 `%APPDATA%`/`%LOCALAPPDATA%`；因此：
+
+- 上面的 3 条 E2E 使用 `build/t8.6-online-cache`，验证了会话/UI/下载/seek，但**没有验证默认 AppData 缓存根**；
+- 凭据保存另有一个真实代码 bug（父目录不存在时 `mkpath(".")` 失败，见 `602e5aa`），已修并有单测。
+
+把完整 `dist` 复制到 `%LOCALAPPDATA%\Programs\lapian-t86`（工作区外，Medium）后复测：
+
+| 项 | Medium 副本 + 默认缓存根 |
+|---|---|
+| 完整 `--online-m1-test` OB-1 | **checks=27 failures=0 verdict=pass** |
+| 首帧 | 736ms |
+| P7 p95 | 24ms |
+| 已缓存 seek p95 | 104ms |
+| UI 最大间隔 | 142ms（<200ms） |
+| 关窗 | 376ms |
+| 默认缓存写入 | 生成 `...\拉片软件\cache\BV1BMnv6jE5S\429.../64-7\data.part` |
+| 本地 P1/P2 p95 | 294.8 / 354.1ms，20/20 |
+| 本地 P7 2s p95 | 66.32ms，20/20 |
+
+结论：默认缓存路径与完整 UI E2E 在 Medium 副本上通过；Low 工作区数字仍只代表“工作区缓存”场景，不能替代正常用户 AppData 路径。两者性能差值（UI gap 60→142ms、首帧 604→736ms）属于环境/启动差异，均仍在验收线内。**登录 SESSDATA 的真实 GUI 保存未在 Medium 副本上重新粘贴验证**；目前是代码修复 + 嵌套目录单测 + 目录可写验证。
+
 ---
 
 ## 10. 结论
