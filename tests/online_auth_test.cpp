@@ -162,6 +162,21 @@ void TestCredentialStore() {
   }
 
   {
+    // T8.6 热修回归：默认路径的父目录 %APPDATA%\拉片软件 首次不存在时，
+    // 必须由 Save 递归创建；旧实现用 QDir(parent).mkpath(".") 会失败。
+    const QString nested_path =
+        root + QStringLiteral("/nested/deep/credentials.dat");
+    CredentialStore nested(nested_path);
+    QString nested_error;
+    Check(nested.Save(sentinel, &nested_error),
+          "非存在父目录首次保存自动创建");
+    Check(QFileInfo::exists(nested_path),
+          "嵌套凭据文件已写入");
+    Check(nested.Load().sessdata == sentinel,
+          "嵌套凭据可读回");
+  }
+
+  {
     // 损坏：随机文本。
     const QString corrupt_path = root + QStringLiteral("/corrupt.dat");
     QFile file(corrupt_path);

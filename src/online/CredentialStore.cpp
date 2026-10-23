@@ -214,10 +214,13 @@ bool CredentialStore::Save(const QString& sessdata, QString* error) {
   }
 
   const QFileInfo info(path_);
-  QDir parent(info.absolutePath());
-  if (!parent.exists() && !parent.mkpath(QStringLiteral("."))) {
+  const QString parent_path = info.absolutePath();
+  // T8.6 热修：QDir(parent).mkpath(".") 在 parent 尚不存在时不会创建
+  // parent 本身（Windows 上会尝试创建 parent\. 而失败）。必须对绝对路径
+  // 调 mkpath，才能让首次登录自动创建 %APPDATA%\拉片软件。
+  if (!QDir().mkpath(parent_path)) {
     if (error != nullptr) {
-      *error = QStringLiteral("无法创建凭据目录：%1").arg(parent.absolutePath());
+      *error = QStringLiteral("无法创建凭据目录：%1").arg(parent_path);
     }
     return false;
   }
