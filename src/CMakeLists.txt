@@ -65,6 +65,8 @@ target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 # 自检通过后 T8.16 再决定打包栈（libcurl 只在构建时可选）。
 # T8.3 补 CacheStore：缓存根/meta.json/.part→.mp4/配额 LRU/续传/清空；纯本地存储。
 # T8.4 补可增长读层：GrowingSource + 每读者 Cursor/AVIO；只读 `.part`，不发起 HTTP。
+# T8.5 补 durl 取流：PlayUrl（解析）、DownloadTransport（CDN Range，无 Cookie）、
+# DownloadJob（续传/备份/重试/刷新/完成）；写盘后 Publish，关闭写句柄后 MarkComplete。
 add_library(lapian_online STATIC
   online/BiliAuth.cpp
   online/BiliAuth.h
@@ -76,12 +78,19 @@ add_library(lapian_online STATIC
   online/CacheStore.h
   online/CredentialStore.cpp
   online/CredentialStore.h
+  online/DownloadJob.cpp
+  online/DownloadJob.h
+  online/DownloadTransport.h
   online/GrowingSource.cpp
   online/GrowingSource.h
   online/IHttpClient.h
+  online/PlayUrl.cpp
+  online/PlayUrl.h
   online/Sessdata.h
+  online/WinHttpApi.h
   online/WinHttpClient.cpp
-  online/WinHttpClient.h)
+  online/WinHttpClient.h
+  online/WinHttpDownloadTransport.cpp)
 lapian_apply_common_options(lapian_online)
 target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_online PUBLIC Qt6::Core PRIVATE crypt32 lapian::ffmpeg)
@@ -183,6 +192,8 @@ qt_add_executable(lapian WIN32
   app/OnlineAuthTestRunner.h
   app/OnlineCacheTestRunner.cpp
   app/OnlineCacheTestRunner.h
+  app/OnlineFetchTestRunner.cpp
+  app/OnlineFetchTestRunner.h
   app/OnlineGrowingTestRunner.cpp
   app/OnlineGrowingTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp

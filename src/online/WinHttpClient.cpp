@@ -1,6 +1,7 @@
 #include "online/WinHttpClient.h"
 
 #include "online/Sessdata.h"
+#include "online/WinHttpApi.h"
 
 #include <QElapsedTimer>
 #include <QString>
@@ -50,81 +51,6 @@ QString MapWinHttpError(DWORD error) {
       return QStringLiteral("网络请求失败（WinHTTP 错误 %1）").arg(error);
   }
 }
-
-// 动态加载 WinHTTP：发布包不出现 WINHTTP.DLL 导入（check-imports 要求），
-// 且本地模式启动不会加载网络栈（O9）。只在首次在线解析时 LoadLibrary。
-class WinHttpApi {
- public:
-  static WinHttpApi& Instance() {
-    static WinHttpApi api;
-    return api;
-  }
-
-  bool Load(QString* error) {
-    std::call_once(once_, [this]() { LoadOnce(); });
-    if (error != nullptr) {
-      *error = load_error_;
-    }
-    return module_ != nullptr;
-  }
-
-  bool loaded() const { return module_ != nullptr; }
-
-  decltype(&::WinHttpOpen) open = nullptr;
-  decltype(&::WinHttpCloseHandle) close = nullptr;
-  decltype(&::WinHttpConnect) connect = nullptr;
-  decltype(&::WinHttpOpenRequest) open_request = nullptr;
-  decltype(&::WinHttpSetStatusCallback) set_status_callback = nullptr;
-  decltype(&::WinHttpSetTimeouts) set_timeouts = nullptr;
-  decltype(&::WinHttpAddRequestHeaders) add_request_headers = nullptr;
-  decltype(&::WinHttpSendRequest) send_request = nullptr;
-  decltype(&::WinHttpReceiveResponse) receive_response = nullptr;
-  decltype(&::WinHttpReadData) read_data = nullptr;
-  decltype(&::WinHttpQueryHeaders) query_headers = nullptr;
-  decltype(&::WinHttpCrackUrl) crack_url = nullptr;
-  decltype(&::WinHttpSetOption) set_option = nullptr;
-
- private:
-  WinHttpApi() = default;
-
-  template <typename T>
-  bool Resolve(const char* name, T* target) {
-    *target = reinterpret_cast<T>(GetProcAddress(module_, name));
-    return *target != nullptr;
-  }
-
-  void LoadOnce() {
-    // 只从 System32 加载，避免工作目录里的同名 DLL 劫持。
-    module_ = LoadLibraryExW(L"winhttp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (module_ == nullptr) {
-      load_error_ = QStringLiteral("无法加载 winhttp.dll（错误 %1）").arg(GetLastError());
-      return;
-    }
-    const bool ok =
-        Resolve("WinHttpOpen", &open) &&
-        Resolve("WinHttpCloseHandle", &close) &&
-        Resolve("WinHttpConnect", &connect) &&
-        Resolve("WinHttpOpenRequest", &open_request) &&
-        Resolve("WinHttpSetStatusCallback", &set_status_callback) &&
-        Resolve("WinHttpSetTimeouts", &set_timeouts) &&
-        Resolve("WinHttpAddRequestHeaders", &add_request_headers) &&
-        Resolve("WinHttpSendRequest", &send_request) &&
-        Resolve("WinHttpReceiveResponse", &receive_response) &&
-        Resolve("WinHttpReadData", &read_data) &&
-        Resolve("WinHttpQueryHeaders", &query_headers) &&
-        Resolve("WinHttpCrackUrl", &crack_url) &&
-        Resolve("WinHttpSetOption", &set_option);
-    if (!ok) {
-      load_error_ = QStringLiteral("winhttp.dll 缺少必要导出");
-      FreeLibrary(module_);
-      module_ = nullptr;
-    }
-  }
-
-  std::once_flag once_;
-  HMODULE module_ = nullptr;
-  QString load_error_;
-};
 
 struct WinHttpState {
   std::mutex mutex;
@@ -177,7 +103,7 @@ struct WinHttpState {
   }
 };
 
-void CloseHandleIfPresent(WinHttpApi& api, HINTERNET* handle) {
+void CloseHandleIfPresent(detail::WinHttpApi& api, HINTERNET* handle) {
   if (handle != nullptr && *handle != nullptr) {
     api.close(*handle);
     *handle = nullptr;
@@ -190,7 +116,7 @@ void FailWithLastError(WinHttpState* state) {
 }
 
 void StartRead(WinHttpState* state, HINTERNET request) {
-  WinHttpApi& api = WinHttpApi::Instance();
+  detail::WinHttpApi& api = detail::WinHttpApiInstance();
   state->reading = true;
   if (!api.read_data(request, state->read_buffer.data(),
                      static_cast<DWORD>(state->read_buffer.size()), nullptr)) {
@@ -240,7 +166,7 @@ void HandleCallback(HINTERNET handle, DWORD_PTR context, DWORD code, void* info,
     return;
   }
 
-  WinHttpApi& api = WinHttpApi::Instance();
+  detail::WinHttpApi& api = detail::WinHttpApiInstance();
   std::lock_guard<std::recursive_mutex> api_lock(state->api_mutex);
   if (state->closing) {
     return;
@@ -319,7 +245,7 @@ ParsedUrl ParseUrl(const QString& url) {
   components.dwUrlPathLength = static_cast<DWORD>(-1);
   components.dwExtraInfoLength = static_cast<DWORD>(-1);
 
-  WinHttpApi& api = WinHttpApi::Instance();
+  detail::WinHttpApi& api = detail::WinHttpApiInstance();
   if (!api.crack_url(wide.c_str(), 0, 0, &components)) {
     parsed.error = QStringLiteral("请求地址格式无效");
     return parsed;
@@ -378,7 +304,7 @@ HttpResponse WinHttpClient::Get(const HttpRequest& request,
     return response;
   }
 
-  WinHttpApi& api = WinHttpApi::Instance();
+  detail::WinHttpApi& api = detail::WinHttpApiInstance();
   QString load_error;
   if (!api.Load(&load_error)) {
     response.error = QStringLiteral("系统网络组件不可用：") + load_error;
@@ -619,7 +545,7 @@ HttpResponse WinHttpClient::Get(const HttpRequest& request,
 }
 
 bool WinHttpClient::LibraryLoadedForTest() {
-  return WinHttpApi::Instance().loaded();
+  return detail::WinHttpApiInstance().loaded();
 }
 
 QString WinHttpClient::ValidateUrlForTest(const QString& url) {

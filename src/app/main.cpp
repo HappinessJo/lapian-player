@@ -43,6 +43,7 @@
 #include "app/MemoryTestRunner.h"
 #include "app/OnlineAuthTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
+#include "app/OnlineFetchTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineResolveTestRunner.h"
@@ -169,6 +170,96 @@ int main(int argc, char* argv[]) {
       }
     }
     return lapian::app::RunOnlineGrowingTest(options);
+  }
+
+  // T8.5：durl 取流探针；默认离线 fake transport，`--real` 才联网。
+  if (HasArgument(argc, argv, "--online-fetch-test")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineFetchTestOptions options;
+    const QStringList fetch_args = QCoreApplication::arguments();
+    for (int i = 1; i < fetch_args.size(); ++i) {
+      const QString& arg = fetch_args[i];
+      auto take_value = [&](QString* target) {
+        if (i + 1 < fetch_args.size()) {
+          *target = fetch_args[++i];
+          return true;
+        }
+        return false;
+      };
+      if (arg == QStringLiteral("--real")) {
+        options.real = true;
+      } else if (arg == QStringLiteral("--bvid")) {
+        take_value(&options.bvid);
+      } else if (arg.startsWith(QStringLiteral("--bvid="))) {
+        options.bvid = arg.mid(static_cast<int>(std::strlen("--bvid=")));
+      } else if (arg == QStringLiteral("--cid")) {
+        take_value(&options.cid_text);
+      } else if (arg.startsWith(QStringLiteral("--cid="))) {
+        options.cid_text = arg.mid(static_cast<int>(std::strlen("--cid=")));
+      } else if (arg == QStringLiteral("--tag")) {
+        take_value(&options.tag);
+      } else if (arg.startsWith(QStringLiteral("--tag="))) {
+        options.tag = arg.mid(static_cast<int>(std::strlen("--tag=")));
+      } else if (arg == QStringLiteral("--sessdata-file")) {
+        take_value(&options.sessdata_file);
+      } else if (arg.startsWith(QStringLiteral("--sessdata-file="))) {
+        options.sessdata_file =
+            arg.mid(static_cast<int>(std::strlen("--sessdata-file=")));
+      } else if (arg == QStringLiteral("--fetch-media")) {
+        take_value(&options.media);
+      } else if (arg.startsWith(QStringLiteral("--fetch-media="))) {
+        options.media = arg.mid(static_cast<int>(std::strlen("--fetch-media=")));
+      } else if (arg == QStringLiteral("--fetch-root")) {
+        take_value(&options.root);
+      } else if (arg.startsWith(QStringLiteral("--fetch-root="))) {
+        options.root = arg.mid(static_cast<int>(std::strlen("--fetch-root=")));
+      } else if (arg == QStringLiteral("--fetch-keep")) {
+        options.keep_root = true;
+      } else if (arg == QStringLiteral("--exit-after-bytes")) {
+        QString value;
+        if (take_value(&value)) {
+          options.exit_after_bytes = value.toLongLong();
+        }
+      } else if (arg.startsWith(QStringLiteral("--exit-after-bytes="))) {
+        options.exit_after_bytes =
+            arg.mid(static_cast<int>(std::strlen("--exit-after-bytes=")))
+                .toLongLong();
+      } else if (arg == QStringLiteral("--cancel-after-first-frame")) {
+        options.cancel_after_first_frame = true;
+      } else if (arg == QStringLiteral("--qn-1080")) {
+        options.qn_1080 = true;
+      } else if (arg == QStringLiteral("--break-urls")) {
+        take_value(&options.break_urls);
+      } else if (arg.startsWith(QStringLiteral("--break-urls="))) {
+        options.break_urls =
+            arg.mid(static_cast<int>(std::strlen("--break-urls=")));
+      } else if (arg == QStringLiteral("--timeout-ms")) {
+        QString value;
+        if (take_value(&value)) {
+          options.timeout_ms = value.toInt();
+        }
+      } else if (arg.startsWith(QStringLiteral("--timeout-ms="))) {
+        options.timeout_ms =
+            arg.mid(static_cast<int>(std::strlen("--timeout-ms="))).toInt();
+      }
+    }
+    bool cid_ok = false;
+    options.cid = options.cid_text.toLongLong(&cid_ok);
+    if (!cid_ok) {
+      options.cid = 0;
+    }
+    if (options.timeout_ms < 1000) {
+      options.timeout_ms = 1000;
+    }
+    if (options.timeout_ms > 120000) {
+      options.timeout_ms = 120000;
+    }
+    return lapian::app::RunOnlineFetchTest(options);
   }
 
   // T7.1：进程启动时间取在 QApplication 之前，P1/P2 从双击（进程创建）算起。

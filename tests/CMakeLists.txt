@@ -105,6 +105,17 @@ add_test(NAME lapian_growing_source_test COMMAND lapian_growing_source_test)
 set_tests_properties(lapian_growing_source_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.5 durl 取流：playurl 解析、Range/续传、200 回退、备份/刷新、取消/暂停、
+# 总长/起点不一致、MarkComplete 与 ffprobe；fake transport，不联网。
+add_executable(lapian_online_fetch_test online_fetch_test.cpp)
+lapian_apply_common_options(lapian_online_fetch_test)
+target_link_libraries(lapian_online_fetch_test PRIVATE lapian_online lapian::ffmpeg)
+lapian_copy_ffmpeg_dlls(lapian_online_fetch_test)
+add_test(NAME lapian_online_fetch_test COMMAND lapian_online_fetch_test)
+set_tests_properties(lapian_online_fetch_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)
