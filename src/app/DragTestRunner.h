@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QRandomGenerator>
 #include <QString>
+
+#include <chrono>
 #include <vector>
 
 class MainWindow;
@@ -20,6 +22,9 @@ class DragTestRunner : public QObject {
  public:
   DragTestRunner(MainWindow* window, QString file, int samples, QString tag,
                  QObject* parent = nullptr);
+  // T8.17：只跑“快速大跳拖动”一种场景，输出 fps/最大呈现空档。
+  DragTestRunner(MainWindow* window, QString file, int samples, QString tag,
+                 bool fast_only, int fast_step, QObject* parent = nullptr);
 
   void Start();
 
@@ -30,6 +35,7 @@ class DragTestRunner : public QObject {
   void RunP9();
   void RunP6(int index, int total);
   void RunP4();
+  void RunFast();
   void RunP7();
   void RunP8();
   void Finish();
@@ -45,6 +51,8 @@ class DragTestRunner : public QObject {
   int samples_ = 20;
   int open_poll_count_ = 0;
   bool failed_ = false;
+  bool fast_only_ = false;
+  int fast_step_ = 60;
 
   // 素材规格
   qint64 last_frame_ = 0;
@@ -75,6 +83,20 @@ class DragTestRunner : public QObject {
   QElapsedTimer p8_timer_;
   qint64 p8_start_frame_ = 0;
   int p8_presents_start_ = 0;
+
+  // T8.17 快速大跳拖动
+  QElapsedTimer fast_timer_;
+  qint64 fast_start_frame_ = 0;
+  qint64 fast_target_ = 0;
+  int fast_presents_start_ = 0;
+  int fast_presents_ = 0;
+  double fast_seconds_ = 0.0;
+  double fast_fps_ = 0.0;
+  double fast_max_gap_ms_ = 0.0;
+  double fast_first_present_ms_ = 0.0;
+  bool fast_has_present_ = false;
+  std::chrono::steady_clock::time_point fast_last_present_{};
+  QMetaObject::Connection fast_present_connection_;
 
   qint64 p6_target_ = 0;
   int p6_index_ = 0;

@@ -565,6 +565,8 @@ int main(int argc, char* argv[]) {
   bool drag_test = false;
   int drag_samples = 20;
   QString drag_tag;
+  bool drag_fast = false;
+  int drag_fast_step = 60;
   bool force_software_decode = false;
   // T7.11：P7 跨 GOP 边界后退专项（目标为关键帧 → PgUp 到前一 GOP 末帧）。
   bool gop_boundary_test = false;
@@ -739,6 +741,12 @@ int main(int argc, char* argv[]) {
       memory_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--drag-test")) {
       drag_test = true;
+    } else if (arguments[i] == QStringLiteral("--drag-fast")) {
+      drag_test = true;
+      drag_fast = true;
+    } else if (arguments[i] == QStringLiteral("--drag-fast-step") &&
+               i + 1 < arguments.size()) {
+      drag_fast_step = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--drag-samples") &&
                i + 1 < arguments.size()) {
       drag_samples = arguments[++i].toInt();
@@ -1231,7 +1239,8 @@ int main(int argc, char* argv[]) {
   for (int i = 1; i < argc; ++i) {
     const QString arg = QString::fromLocal8Bit(argv[i]);
     if (arg.endsWith(QStringLiteral("-test")) ||
-        arg == QStringLiteral("--settings-expect")) {
+        arg == QStringLiteral("--settings-expect") ||
+        arg == QStringLiteral("--drag-fast")) {
       running_test_mode = true;
       break;
     }
@@ -1457,7 +1466,7 @@ int main(int argc, char* argv[]) {
       drag_tag = force_software_decode ? QStringLiteral("soft") : QStringLiteral("hard");
     }
     drag_runner = std::make_unique<lapian::app::DragTestRunner>(
-        &window, file_path, drag_samples, drag_tag);
+        &window, file_path, drag_samples, drag_tag, drag_fast, drag_fast_step);
     drag_runner->Start();
   }
 

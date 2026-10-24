@@ -55,6 +55,14 @@ DragTestRunner::DragTestRunner(MainWindow* window, QString file, int samples,
       tag_(std::move(tag)),
       samples_(samples > 0 ? samples : 20) {}
 
+DragTestRunner::DragTestRunner(MainWindow* window, QString file, int samples,
+                               QString tag, bool fast_only, int fast_step,
+                               QObject* parent)
+    : DragTestRunner(window, std::move(file), samples, std::move(tag), parent) {
+  fast_only_ = fast_only;
+  fast_step_ = fast_step != 0 ? fast_step : 60;
+}
+
 void DragTestRunner::Start() {
   QTimer::singleShot(0, this, &DragTestRunner::Begin);
 }
@@ -118,6 +126,10 @@ void DragTestRunner::OnReady() {
   }
   window_->ClearFocusForTest();
   window_->FocusVideoForTest();
+  if (fast_only_) {
+    RunFast();
+    return;
+  }
   QTimer::singleShot(80, this, &DragTestRunner::RunP9);
 }
 
@@ -189,6 +201,73 @@ void DragTestRunner::RunP6(int index, int total) {
                          [this]() { RunP6(p6_index_ + 1, p6_total_); });
     });
   });
+}
+
+void DragTestRunner::RunFast() {
+  // T8.17：快速大跳拖动。每 16ms 把目标向前推 fast_step_ 帧（默认 60 帧≈2s），
+  // 统计真正 Present 的帧率与最大呈现空档；用于量化“快拖卡住”的修复前后。
+  fast_start_frame_ =
+      fast_step_ < 0 ? std::max<qint64>(40, last_frame_ - 40)
+                     : std::min<qint64>(40, last_frame_ / 4);
+  fast_target_ = fast_start_frame_;
+  fast_presents_start_ = window_->PresentedFrameCountForTest();
+  fast_max_gap_ms_ = 0.0;
+  fast_first_present_ms_ = 0.0;
+  fast_has_present_ = false;
+  fast_last_present_ = std::chrono::steady_clock::now();
+  fast_present_connection_ = connect(
+      window_, &MainWindow::framePresented, this, [this]() {
+        const auto now = std::chrono::steady_clock::now();
+        if (!fast_has_present_) {
+          fast_has_present_ = true;
+          fast_first_present_ms_ =
+              std::chrono::duration<double, std::milli>(now - fast_last_present_)
+                  .count();
+        } else {
+          const double gap_ms =
+              std::chrono::duration<double, std::milli>(now - fast_last_present_)
+                  .count();
+          if (gap_ms > fast_max_gap_ms_) {
+            fast_max_gap_ms_ = gap_ms;
+          }
+        }
+        fast_last_present_ = now;
+      });
+  window_->ScrubStartForTest(fast_start_frame_);
+  fast_timer_.start();
+  auto tick = std::make_shared<std::function<void()>>();
+  *tick = [this, tick]() {
+    if (failed_) {
+      return;
+    }
+    if (fast_timer_.elapsed() >= 2000) {
+      fast_seconds_ = static_cast<double>(fast_timer_.elapsed()) / 1000.0;
+      fast_presents_ =
+          window_->PresentedFrameCountForTest() - fast_presents_start_;
+      fast_fps_ = fast_seconds_ > 0.0 ? fast_presents_ / fast_seconds_ : 0.0;
+      if (fast_present_connection_) {
+        disconnect(fast_present_connection_);
+        fast_present_connection_ = {};
+      }
+      window_->ScrubFinishForTest(std::min<qint64>(last_frame_, fast_target_));
+      std::fprintf(stderr,
+                   "T8.17 drag_fast tag=%s file=%s frames=%lld "
+                   "step_frames=%d seconds=%.2f presents=%d fps=%.1f "
+                   "first_present_ms=%.1f max_gap_ms=%.1f\n",
+                   tag_.toUtf8().constData(), file_.toUtf8().constData(),
+                   static_cast<long long>(last_frame_), fast_step_, fast_seconds_,
+                   fast_presents_, fast_fps_, fast_first_present_ms_,
+                   fast_max_gap_ms_);
+      std::fflush(stderr);
+      QCoreApplication::exit(0);
+      return;
+    }
+    fast_target_ = std::clamp<qint64>(fast_target_ + fast_step_, 0,
+                                      last_frame_ - 1);
+    window_->ScrubTargetForTest(fast_target_);
+    QTimer::singleShot(16, this, [tick]() { (*tick)(); });
+  };
+  QTimer::singleShot(16, this, [tick]() { (*tick)(); });
 }
 
 void DragTestRunner::RunP4() {
