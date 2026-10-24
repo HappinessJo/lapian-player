@@ -1,8 +1,8 @@
 # 在线播放修复任务：前后一致 + 丝滑流畅 + 清晰度切换
 
-- **版本**：v1.1（2026-10-25；加入独立“丝滑流畅”验收）
-- **状态**：待执行
-- **代码基线**：`1acbe99`（DP-4 收口）；本任务文档：见 `git log -1 -- docs/tasks-online-parity-fix.md`
+- **版本**：v1.2（2026-10-25；独立验收完成，写入判定与两组数字）
+- **状态**：**partial（部分通过）**——A 清晰度切换 **pass**；B 前后一致 **pass**；C 丝滑流畅**稳态 pass、首次拖动冷启动未达门槛**（详见 §8）。不写“完成/丝滑通过”。
+- **代码基线**：`4d89683`；实现提交 `e1a89c6`（清晰度切换）+ `4d89683`（在线拖动）；验收提交见 `git log -1 -- docs/tasks-online-parity-fix.md`
 - **性质**：在线播放体验/缓存修复；**不改本地拖动预览、M1/M2/P4/P6/P7、OB 样本、`lapian-cache-1` schema、默认 AVC≤1080p**
 - **一句话**：在线拖动要像本地一样及时响应、前后一致；拉流后切清晰度不能再报“已完整缓存但未走缓存命中”。
 
@@ -220,3 +220,127 @@ Agent 1 和 Agent 2 都会碰 `MainWindow`/在线测试代码，必须串行。
 - `AGENTS.md` §11 前后一致规则、§9 风险补充
 - 两个代码提交 + 一个文档/验收提交
 - 不打印/提交 SESSDATA、Cookie、签名 URL
+
+---
+
+## 8. 独立验收结果（Agent 3，2026-10-25）
+
+### 8.1 结论
+
+| 层 | 判定 | 依据 |
+|---|---|---|
+| A 清晰度切换 | **pass** | 默认 1080P（qn=80）→ 1080P+（qn=112）→ 1080P30（qn=80）真实链路 `checks=42 failures=0`；无“已完整缓存…请重新打开”；切回 `cache_hit=1`、dash/playurl=0 |
+| B 前后一致 | **pass** | 正向 57 presented / 反向 57 presented（差 **0.0%**）；两边 landing 都精确（75/PTS 2,500,000；15/PTS 500,000）；不是“两边一样差”（56.21/56.72fps，本地基线 58.53/57.00） |
+| C 丝滑流畅 | **partial** | 稳态已缓存区：first 17/31ms、空档 33/33ms、active 56.21/56.72fps、UI gap 32ms、连续无新画面=1；但**首次拖动（预览解码器冷启动）first 224ms、连续 6 个目标无新画面**，超过 §3.C 的 100ms/“不允许连续 2 个”门槛 |
+| 总判定 | **partial** | 按 §8 判定规则，C 未全部达到，不能写“完成”或“丝滑通过” |
+
+### 8.2 环境与构建
+
+- HEAD `4d89683`；实现提交 `e1a89c6`、`4d89683`；工作区 clean；任务文档 v1.1 为 `2fee5e6` 后代。
+- `scripts\build-release.ps1 -Clean`：**222.4s**；`ctest` **37/37**（脚本内 62.14s，手动 61.21s）。
+- `dist` **25 文件 / 36,359,496B / 34.68MB**；`lapian.exe` 3,149,824B、SHA256 `7A80C9A9B3C865185CEBA1A489FB1AE56635BDDA065E4699C829B0461B7A3761`。
+- Medium 副本 `%LOCALAPPDATA%\Programs\拉片软件` 用本次 `dist\*` 覆盖（33 文件），`lapian.exe` hash 与 dist 一致。
+
+### 8.3 A 层（Medium 副本，真实网络/默认 DPAPI）
+
+命令：
+
+```powershell
+$exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
+& $exe --online-quality-switch-test --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --tag verify-t8.17 --timeout-ms 60000 --quality-switch-high 112 --quality-switch-back 80 `
+  --quality-switch-wait-ms 120000 --online-cache-root build\verify-t8.17\cache `
+  --online-pictures build\verify-t8.17\pics --online-records-root build\verify-t8.17\records `
+  --settings-path build\verify-t8.17\settings
+```
+
+| 项 | 实测 |
+|---|---|
+| 初始 | qn=80 / codecid=7 / fps=30.000；ready=1；dash_requests=1、playurl=0 |
+| 80→112 | landed=1；qn=**112** / codecid=**7** / fps=30.000；PTS **1,000,000→1,000,000**；第 30 帧；标记 1→1；记录/截图保留；音频复用（complete=1），只下载 112 视频 47,168,494B |
+| 112→80 | landed=1；qn=**80** / codecid=**7**；`cache_hit=1`、**dash_requests=0、playurl_requests=0**；PTS 1,000,000、第 30 帧；标记/记录/截图保留；三条缓存 complete |
+| 误导错误 | `no_misleading_complete_error=1`（切档 error 均为空） |
+
+- “视频完整/音频缺失”分支：单测 `lapian_online_fault_test`（T8.17）已验证“复用视频、只补音频、无错误回调/无用户级完整缓存错误”；用户提示串在 `OnlineSession.cpp` 的“视频已完整缓存（…），正在补下音频（audio-…）”。**本轮真实窗口没有构造该分支**，不写“真实提示已目视通过”。
+- 音频：音频轨重建/打开成功、缓存 complete；**可听性未由无人值守探针验证**。
+
+### 8.4 B/C 层（Medium 副本，新缓存 + 1MiB/s 限速）
+
+命令：
+
+```powershell
+& $exe --online-drag-parity-test --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --tag verify-parity --timeout-ms 90000 --drag-seconds 1 --drag-samples 60 `
+  --m1-throttle-bps 1048576 --online-cache-root build\verify-parity\cache `
+  --online-pictures build\verify-parity\pics --online-records-root build\verify-parity\records `
+  --settings-path build\verify-parity\settings
+```
+
+结果：`checks=45 failures=0`。两组数字（另附冷启动诊断）：
+
+| 场景 | updates | presented | first_ms | max_resp | max_gap | active_fps | lag_p95 | stale | landing | ui_gap | max_missing | flicker |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 冷启动反向 75→65（诊断，不计门槛） | 10 | 4 | **224** | 224 | 224 | 13.20 | 0 | 1 | 65 / 2,166,688 | 32 | **6** | 0 |
+| **正向 15→75** | 60 | **57** | **17** | 67 | **33** | **56.21** | 0 | 2 | 75 / 2,500,000 | 32 | 1 | 0 |
+| **反向 75→15** | 60 | **57** | **31** | 67 | **33** | **56.72** | 0 | 1 | 15 / 500,000 | 31 | 1 | 0 |
+| 最大缩放正向 40→49 | 10 | 9 | 63 | 75 | 63 | 16.54 | 0 | 1 | 49 / 1,633,313 | 30 | 1 | 0 |
+| 最大缩放反向 50→41 | 10 | 9 | 63 | 86 | 76 | 15.90 | 0 | 1 | 41 / 1,366,688 | 31 | 1 | 0 |
+| 远跳正向 15→3000 | 1 | 2 | **31（粗帧）** | 31 | 31 | — | 0 | 0 | 3000 / 100,000,000 | 31 | 0 | 0 |
+| 远跳反向 3000→15 | 1 | 2 | **17（粗帧）** | 17 | 17 | — | 0 | 0 | 15 / 500,000 | 30 | 0 | 0 |
+| 未缓存边界 | 1 | 1 | 0（提示） | — | — | — | — | 0 | 45 / 1,500,000 | 31 | — | — |
+
+- 前后成对：presented **57 vs 57（0.0%）**；一边不精确即不通过——两边 `landing_frame_ok=1`、`landing_pts_ok=1`。
+- 缩放：最坏每一步 max_response **75/86ms ≤100**、max_gap **63/76ms ≤150**、无连续两步无画面、无闪烁。
+- 远跳：粗帧 31/17ms 先出，精确帧 **1695/142ms** 后到；`coarse_presented=1`、精确后无粗帧。
+- 未缓存：`缓冲中（预览）：目标帧 3312` 0ms、waiting、拖回 +5 帧恢复、松手 45/1,500,000 精确。
+- 缓存峰值 **63,700,992B / 72 帧 = 60.75MiB**（≤64MiB）；UI gap 32ms（≤50）。
+
+### 8.5 本地基线（`--local-drag-parity-test`，1080p 同目标序列）
+
+| 场景 | updates | presented | first_ms | max_resp | max_gap | active_fps | max_missing |
+|---|---|---|---|---|---|---|---|
+| 正向 15→75 | 60 | 59 | 17 | 26 | 21 | **58.53** | 1 |
+| 反向 75→15 | 60 | 57 | 45 | 85 | 45 | **57.00** | 2 |
+
+C 的 70% 门槛：正向 ≥40.97（在线 56.21，**96.0%**）、反向 ≥39.90（在线 56.72，**99.5%**）。
+
+### 8.6 C 为何判 partial
+
+- §3.C 写的是“已缓存区 first_response p95 ≤100ms、max_gap ≤50ms、不允许连续 2 个目标更新没有新画面”。
+- 冷启动反向 75→65 的目标帧**已经下载到本地**（同一已缓存区），但预览解码器从关键帧解 76 帧，实测 **first 224ms、max_missing 6**，同时超过 100ms 与“连续 2 个”两条门槛；T8.6.1b 的首次正向也记录 152ms（其自身门槛是 200ms，不等于 C 的 100ms）。
+- 之后的正向/反向（同一段缓存）为 17/31ms、33ms 空档、56fps，说明“方向不对称/冻住”已修好；但按任务口径不能把冷启动排除后写“完成”。
+
+### 8.7 回归
+
+| 项 | 结果 |
+|---|---|
+| `ctest`（手动，TMP/TEMP=`E:\拉片软件开发\.deps\tmp`，Qt bin 在 PATH） | **37/37**，61.21s（clean 构建脚本内 62.14s） |
+| `--key-test`（Medium） | **77 项 ok=1 / 0 项 ok=0** |
+| 默认路径（Medium，`--online-offline-test --offline-default-paths --offline-keep-cache`） | 默认缓存命中（80-7、`cache_hit=1`、0 playurl/HTTP、首帧 95ms）、默认记录可读（`lapian-online-1`）、默认截图写入；**31/3**（3 项为默认目录 T8.7 遗留 fixture 与探针期望字段不一致，不写 31/0） |
+| T8.6.1b `--online-drag-preview-test`（Medium，增长会话） | **35/0 pass**；正向 48 presented/56.60 active/首帧 152ms/UI 62ms，反向 27/30.10/103ms，landing 75 与 45 精确，未缓存提示/恢复/关窗 37ms |
+| `--drag-test --drag-samples 20`（1080p） | P4 65.6、P6 p95 **15.9**、P7 0.0/12.6、P8 12.8、P9 33.5；Medium：65.6/**17.7**/12.8/12.4/30.4 |
+| `--drag-strategy-test` | 3 次中 2 次 `all_pass=1`；1 次 fast_forward `max_gap=51.5ms`（阈值 50，超 1.5ms）导致 6/7，复跑通过 |
+| `--drag-far-test` | 粗帧 13.9/19.8ms → 精确 21.0/29.8ms；release p95 13.3ms；`readbacks=0` |
+| P6 松手 | 1080p p95 **15.9/17.7ms** ≤150ms，不退化 |
+| 在线预览缓存 | 峰值 **60.75MiB**（≤256MiB）；缩略图 432,000B（≤64MiB）；在线预览软解、readbacks=0 |
+| 4K（只记录） | `proxy-V4`：P4 63.5、P6 p95 **144.6**（4K 阈值 300）、P7 2.0/4.7、P9 229.7、预览缓存峰值 248,832,000B（237.3MiB）；**不写 4K 通过** |
+| 黑帧/崩溃/设备丢失/表面池 | 本轮所有探针 exit 0、无 error/device-lost/surface 事件；黑帧无埋点，**不写“无黑帧已证明”** |
+
+### 8.8 残余与证据缺陷
+
+1. **首次拖动冷启动**：224ms / 连续 6 个目标无新画面（5s GOP，预览缓存为空）；T8.6.1b 首次正向 152ms。这是 C 判 partial 的唯一原因。
+2. **探针字段缺陷**（`OnlineDragPreviewTestRunner`）：
+   - `response_p95_ms` 恒为 0：`result.responses` 从未 append，`Percentile(responses,0.95)` 取空向量；本报告用 `max_response_ms=67ms`（p95 的保守上界）替代，不把它当 0ms 通过。
+   - `landing_frame` 打印的是 `landing_pts`（`PrintParity` 第 21/22 个 arg 都是 pts）；精确落点以 `landing_frame_ok/landing_pts_ok`、`exact_frame/exact_pts` 与 seek 日志为准。
+3. **新缓存根首次写盘**：本轮 A/B/C/T8.6.1b 四次新根运行都出现一次 `cdn_done bytes=0 error=写入缓存文件失败`，随即重试成功（视频/音频各一次）；不影响 A/B/C 判定，但属于首次打开 UX 瑕疵，`DownloadJob`/`CacheStore`/`WinHttpDownloadTransport` 本轮未改，建议另立任务。
+4. **未缓存区**只测了“拖入未缓存/拖回恢复/松手精确”，未做长时间等待下载追上的稳定性。
+5. **4K/HEVC、1080P60、大会员高码率**只记录，不写通过。
+6. **真实窗口的“补音频”提示**未目视；只有单测+代码路径。
+7. **默认路径探针 31/3**：Medium 默认 AppData 的缓存命中、记录读取、截图写入都正常，但探针的 `mp4_size_matches`/`record_mark_fields`/`snapshot_index_fields` 与 T8.7 遗留默认记录/截图索引不一致；不写“默认路径全过”。
+
+### 8.9 证据文件
+
+- `docs/perf/online-quality-switch.md` §10（独立复验）
+- `docs/perf/online-drag-parity.md` §12（独立复验 + 探针缺陷）
+- `docs/handoff-2026-10-25-online-parity.md`
+- 原始日志在 `build/verify-*.log`（`build/` 不入库）

@@ -1,7 +1,7 @@
 # T8.17 证据：在线清晰度切换修复（2026-10-25）
 
 - **任务**：[tasks-online-parity-fix.md](../tasks-online-parity-fix.md) §3.A（本次只做“清晰度切换”，不做在线拖动）。
-- **状态**：**完成（独立提交）**。默认 1080P（qn=80）→ 大会员 1080P+ 高码率（qn=112）→ 切回 1080P30（qn=80）真实链路通过；不再出现“DASH 条目已完整缓存，但本次未走缓存命中路径”。
+- **状态**：**A 层完成（独立提交）**；任务总判 **partial**（C 首次拖动冷启动未达门槛，见任务文档 §8）。默认 1080P（qn=80）→ 大会员 1080P+ 高码率（qn=112）→ 切回 1080P30（qn=80）真实链路通过；不再出现“DASH 条目已完整缓存，但本次未走缓存命中路径”。
 - **基线**：`f696efc`；工作区干净。**未改** M1/M2/P4/P6/P7、OB 样本、`lapian-cache-1` schema、默认 AVC≤1080p、在线/本地拖动预览。
 - **一句话**：切档前按**解析出的实际 video/audio key** 精确检查缓存；两条都完整 → cache-hit；只缺音频/只缺视频 → 复用完整一路、只补缺失一路；`DownloadJob::Start` 的 `kCompleted` 只作内部防御；请求 codecid 不同时必须下载该 codec，不能静默复用旧 codec。
 
@@ -264,3 +264,31 @@ ctest --test-dir build\release -C Release --output-on-failure
 ```
 
 退出码：`0`=pass；`1`=fail；`2`=blocked（无凭据/非大会员/非 1080P/档位不存在）。
+
+---
+
+## 10. Agent 3 独立复验（2026-10-25）
+
+- **二进制**：本次 `scripts\build-release.ps1 -Clean`（222.4s，ctest 37/37）后的 Medium 副本
+  `%LOCALAPPDATA%\Programs\拉片软件\lapian.exe`，3,149,824B / SHA256
+  `7A80C9A9B3C865185CEBA1A489FB1AE56635BDDA065E4699C829B0461B7A3761`（与 dist 一致）。
+- **凭据**：默认 DPAPI（`credential_source=dpapi_default`），`nav vip_status=1`；未打印/落盘
+  SESSDATA、Cookie、签名 URL（本轮日志敏感串 0 命中）。
+- **命令**：§4 同一条，仅换 `--tag verify-t8.17` 与独立根 `build\verify-t8.17`。
+- **结果**：`quality_switch_result checks=42 failures=0 verdict=pass`。
+
+| 项 | 本次复验 |
+|---|---|
+| 初始 | qn=80 / codecid=7 / fps=30.000；ready=1；dash_requests=1、playurl_requests=0 |
+| 80→112 | landed=1；qn=112 / codecid=7 / fps=30.000；PTS 1,000,000→1,000,000、第 30 帧；标记 1→1；记录/截图保留；音频 complete=1 复用，只下载 112 视频 47,168,494B |
+| 112→80 | landed=1；qn=80 / codecid=7；`cache_hit=1`、dash_requests=0、playurl_requests=0；PTS 1,000,000、第 30 帧；标记/记录/截图保留；三条缓存 complete |
+| 误导错误 | 两次切档 `error` 均为空，`no_misleading_complete_error=1` |
+
+与 Agent 1 文档一致，未发现数字差异。补充两点：
+
+1. **新缓存根首次写盘**：初始 ready 前出现一次 `cdn_done ... bytes=0 error=写入缓存文件失败`
+   （视频/音频各一次），自动重试成功；本文件 §4 未记录该现象，属首次打开 UX 残余，
+   `DownloadJob`/`CacheStore`/`WinHttpDownloadTransport` 未被本次两个提交修改。
+2. **“视频完整/音频缺失”**：单测（`lapian_online_fault_test` T8.17）验证复用视频、只补音频、
+   无错误回调；用户提示串在 `OnlineSession.cpp`。本轮真实窗口未构造该分支，不写目视通过。
+   音频可听性同样未由无人值守探针验证。

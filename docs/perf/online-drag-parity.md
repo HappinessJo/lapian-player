@@ -3,7 +3,7 @@
 - **日期**：2026-10-25
 - **基线**：`e1a89c6`（Agent 1 清晰度切换修复后的干净工作区）
 - **范围**：在线增长会话（`.part`）拖动预览；本地拖动预览行为/阈值不变
-- **结论**：**pass（已缓存区）**；长 GOP 冷启动/远跳精确帧为残余，见 §8
+- **结论**：**稳态已缓存区 pass**（正/反向 57/57、33ms 空档、56fps、landing 精确）；**首次拖动冷启动 224ms/连续 6 个目标无新画面未达 C 门槛 → 任务总判 partial**（见 §12）；远跳精确帧为残余，见 §8。
 - **证据命令**：§10；原始日志在 `build/online-parity-commit.log`、`build/local-parity2.log`、`build/parity-t861b-final.log`（`build/` 不入库）
 
 ## 1. 修改前复现（`e1a89c6`）
@@ -220,3 +220,57 @@ ctest --test-dir build\release -C Release --output-on-failure
 
 - 代码/探针/单测 + 本文件一个独立 commit（`fix: smooth symmetric online drag preview`）。
 - 不包含 SESSDATA、Cookie、签名 URL、`build/` 日志。
+
+---
+
+## 12. Agent 3 独立复验（2026-10-25）
+
+- **二进制**：clean 重建后的 Medium 副本（hash 见
+  [online-quality-switch.md](online-quality-switch.md) §10），非 Agent 2 的工作产物。
+- **命令**：§10 第 3 条，独立根 `build\verify-parity`，`--m1-throttle-bps 1048576`。
+- **结果**：`online_drag_parity_result checks=45 failures=0`。
+
+### 12.1 本次数字（与 §5 有差异，以本次为准）
+
+| 场景 | updates | presented | first_ms | max_resp | max_gap | active_fps | lag_p95 | stale | landing | ui_gap | max_missing | flicker |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 冷启动反向 75→65（诊断） | 10 | 4 | **224** | 224 | 224 | 13.20 | 0 | 1 | 65 / 2,166,688 | 32 | **6** | 0 |
+| 正向 15→75 | 60 | **57** | **17** | 67 | **33** | **56.21** | 0 | 2 | 75 / 2,500,000 | 32 | 1 | 0 |
+| 反向 75→15 | 60 | **57** | **31** | 67 | **33** | **56.72** | 0 | 1 | 15 / 500,000 | 31 | 1 | 0 |
+| 缩放 +10 40→49 | 10 | 9 | 63 | 75 | 63 | 16.54 | 0 | 1 | 49 / 1,633,313 | 30 | 1 | 0 |
+| 缩放 −10 50→41 | 10 | 9 | 63 | 86 | 76 | 15.90 | 0 | 1 | 41 / 1,366,688 | 31 | 1 | 0 |
+| 远跳 15→3000 | 1 | 2 | **31（粗帧）** | 31 | 31 | — | 0 | 0 | 3000 / 100,000,000 | 31 | 0 | 0 |
+| 远跳 3000→15 | 1 | 2 | **17（粗帧）** | 17 | 17 | — | 0 | 0 | 15 / 500,000 | 30 | 0 | 0 |
+| 未缓存边界 | 1 | 1 | 0（提示） | — | — | — | — | 0 | 45 / 1,500,000 | 31 | — | — |
+
+- 前后成对：presented **57 vs 57（0.0%）**，`parity_presented_diff_le_10pct=1`；两边
+  `landing_frame_ok=1`、`landing_pts_ok=1`（远跳精确帧 1695ms/142ms，粗帧先出、精确后无粗帧）。
+- 缓存峰值 **63,700,992B / 72 帧 = 60.75MiB**；`ui_gap max_ms=32`、`over_200=0`；
+  未缓存提示 `缓冲中（预览）：目标帧 3312`、0ms、拖回 +5 帧恢复。
+- 与 §5 的差异（同一二进制/机器，负载与计时粒度导致）：presented 57（§5 58）、
+  active 56.21/56.72（§5 57.88/57.88）、max_resp 67（§5 49/50）、gap 33（§5 32）、
+  缩放 max_resp 75/86（§5 70/74）、远跳精确 1695/142ms（§5 1810/155）、
+  冷启动 224ms（§5 240）。结论不变：前后一致、稳态丝滑。
+
+### 12.2 探针缺陷（必须在读表时扣掉）
+
+1. `response_p95_ms` **恒为 0**：`RunParityFrames` 只把延迟写进 `max_response_ms`，
+   `result.responses` 从未 append，`Percentile(responses,0.95)` 对空向量返回 0
+   （`OnlineDragPreviewTestRunner.cpp:787`）。本表的 `max_resp` 是 p95 的保守上界：
+   **max_resp 67ms ≤100**，因此“response_p95 ≤100ms”仍成立，但 0.00 不是测量值。
+2. `landing_frame` 打印的是 PTS：`PrintParity` 的 `%21`/`%22` 都绑定 `landing_pts`
+   （`OnlineDragPreviewTestRunner.cpp:655-656`）。落点精确性以
+   `landing_frame_ok/landing_pts_ok`、T8.6.1b 的 `exact_frame=1/exact_pts=1` 与
+   `online_seek_land target=… pts_us=…` 为准，不引用该字段。
+3. 远跳 `max_gap_ms` 被赋值为 first_response，只有 1 个目标，不能当拖动空档看。
+
+### 12.3 C 判定
+
+- 稳态已缓存区（正向/反向 60 帧）：first 17/31ms、max_gap 33/33ms、active 56.21/56.72fps、
+  UI gap 32ms、max_missing 1，全部达到 §3.C 门槛；相对本地基线 58.53/57.00fps 为
+  **96.0%/99.5%**（门槛 70%）。
+- **冷启动首次拖动 224ms、连续 6 个目标无新画面**，超过 §3.C 的 100ms 与“连续 2 个”门槛；
+  T8.6.1b 首次正向 152ms 亦 >100ms（其自身门槛为 200ms，不替代 C）。
+- 因此 C **不能写“丝滑通过”**，任务总判定为 **partial**（A/B pass）。
+  若要收口，方向是会话就绪前预热预览解码器/首帧，或把“首次拖动”明确写成 C 的例外并
+  由用户拍板；本轮不擅自改门槛。
