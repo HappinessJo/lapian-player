@@ -95,7 +95,9 @@ void OnlineResolveDialog::SetupUi() {
           "（generate/poll，不带 Cookie，本地渲染）。"
           "SESSDATA 可选用 Windows DPAPI 加密保存在 "
           "%APPDATA%\\拉片软件\\credentials.dat，只发送给 api.bilibili.com，"
-          "不写入日志/缓存/截图；可随时点“清除”。本地模式不联网。"),
+          "不写入日志/缓存/截图；可随时点“清除”。"
+          "在线缓存默认在 %LOCALAPPDATA%\\拉片软件\\cache（可在设置中清空）；"
+          "无遥测、无自动更新、无崩溃上报。本地模式不联网。"),
       this);
   privacy_label_->setObjectName(QStringLiteral("onlinePrivacyNotice"));
   privacy_label_->setWordWrap(true);

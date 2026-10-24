@@ -9,7 +9,10 @@
 ;   - 注册 ProgID 与 .mp4/.mov/.mkv/.webm 的 OpenWithProgids，
 ;     不写扩展名默认值，不强制设为默认应用；
 ;   - 卸载只清程序文件/快捷方式/自己注册的注册表项；
-;     不删除 %APPDATA%\拉片软件（settings/marks 回退）与视频旁 sidecar。
+;     不删除 %APPDATA%\拉片软件（settings/marks 回退）与视频旁 sidecar；
+;   - T8.16：卸载时询问是否清理默认在线缓存，默认“否”；只有明确确认或
+;     静默卸载带 /CLEARCACHE 才删除 %LOCALAPPDATA%\拉片软件\cache，
+;     不碰在线记录/截图/设置/凭据/marks/sidecar。
 
 #ifndef AppName
   #define AppName "拉片软件"
@@ -56,6 +59,10 @@ WizardStyle=modern
 ChangesAssociations=yes
 CloseApplications=yes
 RestartApplications=no
+; T8.16：Inno 卸载器自身静态导入 winhttp.dll（安装/卸载均不调用网络）。
+; 把它放到 {app} 之外，使安装目录只含应用负载；应用负载导入表已断言无
+; QtNetwork/TLS/winhttp/wininet/urlmon。卸载器仍由 Inno 正常管理。
+UninstallFilesDir={localappdata}\拉片软件\uninstaller
 UninstallDisplayName={#AppName} {#AppVersion}
 UninstallDisplayIcon={app}\{#AppExeName}
 VersionInfoVersion={#AppVersionQuad}
@@ -63,6 +70,8 @@ VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} 安装程序
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#AppVersion}
+; 安装前展示隐私/数据位置说明（同时随程序目录安装为 PRIVACY.txt）。
+InfoBeforeFile={#SourceDir}\PRIVACY.txt
 ; 安装/卸载全程无网络动作；不检查更新，不访问任何 URL。
 
 [Languages]
@@ -119,4 +128,93 @@ Filename: "{app}\{#AppExeName}"; Description: "启动 {#AppName}"; Flags: nowait
 [UninstallDelete]
 ; 只删空目录；用户数据（%APPDATA%\拉片软件、视频旁 sidecar、snapshots）一律不碰。
 Type: dirifempty; Name: "{app}"
+
+[Code]
+var
+  DeleteOnlineCache: Boolean;
+
+function ClearCacheRequested(): Boolean;
+var
+  I: Integer;
+  Param: String;
+  Value: String;
+begin
+  Result := False;
+
+  // 显式参数优先：/CLEARCACHE 或 /CLEARCACHE=1；/CLEARCACHE=0 表示不清理。
+  for I := 1 to ParamCount do
+  begin
+    Param := Uppercase(ParamStr(I));
+    if (Param = '/CLEARCACHE') or (Param = '--CLEARCACHE') then
+    begin
+      Result := True;
+      Exit;
+    end;
+    if (Param = '/CLEARCACHE=0') or (Param = '--CLEARCACHE=0') then
+    begin
+      Result := False;
+      Exit;
+    end;
+    if (Copy(Param, 1, 12) = '/CLEARCACHE=') or
+       (Copy(Param, 1, 13) = '--CLEARCACHE=') then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  // 兼容 Inno 的 {param} 常量（无用户名/密码等敏感信息）。
+  Value := ExpandConstant('{param:CLEARCACHE|0}');
+  if (Value <> '') and (Value <> '0') then
+    Result := True;
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  Answer: Integer;
+begin
+  Result := True;
+  DeleteOnlineCache := False;
+
+  if ClearCacheRequested() then
+  begin
+    DeleteOnlineCache := True;
+    Log('T8.16: /CLEARCACHE specified; default online cache will be removed.');
+    Exit;
+  end;
+
+  if UninstallSilent then
+  begin
+    Log('T8.16: silent uninstall without /CLEARCACHE; online cache preserved.');
+    Exit;
+  end;
+
+  Answer := MsgBox(
+    '是否同时删除在线缓存？' + #13#10 + #13#10 +
+    '默认选“否”，保留缓存。' + #13#10 +
+    '选“是”只删除：' + #13#10 +
+    ExpandConstant('{localappdata}\拉片软件\cache') + #13#10 + #13#10 +
+    '不会删除在线记录、截图、设置、凭据、marks 或 sidecar。',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2);
+  DeleteOnlineCache := (Answer = IDYES);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  CacheRoot: String;
+begin
+  // usPostUninstall 只在卸载主体完成后执行；用户取消或卸载失败不会走到这里。
+  if (CurUninstallStep = usPostUninstall) and DeleteOnlineCache then
+  begin
+    CacheRoot := ExpandConstant('{localappdata}\拉片软件\cache');
+    if DirExists(CacheRoot) then
+    begin
+      Log('T8.16: removing default online cache: ' + CacheRoot);
+      if not DelTree(CacheRoot, True, True, True) then
+        Log('T8.16: WARNING cache cleanup failed; cache left in place: ' + CacheRoot);
+    end
+    else
+      Log('T8.16: default online cache not present; nothing to remove.');
+  end;
+end;
 

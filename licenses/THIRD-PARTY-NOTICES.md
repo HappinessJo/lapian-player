@@ -28,8 +28,13 @@
 
 ## 系统组件（不随包分发）
 
-D3D11 / DXGI / D3D11VA / WASAPI / WIC 均来自 Windows SDK，随操作系统提供，
-不属于再分发内容。
+D3D11 / DXGI / D3D11VA / WASAPI / WIC / WinHTTP 均来自 Windows SDK，
+随操作系统提供，不属于再分发内容。
+
+在线模式使用 Windows 自带的 WinHTTP 发出 HTTPS 请求；应用负载（`dist` 与
+`{app}`）不包含 QtNetwork、TLS 插件或 winhttp/wininet/urlmon 的静态导入。
+Inno 生成的卸载器位于 `{app}` 外的独立目录，其二进制静态导入 winhttp，
+但安装/卸载实测 0 TCP/UDP（见 `docs/perf/v2-online-packaging.md` §7/§10）。
 
 ## 合规要点
 

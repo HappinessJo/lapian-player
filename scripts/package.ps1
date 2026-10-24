@@ -138,6 +138,14 @@ foreach ($name in $licenseNames) {
 }
 $readme = Join-Path $repo 'packaging\README.txt'
 if (-not (Test-Path -LiteralPath $readme)) { throw "缺少打包说明：$readme" }
+$privacy = Join-Path $repo 'packaging\PRIVACY.txt'
+if (-not (Test-Path -LiteralPath $privacy)) { throw "缺少隐私说明：$privacy" }
+foreach ($textFile in @($readme, $privacy)) {
+  $bytes = [System.IO.File]::ReadAllBytes($textFile)
+  if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+    throw "打包文本必须是 UTF-8 BOM（Inno 才能正确显示中文）：$textFile"
+  }
+}
 
 Write-Host '=== 3/5 组装 stage（程序 + licenses + README） ==='
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -155,6 +163,7 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 Get-ChildItem -LiteralPath $DistDir | Copy-Item -Destination $stage -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $repo 'licenses') -Destination (Join-Path $stage 'licenses') -Recurse -Force
 Copy-Item -LiteralPath $readme -Destination (Join-Path $stage 'README.txt') -Force
+Copy-Item -LiteralPath $privacy -Destination (Join-Path $stage 'PRIVACY.txt') -Force
 
 $distStats = Get-TreeStats $DistDir
 $stageStats = Get-TreeStats $stage
@@ -236,7 +245,7 @@ $reportLines.Add(('版本：{0}（{1}）' -f $Version, $versionQuad))
 $reportLines.Add(('源码 HEAD：{0}' -f $gitHead))
 $reportLines.Add('')
 $reportLines.Add(('dist：{0} 文件 / {1} MB' -f $distStats.Files, $distStats.MB))
-$reportLines.Add(('分发负载 stage：{0} 文件 / {1} MB（含 licenses 与 README）' -f $stageStats.Files, $stageStats.MB))
+$reportLines.Add(('分发负载 stage：{0} 文件 / {1} MB（含 licenses、README.txt 与 PRIVACY.txt）' -f $stageStats.Files, $stageStats.MB))
 foreach ($artifact in $artifacts) {
   $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
   $reportLines.Add(('{0}：{1} MB  SHA256={2}' -f (Split-Path $artifact -Leaf), (Get-FileSizeMB $artifact), $hash))
@@ -244,6 +253,7 @@ foreach ($artifact in $artifacts) {
 $reportLines.Add('')
 $reportLines.Add('P12 判定：每个分发形态均 ≤100MB；本报告不把安装包与便携 zip 相加。')
 $reportLines.Add('无网络：check-imports.ps1 已断言无 QtNetwork/TLS/winhttp/wininet/urlmon 导入。')
+$reportLines.Add('隐私/卸载：stage 与安装目录含 PRIVACY.txt；卸载默认保留用户数据，仅明确确认或 /CLEARCACHE 清理默认在线缓存。')
 
 $reportPath = Join-Path $OutDir 'package-report.txt'
 $reportLines | Set-Content -LiteralPath $reportPath -Encoding UTF8
