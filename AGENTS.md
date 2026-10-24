@@ -399,10 +399,11 @@
 | `docs/handoff-2026-10-24-t8.10.md` | v1 | 2026-10-24 | **当前交接**：T8.10 接口/数字/决定/缺口、T8.11 需要；非门；一个 commit |
 | `docs/perf/v2-online-index.md` | v1.0 | 2026-10-24 | **当前证据**：T8.11 渐进索引/波形/总帧数；增量 builder（前沿 guard/resume_pos/快照/tail guard 48/统计）；OB-3 真实在线 27/0（首次索引 128ms、30s 内容 6.209s、20/20 seek 落点 0、exact 5306、波形 0.525 帧、UI gap 58ms、opens=1/reopens=0/read_ratio=1.000）、离线 2MB/s 22/0、单测 28/0；ctest 33/33；未判 M2 |
 | `docs/handoff-2026-10-24-t8.11.md` | v1 | 2026-10-24 | **当前交接**：T8.11 接口/数字/决定/缺口、T8.12 需要；非门；一个 commit |
-| `docs/next-session-prompt-t8.11.md` | v1 | 2026-10-24 | **当前提示词**：T8.10 后刷新，基线 `b560607`；新会话 T8.11（渐进索引/波形/总帧数）；边界/验收/代码入口/慢增长测试/停止条件 |
-| `docs/next-session-prompt-t8.10.md` | v1 | 2026-10-24 | **当前提示词**：T8.9 后刷新，基线 `a3cf655`；新会话 T8.10（DASH 双输入）；边界/验收/代码入口/spike 清单/音频缓存键建议/停止条件 |
-| `docs/next-session-prompt-t8.9.md` | v2 | 2026-10-24 | **当前提示词**：T8.3.1 后刷新，基线 `cbab29b`；新会话 T8.9（M2 DASH 解析/档位）；边界、验收、代码入口、工作区/默认路径约束、停止条件 |
-| `docs/next-session-prompt-t8.8.md` | v1 | 2026-10-23 | **当前提示词**：下一个 agent 的 T8.8（先做 durl qn/fourk 矩阵，再决定最小取流修正/blocked；3/3、OP1–OP5、失败矩阵、O9、停止条件） |
+| `docs/next-session-prompt-t8.12.md` | v1 | 2026-10-24 | **当前提示词**：T8.11 后刷新，基线 `a6cdf6d`；新会话 T8.12（档位策略/降帧提示）；fps 口径/权限列档/手动切档/PTS 映射/降帧横幅+角标/停止条件 |
+| `docs/next-session-prompt-t8.11.md` | v1 | 2026-10-24 | 历史提示词：T8.10 后刷新，基线 `b560607`；T8.11（渐进索引/波形/总帧数） |
+| `docs/next-session-prompt-t8.10.md` | v1 | 2026-10-24 | 历史提示词：T8.9 后刷新，基线 `a3cf655`；新会话 T8.10（DASH 双输入）；边界/验收/代码入口/spike 清单/音频缓存键建议/停止条件 |
+| `docs/next-session-prompt-t8.9.md` | v2 | 2026-10-24 | 历史提示词：T8.3.1 后刷新，基线 `cbab29b`；新会话 T8.9（M2 DASH 解析/档位）；边界、验收、代码入口、工作区/默认路径约束、停止条件 |
+| `docs/next-session-prompt-t8.8.md` | v1 | 2026-10-23 | 历史提示词：下一个 agent 的 T8.8（先做 durl qn/fourk 矩阵，再决定最小取流修正/blocked；3/3、OP1–OP5、失败矩阵、O9、停止条件） |
 | `docs/perf/v2-online-qr.md` | v1.0 | 2026-10-23 | **当前证据**：T8.2.2 扫码登录；官方 passport generate/poll、本地 QR（v4/33 modules/246px）、4 态/180s/取消 16ms、SESSDATA-only/DPAPI/nav 门；115/0、19/0（UI 21/0，dist 同）；**真实扫码未验证**；非门 |
 | `docs/handoff-2026-10-23-t8.2.2.md` | v1 | 2026-10-23 | **当前交接**：T8.2.2 接口/状态机/数字/缺口/回退；真实扫码未验证；非门；一个 commit |
 | `docs/next-session-prompt-t8.3.md` | v1 | 2026-10-23 | 下一个 agent 的 T8.3 提示词（缓存存储/配额/续传；300MB/20GB、长路径、停止条件） |
