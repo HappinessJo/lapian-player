@@ -1,8 +1,9 @@
 # 拖动预览 v2 任务表（DP 任务，非门）
 
-- **版本**：v1.0（2026-10-24）
+- **版本**：v1.1（2026-10-24；DP-1 完成）
 - **计划**：[plan-drag-preview-v2.md](plan-drag-preview-v2.md)
-- **基线**：`079f0dd`（本地快拖热修）；dist 34.48MB/25、`ctest` 36/36、key 77/0。
+- **基线**：`079f0dd`（本地快拖热修）+ `bf37ccd`（DP-0）；dist 34.48MB/25、
+  `ctest` 36/36、key 77/0。
 - **性质**：本地拖动预览体验改造；不改 M1/M2/P4/P7 门/数字，不改 OB、缓存
   schema、默认 AVC≤1080p；不是 v2 在线任务。
 - **执行方式**：一个任务 = 一个会话 = 一次可审查提交；每任务写证据/交接。
@@ -14,7 +15,7 @@
 | 任务 | 状态 | 依赖 |
 |---|---|---|
 | DP-0 规划/交接 | **完成（2026-10-24）** | — |
-| DP-1 硬件预览 + 诊断 | 待开始 | DP-0 |
+| DP-1 硬件预览 + 诊断 | **完成（2026-10-24，1080p；4K 硬解关闭/只记录）** | DP-0 |
 | DP-2 反向缓存/预取/远跳粗帧 | 待开始 | DP-1（可并行做设计，不并行提交） |
 | DP-3 交互策略 + 验收探针 | 待开始 | DP-1/DP-2 |
 | DP-4 集成/发布 | 待开始 | DP-1/2/3 |
@@ -82,6 +83,23 @@
 - 交接 `docs/handoff-2026-10-24-dp1.md`；
 - 更新 `AGENTS.md` 状态；
 - 一个提交；不合并 DP-2。
+
+### 完成记录（2026-10-24）
+
+- 代码：`PreviewDecoder` 共享设备硬解/回退/诊断；`VideoDecoder` 可选表面池；
+  `MainWindow` 设备传递/设备重建/`PreviewDiagnosticsForTest`；`GfxWidget`
+  上传返回 bool；`--drag-fast` 输出 hw/target_lag/seeks/cache；`--preview-force-software`。
+- 1080p：`hw_active=1`；`+60` 63.1–76.3fps/空档 36–46ms；`-60` 56.8–60.7fps/
+  空档 32–38ms；P4 64.1fps、P6 16.6–28.6ms、P7/P8/P9 不退化。
+- 强制软件：`hw_active=0`/`forced_software`，仍出帧；`target_lag_p50=4161 帧`。
+- 4K：硬解实测 8.4fps/空档 372ms，DP-1 改为 `source_too_large` 回退软件，
+  只记录、不设通过线。
+- 回归：`ctest` 36/36、key 77/0、T8.6.1b 35/0；`lapian_preview_decoder_test`
+  覆盖无设备回退/共享设备硬解/同设备硬件帧非黑。
+- 证据 [perf/drag-preview-dp1.md](perf/drag-preview-dp1.md)、交接
+  [handoff-2026-10-24-dp1.md](handoff-2026-10-24-dp1.md)。
+- 口径修正：`--drag-fast`/P4 目标更新从 16ms（本机实际 ~31ms）改为 10ms
+  `Qt::PreciseTimer`（实际 ~15.6ms）；`fps` 用移动阶段，`total_fps` 保留 2s。
 
 ## DP-2 反向缓存/预取/远跳粗帧
 

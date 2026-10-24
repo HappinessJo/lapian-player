@@ -40,9 +40,11 @@ class VideoDecoder {
   bool Open(const std::string& utf8_path, int video_stream_index, bool prefer_hardware,
             std::string* error);
   // T1.3：硬解必须和渲染器共用同一个 D3D11 设备，否则纹理不能跨设备拷贝。
+  // DP-1：extra_hw_frames >= 0 时覆盖默认表面池额外帧数（-1 = 按分辨率默认）；
+  // 预览不缓存硬件帧，用小池避免占显存。
   bool OpenWithD3D11Device(const std::string& utf8_path, int video_stream_index,
                            ID3D11Device* d3d11_device, bool prefer_hardware,
-                           std::string* error);
+                           std::string* error, int extra_hw_frames = -1);
   // T8.6：使用调用方拥有的（可增长读层）AVFormatContext；Decoder 不关闭它。
   // 调用方必须保证 context 的生命周期长于本对象，且同一时刻只有一个线程使用。
   bool OpenWithFormat(AVFormatContext* format, int video_stream_index,

@@ -231,6 +231,18 @@ void DragTestRunner::RunFast() {
             fast_max_gap_ms_ = gap_ms;
           }
         }
+        // DP-1：不要只看 fps。每次 Present 记录显示帧与当前目标帧的差距，
+        // 用来区分“画面在动”和“画面跟到了鼠标位置”。
+        const PreviewTestDiagnostics diagnostics =
+            window_->PreviewDiagnosticsForTest();
+        if (diagnostics.displayed_frame >= 0 && diagnostics.target_frame >= 0) {
+          const double lag_frames = std::abs(static_cast<double>(
+              diagnostics.displayed_frame - diagnostics.target_frame));
+          fast_target_lag_frames_.push_back(lag_frames);
+          const double fps = window_->FrameRateForTest();
+          fast_target_lag_ms_.push_back(fps > 0.0 ? lag_frames * 1000.0 / fps
+                                                  : 0.0);
+        }
         fast_last_present_ = now;
       });
   window_->ScrubStartForTest(fast_start_frame_);
@@ -249,25 +261,65 @@ void DragTestRunner::RunFast() {
         disconnect(fast_present_connection_);
         fast_present_connection_ = {};
       }
+      const PreviewTestDiagnostics diagnostics =
+          window_->PreviewDiagnosticsForTest();
+      const Stats lag_frames = Summarize(fast_target_lag_frames_, 0.0);
+      const Stats lag_ms = Summarize(fast_target_lag_ms_, 0.0);
+      const QByteArray fallback_reason =
+          diagnostics.hw_fallback_reason.isEmpty()
+              ? QByteArray("-")
+              : diagnostics.hw_fallback_reason.toUtf8();
+      const double active_seconds =
+          fast_boundary_hit_ ? fast_active_seconds_ : fast_seconds_;
+      const int active_presents =
+          fast_boundary_hit_ ? fast_active_presents_ : fast_presents_;
+      const double active_fps =
+          active_seconds > 0.0 ? active_presents / active_seconds : 0.0;
+      // 目标撞到文件边界后不再需要新帧；用整个 2s 的 Present 数算 fps 会把
+      // “停在目标帧”误判为退化。headline fps 取目标仍在移动的阶段，total_fps
+      // 保留整个 2s，两者都打印。
+      const double effective_fps =
+          fast_boundary_hit_ ? active_fps : fast_fps_;
       window_->ScrubFinishForTest(std::min<qint64>(last_frame_, fast_target_));
-      std::fprintf(stderr,
-                   "T8.17 drag_fast tag=%s file=%s frames=%lld "
-                   "step_frames=%d seconds=%.2f presents=%d fps=%.1f "
-                   "first_present_ms=%.1f max_gap_ms=%.1f\n",
-                   tag_.toUtf8().constData(), file_.toUtf8().constData(),
-                   static_cast<long long>(last_frame_), fast_step_, fast_seconds_,
-                   fast_presents_, fast_fps_, fast_first_present_ms_,
-                   fast_max_gap_ms_);
+      std::fprintf(
+          stderr,
+          "T8.17 drag_fast tag=%s file=%s frames=%lld step_frames=%d "
+          "seconds=%.2f presents=%d fps=%.1f total_fps=%.1f "
+          "active_seconds=%.2f active_presents=%d active_fps=%.1f "
+          "boundary_hit=%d first_present_ms=%.1f max_gap_ms=%.1f "
+          "hw_requested=%d hw_active=%d preview_hw_fallback=%s seeks=%d "
+          "cache_hits=%d preview_published=%d decoder_reopens=%d "
+          "target_lag_samples=%zu target_lag_frames_p50=%.1f "
+          "target_lag_frames_p95=%.1f target_lag_frames_max=%.1f "
+          "target_lag_ms_p50=%.1f target_lag_ms_p95=%.1f "
+          "target_lag_ms_max=%.1f\n",
+          tag_.toUtf8().constData(), file_.toUtf8().constData(),
+          static_cast<long long>(last_frame_), fast_step_, fast_seconds_,
+          fast_presents_, effective_fps, fast_fps_, active_seconds,
+          active_presents, active_fps, fast_boundary_hit_ ? 1 : 0,
+          fast_first_present_ms_, fast_max_gap_ms_,
+          diagnostics.hw_requested ? 1 : 0, diagnostics.hw_active ? 1 : 0,
+          fallback_reason.constData(), diagnostics.seeks, diagnostics.cache_hits,
+          diagnostics.published, diagnostics.decoder_reopens,
+          fast_target_lag_frames_.size(), lag_frames.p50, lag_frames.p95,
+          lag_frames.max, lag_ms.p50, lag_ms.p95, lag_ms.max);
       std::fflush(stderr);
       QCoreApplication::exit(0);
       return;
     }
     fast_target_ = std::clamp<qint64>(fast_target_ + fast_step_, 0,
                                       last_frame_ - 1);
+    if (!fast_boundary_hit_ &&
+        (fast_target_ == 0 || fast_target_ == last_frame_ - 1)) {
+      fast_boundary_hit_ = true;
+      fast_active_seconds_ = static_cast<double>(fast_timer_.elapsed()) / 1000.0;
+      fast_active_presents_ =
+          window_->PresentedFrameCountForTest() - fast_presents_start_;
+    }
     window_->ScrubTargetForTest(fast_target_);
-    QTimer::singleShot(16, this, [tick]() { (*tick)(); });
+    QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
   };
-  QTimer::singleShot(16, this, [tick]() { (*tick)(); });
+  QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
 }
 
 void DragTestRunner::RunP4() {
@@ -289,11 +341,12 @@ void DragTestRunner::RunP4() {
       return;
     }
     p4_delta_ += 3;
-    window_->ScrubTargetForTest(
-        std::min<qint64>(last_frame_, p4_start_frame_ + p4_delta_));
-    QTimer::singleShot(16, this, [tick]() { (*tick)(); });
+    const qint64 next_target =
+        std::min<qint64>(last_frame_, p4_start_frame_ + p4_delta_);
+    window_->ScrubTargetForTest(next_target);
+    QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
   };
-  QTimer::singleShot(16, this, [tick]() { (*tick)(); });
+  QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
 }
 
 void DragTestRunner::RunP7() {

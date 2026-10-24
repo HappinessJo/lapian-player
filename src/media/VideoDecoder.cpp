@@ -96,6 +96,8 @@ struct VideoDecoder::Impl {
   std::string path;
   int requested_stream = -1;
   ID3D11Device* external_device = nullptr;
+  // DP-1：预览解码可覆盖表面池额外帧数；主播放保持默认。
+  int extra_hw_frames_override = -1;
 
   ~Impl() { Close(); }
 
@@ -119,6 +121,7 @@ struct VideoDecoder::Impl {
     hardware_active = false;
     eof_sent = false;
     packet_valid = false;
+    extra_hw_frames_override = -1;
   }
 
   bool IsOpen() const { return format != nullptr && decoder != nullptr && frame != nullptr; }
@@ -201,10 +204,14 @@ struct VideoDecoder::Impl {
         // T7.11.1：1080p 后退窗口的延后回拷最多同时持有 24 个硬解帧引用。
         // FFmpeg 的 D3D11VA 静态表面池默认很小（实测持 18 帧就耗尽），
         // 这里给 1080p 及以下预留窗口大小的额外表面；4K 仍走同步回拷，不加池。
-        if (static_cast<std::int64_t>(parameters->width) * parameters->height <=
-            1920 * 1088) {
-          context->extra_hw_frames = 32;
-        }
+        // DP-1：预览不缓存硬件帧，由调用方用更小的池。
+        const bool small_frame =
+            static_cast<std::int64_t>(parameters->width) * parameters->height <=
+            1920 * 1088;
+        context->extra_hw_frames =
+            extra_hw_frames_override >= 0
+                ? extra_hw_frames_override
+                : (small_frame ? 32 : 0);
       }
 
       if (hardware) {
@@ -493,6 +500,7 @@ bool VideoDecoder::Open(const std::string& utf8_path, int video_stream_index, bo
   impl_->path = utf8_path;
   impl_->requested_stream = video_stream_index;
   impl_->external_device = nullptr;
+  impl_->extra_hw_frames_override = -1;
   if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, nullptr, error)) {
     return true;
   }
@@ -502,7 +510,7 @@ bool VideoDecoder::Open(const std::string& utf8_path, int video_stream_index, bo
 
 bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_stream_index,
                                        ID3D11Device* d3d11_device, bool prefer_hardware,
-                                       std::string* error) {
+                                       std::string* error, int extra_hw_frames) {
   if (error == nullptr) {
     return false;
   }
@@ -520,6 +528,7 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
   impl_->path = utf8_path;
   impl_->requested_stream = video_stream_index;
   impl_->external_device = d3d11_device;
+  impl_->extra_hw_frames_override = extra_hw_frames;
   if (impl_->OpenInternal(utf8_path, video_stream_index, prefer_hardware, d3d11_device, error)) {
     return true;
   }
@@ -549,6 +558,7 @@ bool VideoDecoder::OpenWithFormat(AVFormatContext* format, int video_stream_inde
   }
   impl_->external_device = d3d11_device;
   impl_->requested_stream = video_stream_index;
+  impl_->extra_hw_frames_override = -1;
   if (impl_->OpenFormatInternal(format, false, video_stream_index, prefer_hardware,
                                 d3d11_device, std::string(), error)) {
     return true;

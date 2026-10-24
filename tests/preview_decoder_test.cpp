@@ -8,12 +8,15 @@
 #include <string>
 #include <thread>
 
+#include <wrl/client.h>
+
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4244)
 #endif
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
 }
 #if defined(_MSC_VER)
 #pragma warning(pop)
@@ -21,6 +24,8 @@ extern "C" {
 
 #include "media/FrameIndex.h"
 #include "media/PreviewDecoder.h"
+#include "platform/gfx/D3D11Device.h"
+#include "platform/gfx/VideoRenderer.h"
 
 namespace {
 
@@ -70,6 +75,70 @@ lapian::media::PreviewFrame PollTargetFrame(
     av_frame_free(&frame.frame);
   }
   return {};
+}
+
+// DP-1：把预览线程的硬件帧交给同一个 VideoRenderer，离屏渲染并回读，确认
+// 不是黑屏/背景色。等价于 GfxWidget::SetVideoFrame 的同设备纹理上传路径。
+bool RendersNonBackground(ID3D11Device* device, ID3D11DeviceContext* context,
+                          const AVFrame* frame, std::string* error) {
+  lapian::gfx::VideoRenderer renderer;
+  if (!renderer.Initialize(device, context, error)) {
+    return false;
+  }
+  if (!renderer.SetFrame(frame, 0, error)) {
+    return false;
+  }
+  D3D11_TEXTURE2D_DESC desc{};
+  desc.Width = 320;
+  desc.Height = 180;
+  desc.MipLevels = 1;
+  desc.ArraySize = 1;
+  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  desc.SampleDesc.Count = 1;
+  desc.Usage = D3D11_USAGE_DEFAULT;
+  desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> target;
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> view;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+  if (FAILED(device->CreateTexture2D(&desc, nullptr, target.GetAddressOf())) ||
+      FAILED(device->CreateRenderTargetView(target.Get(), nullptr,
+                                            view.GetAddressOf()))) {
+    *error = "创建预览渲染目标失败";
+    return false;
+  }
+  desc.Usage = D3D11_USAGE_STAGING;
+  desc.BindFlags = 0;
+  desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  if (FAILED(device->CreateTexture2D(&desc, nullptr, staging.GetAddressOf()))) {
+    *error = "创建预览回读纹理失败";
+    return false;
+  }
+  renderer.Render(view.Get(), 320, 180);
+  context->CopyResource(staging.Get(), target.Get());
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+    *error = "预览回读失败";
+    return false;
+  }
+  bool found = false;
+  const auto* pixels = static_cast<const std::uint8_t*>(mapped.pData);
+  for (UINT y = 0; y < 180 && !found; y += 4) {
+    const auto* row = pixels + static_cast<std::size_t>(y) * mapped.RowPitch;
+    for (UINT x = 0; x < 320; x += 4) {
+      const int b = row[x * 4 + 0];
+      const int g = row[x * 4 + 1];
+      const int r = row[x * 4 + 2];
+      if (std::max({r, g, b}) > 60 || std::min({r, g, b}) < 8) {
+        found = true;
+        break;
+      }
+    }
+  }
+  context->Unmap(staging.Get(), 0);
+  if (!found) {
+    *error = "预览硬件帧渲染结果为背景色";
+  }
+  return found;
 }
 
 }  // namespace
@@ -253,6 +322,120 @@ int main(int argc, char** argv) {
 
   preview.End();
   preview.Close();
+
+  // DP-1：设备为空时自动回退软件，记录 device_unavailable，且仍能出预览帧。
+  {
+    lapian::media::PreviewDecoder fallback;
+    fallback.Configure(path, -1, &index, nullptr, true);
+    bool fallback_ready = false;
+    for (int i = 0; i < 200; ++i) {
+      if (fallback.IsReady()) {
+        fallback_ready = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Check(fallback_ready, "无 D3D11 设备时预览解码器仍能打开（软件回退）");
+    if (fallback_ready) {
+      const lapian::media::PreviewDiagnostics diag = fallback.diagnostics();
+      Check(!diag.hw_active, "无设备时 hw_active=0（不假硬解）");
+      Check(diag.hw_fallback_reason == "device_unavailable",
+            "无设备时记录 device_unavailable");
+      fallback.Begin(600);
+      lapian::media::PreviewFrame frame = PollTargetFrame(&fallback, 600, 2000);
+      Check(frame.frame != nullptr, "软件回退仍能发布预览帧");
+      if (frame.frame != nullptr) {
+        Check(std::max(frame.frame->width, frame.frame->height) <= 1280,
+              "软件回退帧仍降采样到最长边 ≤1280");
+        av_frame_free(&frame.frame);
+      }
+      fallback.End();
+    }
+    fallback.Close();
+  }
+
+  // DP-1：与渲染器共享 D3D11 设备硬解；无硬解/D3D11 的开发机跳过。
+  {
+    lapian::gfx::D3D11Device device;
+    std::string device_error;
+    if (!device.Create(&device_error)) {
+      Skip("D3D11 设备创建失败: " + device_error);
+    } else {
+      lapian::media::PreviewDecoder hardware;
+      hardware.Configure(path, -1, &index, device.device(), true);
+      bool ready = false;
+      for (int i = 0; i < 300; ++i) {
+        if (hardware.IsReady()) {
+          ready = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      Check(ready, "共享设备预览解码器能打开");
+      lapian::media::PreviewDiagnostics diag = hardware.diagnostics();
+      if (!ready || !diag.hw_active) {
+        Skip("共享设备预览硬解不可用: " + diag.hw_fallback_reason);
+      } else {
+        Check(diag.hw_fallback_reason.empty(), "硬解 active 时无回退原因");
+        hardware.Begin(600);
+        lapian::media::PreviewFrame frame = PollTargetFrame(&hardware, 600, 3000);
+        Check(frame.frame != nullptr, "共享设备硬解能发布目标帧");
+        if (frame.frame != nullptr) {
+          Check(frame.frame->hw_frames_ctx != nullptr ||
+                    frame.frame->format == AV_PIX_FMT_D3D11,
+                "预览帧是 D3D11 硬件帧");
+          Check(frame.frame_index == 600, "硬解预览帧号==目标 600");
+          Check(frame.frame->width >= 1280,
+                "硬解预览帧保持全分辨率（未走 CPU 降采样）");
+          std::string render_error;
+          Check(RendersNonBackground(device.device(), device.context(),
+                                     frame.frame, &render_error),
+                "共享设备硬件帧能渲染出非背景像素");
+          if (!render_error.empty()) {
+            std::printf("       render_error=%s\n", render_error.c_str());
+          }
+          av_frame_free(&frame.frame);
+        }
+        diag = hardware.diagnostics();
+        Check(diag.seeks > 0, "硬解预览记录了 seek 次数");
+        Check(diag.published > 0, "硬解预览记录了发布帧数");
+        hardware.End();
+      }
+      hardware.Close();
+
+      // 设备存在但明确要求软件：记录 software_requested，帧降采样。
+      lapian::media::PreviewDecoder software;
+      software.Configure(path, -1, &index, device.device(), false);
+      bool software_ready = false;
+      for (int i = 0; i < 200; ++i) {
+        if (software.IsReady()) {
+          software_ready = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      Check(software_ready, "有设备但要求软件时预览解码器能打开");
+      if (software_ready) {
+        const lapian::media::PreviewDiagnostics software_diag =
+            software.diagnostics();
+        Check(!software_diag.hw_active, "要求软件时 hw_active=0");
+        Check(software_diag.hw_fallback_reason == "software_requested",
+              "要求软件时记录 software_requested");
+        software.Begin(600);
+        lapian::media::PreviewFrame frame =
+            PollTargetFrame(&software, 600, 2000);
+        Check(frame.frame != nullptr, "要求软件时仍能发布预览帧");
+        if (frame.frame != nullptr) {
+          Check(std::max(frame.frame->width, frame.frame->height) <= 1280,
+                "要求软件时预览帧降采样");
+          av_frame_free(&frame.frame);
+        }
+        software.End();
+      }
+      software.Close();
+    }
+  }
+
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);
     return 1;

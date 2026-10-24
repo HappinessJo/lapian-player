@@ -568,6 +568,8 @@ int main(int argc, char* argv[]) {
   bool drag_fast = false;
   int drag_fast_step = 60;
   bool force_software_decode = false;
+  // DP-1：只强制本地拖动预览走软件解码，用于验证自动回退路径仍能出帧。
+  bool preview_force_software = false;
   // T7.11：P7 跨 GOP 边界后退专项（目标为关键帧 → PgUp 到前一 GOP 末帧）。
   bool gop_boundary_test = false;
   int gop_boundary_samples = 20;
@@ -756,6 +758,8 @@ int main(int argc, char* argv[]) {
       drag_tag = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--force-software-decode")) {
       force_software_decode = true;
+    } else if (arguments[i] == QStringLiteral("--preview-force-software")) {
+      preview_force_software = true;
     } else if (arguments[i] == QStringLiteral("--gop-boundary-test")) {
       gop_boundary_test = true;
     } else if (arguments[i] == QStringLiteral("--gop-boundary-samples") &&
@@ -1066,6 +1070,12 @@ int main(int argc, char* argv[]) {
   if (force_software_decode) {
     qputenv("LAPIAN_FORCE_SOFTWARE", "1");
     std::fprintf(stderr, "T7.4 decode_mode forced=software\n");
+    std::fflush(stderr);
+  }
+  // DP-1：只强制预览软解（主播放仍按默认硬解），验证回退路径仍能出帧。
+  if (preview_force_software) {
+    qputenv("LAPIAN_PREVIEW_FORCE_SOFTWARE", "1");
+    std::fprintf(stderr, "DP-1 preview_decode_mode forced=software\n");
     std::fflush(stderr);
   }
   if (mark_test) {

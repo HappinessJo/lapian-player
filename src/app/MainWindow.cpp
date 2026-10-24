@@ -4675,9 +4675,13 @@ void MainWindow::ApplyIndexState() {
   LoadMarksForCurrentSession();
   if (ready && (!online_mode_ || online_cache_hit_)) {
     // T2.9：索引就绪后再预热预览器；在线部分索引没有本地路径，预览器禁用。
+    // DP-1：预览优先借用 GfxWidget 的 D3D11 设备硬解；设备生命周期由窗口保证。
     preview_ = std::make_unique<lapian::media::PreviewDecoder>();
     preview_->Configure(session_->path_utf8(), session_->video_stream_index(),
-                        &session_->index());
+                        &session_->index(),
+                        gfx_ != nullptr ? gfx_->d3d_device() : nullptr, true,
+                        session_->info().video.width,
+                        session_->info().video.height);
   }
   RefreshMarksUi();
   ShowMarkWarnings();
@@ -4984,6 +4988,27 @@ bool MainWindow::PreviewActiveForTest() const {
   return preview_timer_ != nullptr && preview_timer_->isActive();
 }
 
+PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
+  PreviewTestDiagnostics result;
+  result.active = PreviewActiveForTest();
+  result.target_frame = preview_target_frame_;
+  result.displayed_frame = preview_displayed_frame_;
+  result.displayed_pts_us = preview_displayed_pts_us_;
+  result.presented = preview_presented_count_;
+  if (preview_ == nullptr) {
+    return result;
+  }
+  const lapian::media::PreviewDiagnostics diagnostics = preview_->diagnostics();
+  result.hw_requested = diagnostics.hw_requested;
+  result.hw_active = diagnostics.hw_active;
+  result.hw_fallback_reason = QString::fromStdString(diagnostics.hw_fallback_reason);
+  result.seeks = diagnostics.seeks;
+  result.cache_hits = diagnostics.cache_hits;
+  result.published = diagnostics.published;
+  result.decoder_reopens = diagnostics.decoder_reopens;
+  return result;
+}
+
 bool MainWindow::OnlinePreviewWaitingForTest() const {
   return online_preview_ != nullptr && online_preview_->IsWaiting();
 }
@@ -5023,6 +5048,9 @@ void MainWindow::ResetPreviewStatsForTest() {
   online_preview_dropped_ = 0;
   online_preview_errors_ = 0;
   preview_presented_count_ = 0;
+  preview_target_frame_ = -1;
+  preview_displayed_frame_ = -1;
+  preview_displayed_pts_us_ = 0;
   online_preview_wait_status_ = false;
   online_preview_error_shown_ = false;
 }
@@ -5458,9 +5486,19 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   }
   ShowScrubTarget(frame);
   if (preview_ != nullptr) {
+    preview_target_frame_ = frame;
+    preview_displayed_frame_ = -1;
+    preview_displayed_pts_us_ = 0;
+    EnsurePreviewDecoderDevice();
     preview_->Begin(frame);
-    if (preview_timer_ != nullptr && !preview_timer_->isActive()) {
-      preview_timer_->start();
+    if (preview_timer_ != nullptr) {
+      // DP-1：Windows 默认 15.6ms 定时器粒度会把 16ms 推到 ~31ms，导致
+      // 预览帧每隔一个 tick 才被取走（P4 掉到 ~35fps）。本地预览用 10ms
+      // 截止时间，稳定落在 15.6ms 粒度上（约 64Hz）；在线预览仍用 16ms。
+      preview_timer_->setInterval(10);
+      if (!preview_timer_->isActive()) {
+        preview_timer_->start();
+      }
     }
     statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
     return;
@@ -5488,6 +5526,7 @@ void MainWindow::OnScrubTargetChanged(qint64 frame) {
   }
   ShowScrubTarget(frame);
   if (preview_ != nullptr) {
+    preview_target_frame_ = frame;
     preview_->UpdateTarget(frame);
     return;
   }
@@ -5590,8 +5629,11 @@ void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame) {
   online_preview_->Begin(std::move(source), part_path,
                          session_->video_stream_index(), std::move(snapshot),
                          frame, initial_cached);
-  if (preview_timer_ != nullptr && !preview_timer_->isActive()) {
-    preview_timer_->start();
+  if (preview_timer_ != nullptr) {
+    preview_timer_->setInterval(16);
+    if (!preview_timer_->isActive()) {
+      preview_timer_->start();
+    }
   }
 }
 
@@ -5692,6 +5734,28 @@ void MainWindow::TickOnlinePreview() {
   }
 }
 
+void MainWindow::EnsurePreviewDecoderDevice() {
+  if (preview_ == nullptr || session_ == nullptr || !session_->IsOpen()) {
+    return;
+  }
+  ID3D11Device* device = gfx_ != nullptr ? gfx_->d3d_device() : nullptr;
+  if (preview_->DeviceMatches(device)) {
+    return;
+  }
+  // 设备丢失后 GfxWidget 会重建设备；旧预览解码器仍引用旧设备（硬件帧无法
+  // 上传到新设备）。这里重开预览解码器，新设备可用时继续硬解，否则回退软件。
+  const bool resume = preview_timer_ != nullptr && preview_timer_->isActive() &&
+                      preview_target_frame_ >= 0;
+  preview_->Close();
+  preview_->Configure(session_->path_utf8(), session_->video_stream_index(),
+                      &session_->index(), device, true,
+                      session_->info().video.width,
+                      session_->info().video.height);
+  if (resume) {
+    preview_->Begin(preview_target_frame_);
+  }
+}
+
 void MainWindow::StopPreview() {
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
@@ -5721,6 +5785,8 @@ void MainWindow::OnPreviewTick() {
   if (preview_ == nullptr) {
     return;
   }
+  // DP-1：设备丢失重建后，预览解码器仍持有旧设备；重开后再继续取帧。
+  EnsurePreviewDecoderDevice();
   const bool timing = qEnvironmentVariableIsSet("LAPIAN_TIMING_LOG");
   QElapsedTimer tick_timer;
   if (timing) {
@@ -5730,9 +5796,20 @@ void MainWindow::OnPreviewTick() {
   if (preview_frame.frame == nullptr) {
     return;
   }
-  gfx_->SetVideoFrame(preview_frame.frame,
-                      session_->info().rotation.counterclockwise_degrees);
+  // DP-1：硬件帧上传失败不弹错误横幅，直接回退软件并记录 preview_hw_fallback。
+  const bool uploaded = gfx_->SetVideoFrame(
+      preview_frame.frame, session_->info().rotation.counterclockwise_degrees,
+      false);
+  if (!uploaded) {
+    if (preview_->diagnostics().hw_active) {
+      preview_->ForceSoftwareFallback("upload_failed");
+    }
+    av_frame_free(&preview_frame.frame);
+    return;
+  }
   ++preview_presented_count_;
+  preview_displayed_frame_ = preview_frame.frame_index;
+  preview_displayed_pts_us_ = preview_frame.pts_us;
   av_frame_free(&preview_frame.frame);
   if (timing && tick_timer.elapsed() > 200) {
     std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",

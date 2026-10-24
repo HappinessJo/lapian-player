@@ -144,9 +144,10 @@ void GfxWidget::PresentFrame() {
   }
 }
 
-void GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees) {
+bool GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees,
+                              bool report_error) {
   if (!EnsureReady() || !video_renderer_) {
-    return;
+    return false;
   }
   std::string error;
   bool uploaded = false;
@@ -157,12 +158,15 @@ void GfxWidget::SetVideoFrame(const AVFrame* frame, int rotation_counterclockwis
     uploaded = video_renderer_->SetFrame(frame, rotation_counterclockwise_degrees, &error);
   }
   if (!uploaded) {
-    qWarning() << "设置视频帧失败:" << QString::fromStdString(error);
-    emit deviceError(QString::fromStdString(error));
-    return;
+    if (report_error) {
+      qWarning() << "设置视频帧失败:" << QString::fromStdString(error);
+      emit deviceError(QString::fromStdString(error));
+    }
+    return false;
   }
   present_pending_ = true;
   update();
+  return true;
 }
 
 void GfxWidget::ClearVideoFrame() {

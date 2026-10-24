@@ -28,7 +28,10 @@ class GfxWidget : public QWidget {
   ~GfxWidget() override;
 
   // T1.3：把解码器的一帧复制到 GPU 并呈现；rotation 为 display matrix 的逆时针角度。
-  void SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees);
+  // DP-1：返回 false 表示上传失败（例如硬件帧来自其它设备）；预览路径据此回退
+  // 软件解码，report_error=false 时不弹错误横幅（回退由预览层记录）。
+  bool SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees,
+                     bool report_error = true);
   void ClearVideoFrame();
   // T1.2/T1.3：解码器必须用同一个 D3D11 设备，硬件帧才能跨线程/模块拷贝。
   ID3D11Device* d3d_device();

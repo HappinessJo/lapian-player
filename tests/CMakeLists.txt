@@ -329,7 +329,7 @@ set_tests_properties(lapian_waveform_test PROPERTIES
 # T2.9 拖动预览解码器：后台打开、首帧延迟、2s 目标更新下的发布帧率（开发机探针）。
 add_executable(lapian_preview_decoder_test preview_decoder_test.cpp)
 lapian_apply_common_options(lapian_preview_decoder_test)
-target_link_libraries(lapian_preview_decoder_test PRIVATE lapian_media)
+target_link_libraries(lapian_preview_decoder_test PRIVATE lapian_core lapian_media)
 lapian_copy_ffmpeg_dlls(lapian_preview_decoder_test)
 
 add_test(NAME lapian_preview_decoder_test COMMAND lapian_preview_decoder_test)

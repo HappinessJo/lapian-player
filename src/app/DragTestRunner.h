@@ -95,6 +95,15 @@ class DragTestRunner : public QObject {
   double fast_max_gap_ms_ = 0.0;
   double fast_first_present_ms_ = 0.0;
   bool fast_has_present_ = false;
+  // DP-1：+60/-60 在本片单上约 1.2s 就会撞到文件边界；之后目标不再移动，
+  // 再拿 2s 总 Present 数算 fps 会把“停在目标帧”误判成退化。这里单独记录
+  // 目标仍在移动的阶段（到第一次边界为止）的 fps。
+  bool fast_boundary_hit_ = false;
+  double fast_active_seconds_ = 0.0;
+  int fast_active_presents_ = 0;
+  // DP-1：Present 时“显示帧 vs 当前拖动目标”的滞后（绝对值）与解码诊断。
+  std::vector<double> fast_target_lag_frames_;
+  std::vector<double> fast_target_lag_ms_;
   std::chrono::steady_clock::time_point fast_last_present_{};
   QMetaObject::Connection fast_present_connection_;
 

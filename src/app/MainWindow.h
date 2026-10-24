@@ -79,6 +79,23 @@ struct OnlineRequest;
 enum class OnlineState;
 }
 
+// DP-1：本地拖动预览诊断快照。target_lag 由探针用 target_frame/displayed_frame
+// 计算；hw_active 只在预览解码器真的走 D3D11VA 时为 true。
+struct PreviewTestDiagnostics {
+  bool active = false;
+  bool hw_requested = false;
+  bool hw_active = false;
+  QString hw_fallback_reason;
+  qint64 target_frame = -1;
+  qint64 displayed_frame = -1;
+  qint64 displayed_pts_us = 0;
+  int seeks = 0;
+  int cache_hits = 0;
+  int published = 0;
+  int presented = 0;
+  int decoder_reopens = 0;
+};
+
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
 // 播放、时间轴、标记等仍由后续任务接入。
 class MainWindow : public QMainWindow {
@@ -402,6 +419,7 @@ class MainWindow : public QMainWindow {
   }
   qint64 OnlinePreviewLastPtsForTest() const { return online_preview_last_pts_; }
   int PreviewPresentedForTest() const { return preview_presented_count_; }
+  PreviewTestDiagnostics PreviewDiagnosticsForTest() const;
   int OnlinePreviewPresentedForTest() const {
     return online_preview_presented_;
   }
@@ -569,6 +587,9 @@ class MainWindow : public QMainWindow {
   void SyncLoopUi();
   void ShowScrubTarget(std::int64_t frame);
   void StopPreview();
+  // DP-1：预览解码器借用的 D3D11 设备必须与 GfxWidget 当前设备一致；
+  // 设备丢失重建后重开预览解码器。
+  void EnsurePreviewDecoderDevice();
   void ShowOpenError(const QString& message);
   void ApplySpeed(double rate);
   void AddMarkAtCurrentFrame();
@@ -705,6 +726,10 @@ class MainWindow : public QMainWindow {
   int online_preview_dropped_ = 0;
   int online_preview_errors_ = 0;
   int preview_presented_count_ = 0;
+  // DP-1 本地预览诊断（只 GUI 线程写）：当前目标与最后成功上传的预览帧。
+  std::int64_t preview_target_frame_ = -1;
+  std::int64_t preview_displayed_frame_ = -1;
+  std::int64_t preview_displayed_pts_us_ = 0;
   bool online_preview_wait_status_ = false;
   bool online_preview_error_shown_ = false;
   QElapsedTimer online_preview_wait_timer_;
