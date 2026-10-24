@@ -1,4 +1,349 @@
-# T8.10 证据：DASH 双输入（2026-10-24）
+# T8.14 证据：M2 门（2026-10-24）
+
+- **任务**：[tasks-v2.md](../../tasks-v2.md) **T8.14（M2 门）**；依据 [spec-v1.0-delta.md](../spec-v1.0-delta.md) v0.4 的 O2–O7/O9、OP1–OP8、DEC-2/DEC-5，[ADR-007](../adr/ADR-007-bilibili-online.md)，以及 T8.8 M1 的测量口径。
+- **状态**：**T8.14 完成；M2 六条硬条件逐条达标，判定 pass**。**不写“无崩溃/已证明稳定”**：M2 期间复现 1 次未定位的 teardown `0xC0000374` 与 1 次 L-1 seed 卡住，均未复现；见 §9。**不做** T8.15（大会员条件验收）、T8.16（打包/隐私）、T8.6.1b（拖动预览），也不把 4K/1080P60 写进 M2。
+- **基线**：`01b98d5`（T8.13）+ T8.14 探针变更；`ctest` 35/35；dist 34.3MB/25。**M1/M2 门、验收数字、OB 样本、`lapian-cache-1` schema 未改。**
+- **一句话**：普通用户 3/3 `OB` 用 DASH 1080P30（qn=80，30.000/29.412/25.000fps）；OP1 p95 327/366/343ms、OP2 p95 46/57/53ms、OP3 提示 0ms/取消 26ms/落点 0、OP4 300s 0 次 >200ms 停顿、OP5 20/20 p95 111.7ms 0 请求；60s 音画 p95 17.6/17.4/20.0ms、20/20 seek 精确；故障矩阵 10/10；本地 O9 0 TCP/UDP、P1/P2/P7 311.87/390.59/1.47ms、key-test 77/0。
+
+---
+
+## 1. M2 判定与六条硬条件
+
+| # | 硬条件（tasks-v2 §M2 门） | 本轮结果 | 判定 |
+|---|---|---|---|
+| 1 | 普通用户 3/3 `OB` DASH 1080P30 可播；实际 fps/档位与 S2 一致 | OB-1/2/3 均 `dash=1`、qn=80、AVC、fps 30.000/29.412/25.000；首帧 330.5/365.6/353.6ms | **pass** |
+| 2 | OP1 起播、OP2 已缓存 P7、OP3 未缓存行为、OP4 已缓存停顿、OP5 缓存命中按 DEC-2 达标 | OP1 p95 327/366/343ms（20/20/20 有效；另列 1 次 10.4s 网络拖慢与 1 次 resolve 超时）；OP2 p95 46/57/53ms；OP3 提示 0ms、取消 26ms、落点 0；OP4 300s 0 停顿；OP5 20/20 p95 111.7ms | **pass** |
+| 3 | DASH 双流 60s 音画 ≤1 帧；20 次 seek 精确；断网/过期/损坏/磁盘满可恢复 | 音画 p95 17.6/17.4/20.0ms（0.51/0.54/0.55 帧）；20/20 landing=0、PTS 0 失败；故障矩阵 10/10 + T8.13 引用 | **pass** |
+| 4 | 本地零网络 + P1/P2/P7 + F1–F8 不退化 | O9 0 TCP/UDP（137 次轮询）、P1 p95 311.87ms、P2 390.59ms、P7 1.47/0.53ms、key-test 77/0、ctest 35/35 | **pass**（F1–F8 UI 探针未全重跑，见 §9.5） |
+| 5 | **M2 门没有** 4K/1080P60 验收项；T8.15 是 B 的独立条件验收，不是门 | 本轮未做 4K/60；未把 OB-2 的降帧提示写成 60fps 可用 | **pass（条件成立）** |
+| 6 | 不把 durl 1080p（S2 1/3）写成 1080p 保证；1080p 结论必须来自 DASH | 所有 1080P/OP 数字来自 DASH qn=80；durl 只保留 M1 回归引用，未用于 M2 数字 | **pass** |
+
+**判定**：**pass（六条硬条件全部达标）**。**稳定性残余风险不冒充通过**：`0xC0000374` 与 L-1 seed 卡住尚未定位/复现（§9.1–§9.2）；T8.13 的“未复现崩溃/卡住”风险在本轮有新的观察，不得写成“无崩溃”。若按“任何未定位崩溃/卡住都不得判门”的更严格口径，应改判 blocked；本轮按 tasks-v2 §M2 门的六条硬条件判定。
+
+---
+
+## 2. 验收环境与样本
+
+- **账号**：登录普通用户，`nav vip_status=0`；SESSDATA 只从 `.secrets\bilibili_sessdata.txt` 读取，未打印/提交。
+- **机器/网络**：DESKTOP-DA6VQGS（Ryzen 5 7500F/31.6GB/RTX 4060）；同一时段、同机、同网；DASH 下载 1s 采样 4.99–10.98MB/s。
+- **OB 样本**（未改）：
+
+| 编号 | bvid | cid | 时长 | 实际 DASH |
+|---|---|---|---:|---|
+| OB-1 | `BV1BMnv6jE5S` | `42915922022` | 110.5s | qn=80，AVC/codecid=7，30.000fps，视频 31,057,770B + 音频 1,294,290B |
+| OB-2 | `BV1mA411m7pS` | `1004967230` | 95.6s | qn=80，AVC/codecid=7，29.412fps（容器约 30） |
+| OB-3 | `BV1GJ411x7h7` | `137649199` | 212.3s | qn=80，AVC/codecid=7，25.000fps，视频 69,759,161B + 音频 5,408,198B |
+
+- **OP4 补充长样本 L-1**（非 OB，不参与 §1 的 3/3）：`BV14Enb6LEDe`/`42979362482`，386s，DASH 1080P AVC **29.970fps**，普通用户可播；全缓存 58,054,247B + 8,657,239B。选择原因：OB-1/2/3 只有 96–213s，无法在不 loop、不 restart 的前提下测“连续 300s”；L-1 提供单段连续 300s，避免把 loop seek 混入停顿计数。**不改 OB 样本。**
+- **测试根**：`build\t8.14-m2\*`；Medium 副本 `%LOCALAPPDATA%\Programs\lapian-t814\lapian.exe`（integrity=medium；用于默认 AppData/本地 O9）。工作区 Low 只用于显式 `build\t8.14-m2\*` 缓存根。
+
+---
+
+## 3. 硬条件 #1：3/3 DASH 1080P30
+
+命令：`--online-m2-test`，每条独立根、冷缓存、默认 60s 播放 + 20 次 seek。
+
+| 样本 | ready | qn/codecid | dash | 视频 fps | 音频 | 音画 p95 | seek 落点/PTS | 内存峰值 | 缓存命中 |
+|---|---:|---:|---:|---:|---|---:|---|---:|---:|
+| OB-1 | 330.5ms | 80/7 | 1 | 30.000 | 30280/AAC | 17.6ms | 0/20、0/20 | 204.5MB | 45.7ms |
+| OB-2 | 365.6ms | 80/7 | 1 | 29.412 | 30280/AAC | 17.4ms | 0/20、0/20 | 204.6MB | 46.5ms |
+| OB-3 | 353.6ms | 80/7 | 1 | 25.000 | 30280/AAC | 20.0ms | 0/20、0/20 | 206.6MB | 47.3ms |
+
+- 3/3 `online_m2_result checks=34 failures=0 verdict=pass`；`playurl_requests=0`（DASH 不请求 durl）。
+- OB-2 的 29.412fps 仍触发 DEC-4 横幅/角标（T8.12 证据），本轮未重复判 60fps。
+- 音画偏差 p95 0.51/0.54/0.55 帧，max 27.0/24.5/25.2ms（0.76/0.72/0.63 帧）；`av_drift_p95_le_1frame` 与 `max_le_1_5frame` 均通过。
+- seek p50/p95/max：OB-1 75.7/111.7/157.3ms；OB-2 77.2/155.6/156.4ms；OB-3 69.2/78.0/91.0ms。落点与 PTS 均 0 失败；seek 后音频从当前帧起 0 失败。
+- EOF：跳 `last-2` 后视频 EOF 正常停住，3/3 `video_eof_stops_playback=1`，帧号停在末帧，无死锁。
+
+---
+
+## 4. OP1–OP8
+
+### 4.1 OP1 在线起播（3 条 × 冷缓存 20 次）
+
+- 口径：用户点确认 → 首帧 ready；每条先删该条缓存根；DASH 默认（未 `--force-durl`）；记录 1s 真实下载采样。
+- 每条 20 次有效样本；额外失败/拖慢尝试另列，不隐藏。
+
+| 样本 | n | min | p50 | p95 | max | ≤5s | 1s 下行 min/p50 | 判定 |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| OB-1 | 20 | 284 | 306 | **327** | 365 | 20/20 | 9.731 / 10.50MB/s | pass |
+| OB-2 | 20 | 289 | 310.5 | **365.75** | 456 | 20/20 | 10.24 / 10.739MB/s | pass |
+| OB-3 | 20 | 292 | 313 | **343.15** | 346 | 20/20 | 4.985 / 6.743MB/s | pass |
+
+- 额外尝试：OB-1 有 1 次首帧 10,393ms（E2E exit 1）与 1 次 resolve 超时（无首帧，exit 2）；OB-2/OB-3 各有 1 次首帧正常（307/308ms）但 E2E 其它检查失败的尝试。把 OB-1 的 10,393ms 一并计入时，p95 仍 365ms、**20/21 ≤5s**（≥19/20）。
+- 下行：产品真实 DASH 下载路径 1s 采样 4.985–10.98MB/s，全部 ≥1MB/s；T8.8 历史 1MB Range 1.59MB/s 仍保留。
+
+### 4.2 OP2 已缓存区单帧步进（3 条 × 20 次 ±1）
+
+- 用完整 DASH 缓存命中路径（视频+音频都 complete，本地全量索引）；每条 20 次 PgUp/PgDn。
+- 测试点距缓存边界远大于 2s；解码器热。
+
+| 样本 | 缓存命中首帧 | n | 失败 | p50 | p95 | max | 判定 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| OB-1 | 72ms | 20 | 0 | 3 | **46ms** | 51ms | pass |
+| OB-2 | 69ms | 20 | 0 | 3 | **57ms** | 57ms | pass |
+| OB-3 | 74ms | 20 | 0 | 2 | **53ms** | 60ms | pass |
+
+- 3/3 `online_m1_cache_hit cache_hit=1`、`qn=80 dash=1`；严格 ±1，0 失败；p95 全部 ≤80ms。
+
+### 4.3 OP3 未缓存区 seek（提示/取消/落点）
+
+- 冷缓存 + `--m1-throttle-bps 1048576`（只节流视频），保证测试窗口内仍有未缓存区；`--uncached-landing` 在同一缓存根续传并等下载追上。
+
+| 样本 | 目标帧 | 提示 ms | 取消 ms | 回已缓存 | landing | landing 等待 | 判定 |
+|---|---:|---:|---:|---|---|---:|---|
+| OB-1 | 3194 | 0 | 26 | 帧 161 | 3194=3194 | 21,085ms | pass |
+| OB-2 | 2747 | 0 | 26 | 帧 161 | 2747=2747 | 16,018ms | pass |
+| OB-3 | 5187 | 0 | 26 | 帧 39 | 5187=5187 | 57,640ms | pass |
+
+- 3/3 prompt 28/0 pass；landing 落点误差 0（只判这一点）。提示/取消均 ≤100ms；DEC-2 不承诺等待毫秒数。
+- **观察（不属 OP3 判定项）**：OB-3 慢 landing 运行（57.6s 等待）出现 UI 心跳 max 36,089ms，随后 `ctrl_m`/`snapshot_saved`/`ui_gap_le_200ms` 三项失败；落点仍 0。见 §9.3。OB-1/OB-2 landing 运行 29/0，UI 正常。
+
+### 4.4 OP4 已缓存区 5 分钟播放
+
+- 样本 L-1（386s，DASH 1080P AVC 29.970fps，普通用户），全缓存命中，`--m2-op4 --m2-play-seconds 300`。
+- 16ms 心跳；帧号/PTS 变化计数；画面无更新且 UI 无响应 >200ms 记一次；EOF 才 restart（本样本未触发）。
+
+| 指标 | 结果 |
+|---|---|
+| 缓存命中 ready | **69.4ms**；qn=80、dash=1；playurl/dash/quality/http 全 0 |
+| 连续播放 | **300,000ms**（无 restart、无 loop） |
+| UI gap max / >200ms 次数 | **21ms / 0** |
+| 画面停顿 >200ms（frame_stalls） | **0** |
+| 冻结停顿 >200ms（frame+UI 同时） | **0** |
+| `stalls_gt_200ms` | **0** |
+| 帧变化 / 呈现帧 | 8,988 / 8,989 |
+| 音频 underrun | **0** |
+| 内存峰值 | **121.9MB**（≤800MB） |
+| 结果 | `online_m2_op4` + **17 checks / 0 failures / pass** |
+
+### 4.5 OP5 缓存命中（断网模型，20 次）
+
+- Medium 副本 `%LOCALAPPDATA%\Programs\lapian-t814\lapian.exe`（integrity=medium），**默认 AppData 缓存根**；先以 `--m2-default-paths --m2-qn 80` 种入 OB-1 DASH 1080P（视频 31,057,770B + 音频 1,294,290B，`complete=true`），再 `--m2-op5 --m2-default-paths` 注入永不成功的 HTTP 客户端。
+- 默认根里原有 qn=64 durl 条目；种子用 `--m2-qn 80` 强制取 DASH，OP5 默认打开选最新的 qn=80 条目。
+
+| 指标 | 结果 |
+|---|---|
+| n / pass | **20 / 20** |
+| min / p50 / p95 / max | 94.7 / **98.6** / **111.7** / 112.7ms |
+| ≤2.5s | 20/20 |
+| playurl / DASH / quality API / HTTP | **0 / 0 / 0 / 0** |
+| netstat（首轮 1 次运行，40ms 轮询） | **0 条 TCP/UDP** |
+| 实际缓存 | qn=80 DASH 视频 + `audio-30280` 音频；`dash=1` |
+
+- 第一轮 20 次指标全过，但脚本未捕获第一次进程退出码，按 19/20 记；随后用 `-Wait` 干净重跑 20 次，20/20，采用后者。两次均 `qn=80 dash=1 playurl=0 http=0`。
+
+### 4.6 OP6 本地回归
+
+`scripts\bench-regression.ps1 -Suites startup,step1080`（Medium 副本；`media\proxy\proxy-V1.mp4`；热缓存；**不是** F1-A1/正式 T7.7）：
+
+| 项 | p50 | p95 | 20/20 | 门槛 |
+|---|---:|---:|---|---|
+| P1 | 295.56ms | **311.87ms** | 是 | ≤1.5s |
+| P2 | 357.18ms | **390.59ms** | 是 | ≤2.5s |
+| P7 后退 | 0.26ms | **1.47ms**（max 47.41） | 是 | ≤80ms |
+| P7 前进 | 0.27ms | **0.53ms**（max 12.94） | 是 | ≤80ms |
+
+`bench-regression`：**PASS**，9 项检查 0 gating 失败、0 项超基线。
+
+### 4.7 OP7 内存
+
+| 场景 | 结果 | 门槛 |
+|---|---:|---|
+| 空闲（Medium 副本，`--memory-test --memory-mode empty --memory-seconds 10`） | max WS **63.2MB**，`pass=1` | ≤250MB |
+| 在线 1080p30 播放（3/3 OB M2 峰值） | **204.5 / 204.6 / 206.6MB** | ≤800MB |
+| OP4 L-1 5 分钟 | **121.9MB** | ≤800MB |
+
+### 4.8 OP8 缓存配额
+
+- 默认配额 **20GB**；可配置、LRU、占用 ≤ 配额。
+- 本轮 `--online-cache-test`：**32/0 pass**；`--online-cache-manage-test`：**72/0 pass**；`ctest` 内 `lapian_online_cache_test` **396/0**（含音频键/目录/meta/配额/清空保护）。
+- DEC-5 引用 T8.3/T8.8：300MB 配额 314,572,800B，占用 283,116,589 → **188,744,706B**（≤配额）；20GB 记账 `10,737,418,599 ≤ 21,474,836,480`。不真填满 20GB（DEC-5-A）。
+
+---
+
+## 5. DASH 双流 60s 音画 / seek / EOF
+
+| 项 | OB-1 | OB-2 | OB-3 | 判定 |
+|---|---:|---:|---:|---|
+| 音画偏差 p50 | 8.3ms | 8.0ms | 10.0ms | — |
+| 音画偏差 p95 | 17.6ms（0.51 帧） | 17.4ms（0.54 帧） | 20.0ms（0.55 帧） | ≤1 帧 pass |
+| 音画偏差 max | 27.0ms | 24.5ms | 25.2ms | ≤1.5 帧 pass |
+| 20 次 seek landing 失败 | 0 | 0 | 0 | pass |
+| 20 次 seek PTS 失败 | 0 | 0 | 0 | pass |
+| seek 后音频从当前帧起失败 | 0 | 0 | 0 | pass |
+| EOF 停住 | 是 | 是 | 是 | pass |
+
+- 口径同 T8.8：音频主时钟 vs 当前显示帧 PTS（帧中心）；p95 按每条单独算；DASH 1080P GOP=5s，seek 目标只取距前关键帧 ≤2s（P9 口径）。
+- 5s GOP 点尾 seek 约 260ms，不属 P9 ≤2s 口径，记录不判失败。
+
+---
+
+## 6. 失败矩阵 / 续传 / 缓存配额（本轮 vs 引用）
+
+### 6.1 本轮复跑
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 窗口级故障矩阵 | `--online-fault-test --fault-set t8.13-core`（注入 transport/PlayUrl，不联网） | **10/10 场景、92 项 0 失败**；UI gap max **74ms**、`over_200=0`；`unverified=1`（真实休眠） |
+| 断网重试/已缓存可播/未缓存 seek 断网/看门狗/磁盘满/损坏重建/关窗/休眠注入/脱敏 | 同上 10 场景 | 全 pass；断网 624ms、失败后已缓存可播 4,177ms、未缓存 seek 4,445ms、看门狗 4,152ms、磁盘满 6ms、损坏重建 281ms、关窗 28/280ms、休眠注入 3,204ms、脱敏 222ms |
+| 缓存/配额 | `--online-cache-test`；`--online-cache-manage-test` | **32/0**；**72/0** |
+| 单测/故障单测 | `ctest` | **35/35**（含 `lapian_online_fault_test` 153 项、`lapian_online_cache_test` 396 项） |
+
+### 6.2 引用历史证据（不冒充本轮新跑）
+
+| 场景 | 证据 | 关键数字 |
+|---|---|---|
+| 断网失败 ≤5s | T8.13 `docs/perf/v2-online-faults.md` §3 | 3,981–4,155ms；错误可读；`.part` 保留；重开续传 |
+| 网络无响应看门狗 | T8.13 | 4,121–4,137ms；4s 无写盘中止 |
+| API 超时 | T8.13 | 4,515–4,529ms（真实 WinHTTP + 本机静默服务器） |
+| 403 → 备份 | T8.13 / T8.5 | 备份切换 1 次、只下缺失字节、offset 307,200 |
+| URL 过期 → 刷新 | T8.13 / T8.5 | 刷新 1 次后断点继续；刷新失败保留 `.part` |
+| 缓存损坏 → 自动 Rebuild | T8.13 | 截断 1,069,188 vs 3,207,564 → Rebuild → ready 132ms；重开 cache-hit 52ms/0 请求；标记/记录保留 |
+| 磁盘不足 | T8.13 | 5ms 可读；不写坏 `.part`；不崩 |
+| 下载中杀进程续传 | T8.8 | `.part=5,242,880` → 续传 206×2；最终 26,682,935B，hash 与完整下载一致 |
+| 4 读者 10min | T8.13 | ops 25,907、waits 522、`timeouts=0`、close 16ms、`deadlocks=0` |
+| 缓存清空保留记录 | T8.7/T8.8 | 清空删除数据；在线记录/截图保留；重建回访恢复标记 |
+| 只读 ACL | T8.3.1 | 75/0（本轮未重跑） |
+
+- **真实 CDN 故障**（403/过期/断网逐场景真打）仍不是 M2 门必需；本轮只做正常路径真实网络 + 注入矩阵。**不把注入写成真实 CDN 通过。**
+- 真实 Windows 休眠（S3/S4）未验证；窗口级 DASH 单流失败未跑（T8.13 离线 T12 已覆盖语义）。
+
+---
+
+## 7. 本地 O9 + P1/P2/P7 + F1–F8 + 内存
+
+### 7.1 O9 零网络
+
+- Medium 副本，本地打开 `media\测试.mp4`（1802 帧/1080p30），真实键盘驱动：打开→播放→步进→Ctrl+M 标记→S 截图→全屏→关窗。
+- **0 TCP / 0 UDP**：9.1s 内 `netstat -ano` 轮询 **137 次**，匹配该进程的行 **0**；未加载 `winhttp/wininet/urlmon/Qt6Network/libcurl`；进程 exit 0。
+- O9-A6：运行前后默认 `%LOCALAPPDATA%\拉片软件\cache` 与 `%APPDATA%\拉片软件\online` 文件集合 **0 新增**。
+- `--key-test`（`media\测试.mp4`）：**77 项 0 失败**；同进程 marks=11、snapshots=1；2s 长按 27 步。
+- 口径：netstat 40ms 轮询 + 模块检查，不是 ProcMon/ETW 全程抓包；与 T7.6/T8.6/T8.7 一致。
+
+### 7.2 P1/P2/P7 / F1–F8
+
+- P1/P2/P7 见 §4.6；P1/P2 是热缓存回归，不写 F1-A1/正式 T7.7 通过。
+- `--key-test` 77/0 覆盖 F1–F7 的主要键位/焦点/标记/截图交互；`ctest` 35/35 覆盖 settings/banner/snapshot/timeline 等单测。
+- **未重跑**：`--settings-test`（本轮该探针在两次进程持久化检查处卡住，未定位；不是已证实的 product fail）、`--banner-test`、`--dpi-test`、`--snapshot-test`（时间不足）。引用 T8.12/T8.13 的基线（settings/banner/dpi/snapshot 均通过）与 `ctest`；**不写 F1–F8 UI 全过**。
+
+### 7.3 内存
+
+- 空闲 63.2MB（§4.7）；在线 1080p30 峰值 ≤206.6MB；OP4 121.9MB。均低于门槛。
+
+---
+
+## 8. 网络审计 / 脱敏 / 导入表
+
+| 项 | 结果 |
+|---|---|
+| dist 导入表 | `scripts\check-imports.ps1`：**20 文件通过**；无 `QtNetwork`/TLS/`winhttp`/`wininet`/`urlmon`；仅已知 `Qt6Core → WS2_32`（Qt 运行时固定链接，仅 winsock 初始化） |
+| dist 体积 | **34.3MB / 25 文件**（P12 余量 65.7MB；本轮未重新打包，T8.16 负责安装器/隐私） |
+| 在线主机 | `api.bilibili.com`（view/playurl/nav）+ CDN；CDN 不带 Cookie（T8.2/T8.8 证据；本轮日志只有 host/path，无 Cookie） |
+| 日志脱敏 | 扫描本轮 `build\t8.14-m2` 日志：`SESSDATA=` 0、`deadline=` 0、`upsig=` 0、`auth_key=` 0、`SENTINEL` 0 |
+| 缓存 meta | 不含 SESSDATA/Cookie/签名 URL（T8.3/T8.13 证据；本轮 M2/OP5 使用同一 `lapian-cache-1` schema） |
+
+---
+
+## 9. 残余风险、未验证与缺口（不冒充通过）
+
+### 9.1 M2 期间复现的 `0xC0000374`（未定位/未复现）
+
+- 2026-10-24 16:02:31，`lapian.exe` 在 OP1 OB-2 的一次尝试中崩溃；Windows Application Error：`0xc0000374`（heap corruption），faulting module `ntdll.dll` offset `0x118095`，WER report `3729837f-e799-4edb-ad03-87206bfbdce2`（bucket 2288353925148479318）。
+- 触发上下文：该次运行先出现真实 `api.bilibili.com` resolve 超时（nav/view `status=0`，2,011/6,024ms），`resolve_result ok=0` 后 M1 探针 `QCoreApplication::exit(2)`；崩溃发生在进程退出路径。**不是 3/3/OP1–OP5 的正常路径**。
+- 之后 10 次非法 BV resolve 失败、10 次 `--online-auth-test` fake timeout、10 次正常 M1 stress、60 次 OP1b 尝试（含 2 次 E2E exit1、1 次 resolve exit2）均**未复现**；`--online-fault-test` 10/10 也未复现。**未定位，不能写“无崩溃”。**
+- M1 探针已加 `SetUnhandledExceptionFilter` 符号化栈（只探针进程，产品不安装）；若再复现可给出栈。已启用用户级 `LocalDumps`（临时调试设置，收尾移除）。
+
+### 9.2 L-1 seed 卡住（未定位/未复现）
+
+- 2026-10-24 16:21:43 起，L-1 首次 M2 seed（60s 播放、边下边缓存）在 `audio_started` 后无输出 >5 分钟；进程仍在、UI 线程 Wait，手动 kill。缓存 `.part` 已达到 total（58,054,247 / 8,657,239B）但 `complete=false`。
+- 同缓存根用 20s 播放复跑：正常 finalize，`complete=true`；随后 OP4 300s 全缓存命中 17/0 pass。**未复现，未定位。**
+- 与 T8.13 的“1 次未复现卡住”同类，但本轮是新观察；在 Beta/T8.16 前需要继续观察，不能写“已证明稳定”。
+
+### 9.3 OP3 慢 landing 的 UI 响应
+
+- OB-1/OB-2 landing 29/0；OB-3 慢 landing（1MB/s、57.6s 等待）落点 0，但 UI 心跳 max 36,089ms，随后 Ctrl+M/S 检查失败。OP3 的 DEC-2 判定项只有提示/取消/落点，均通过；**慢等待期间的 UI 响应是未解决缺口**，不写成 OP3 失败、也不写成“UI 全程流畅”。
+
+### 9.4 未验证项
+
+1. 真实 Windows 休眠/恢复（S3/S4）：只做 3s stall/读线程停顿等价注入。
+2. 真实 CDN 403/过期/断网逐场景真打：注入 + T8.5/T8.8 历史真实 403/刷新。
+3. 窗口级 DASH 单流失败：离线 T12 已覆盖语义，窗口级未跑。
+4. `--settings-test` UI 持久化探针本轮卡住，未完成；F1–F8 的 banner/dpi/snapshot UI 探针未重跑。
+5. T8.15 大会员 1080P60/4K、T8.16 打包/隐私/安装器、T8.6.1b 拖动预览：未做，不在 M2。
+
+### 9.5 口径与样本
+
+- OP4 用补充长样本 L-1（386s，29.97fps），不是 OB；OB 只有 96–213s，不能单段连续 300s。**不把 L-1 写进 3/3 OB。**
+- OP1 的网络拖慢/超时尝试已单列；有效 20 次均 ≤5s；把 10.4s 拖慢计入仍 20/21 ≤5s。
+- 60s 音画偏差是应用内时钟测量，不是外部录屏/专业同步仪；不外推为任意片源/声卡。
+- 1080P 结论只来自 DASH qn=80；durl 1080p（S2 1/3）未作为保证，也未用于 M2 数字。
+- 4K/1080P60 不在 M2；OB-2 的 29.412fps 只证明降帧提示正确，不证明 60fps 可用。
+
+---
+
+## 10. 回归汇总
+
+| 项 | 结果 |
+|---|---|
+| `ctest` | **35/35** |
+| `--online-m2-test` 3/3 | **34/0 ×3** |
+| `--online-m1-test` 冷启动 | 60 次有效样本 + 额外尝试；见 §4.1 |
+| `--online-m1-test` 缓存命中 | OP2 3/3 `28/0`；first frame 72/69/74ms |
+| `--online-cache-test` / `--online-cache-manage-test` | 32/0；72/0 |
+| `--online-fault-test` | 10/10 场景、92/0；UI gap 74ms/0 |
+| `--key-test`（`media\测试.mp4`） | **77/0** |
+| `bench-regression -Suites startup,step1080` | PASS；P1/P2/P7 见 §4.6；0 项超基线 |
+| `check-imports` | 20 文件通过；无网络导入 |
+| dist | 34.3MB/25（未重新打包；T8.16） |
+| 本地空闲内存 | 63.2MB |
+| 在线 1080p30 内存 | 204.5/204.6/206.6MB（M2）；121.9MB（OP4） |
+
+---
+
+## 11. 复现（最短）
+
+```powershell
+$env:TMP = (Join-Path (Get-Location) '.deps\tmp'); $env:TEMP=$env:TMP
+$qt = (Resolve-Path 'third_party\Qt\6.8.3\msvc2022_64').Path
+$env:PATH = "$qt\bin;$env:PATH"
+$cmake = (Resolve-Path 'third_party\cmake\3.31.6\cmake\data\bin\cmake.exe').Path
+& $cmake --build build\release --config Release
+ctest --test-dir build\release -C Release --output-on-failure
+
+# 3/3 DASH（每条独立根）
+build\release\bin\lapian.exe --online-m2-test --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --tag t8.14-ob1 --timeout-ms 120000 `
+  --online-cache-root build\t8.14-m2\ob1\cache `
+  --online-pictures build\t8.14-m2\ob1\pics `
+  --online-records-root build\t8.14-m2\ob1\rec `
+  --settings-path build\t8.14-m2\ob1\settings
+# OB-2: BV1mA411m7pS / 1004967230；OB-3: BV1GJ411x7h7 / 137649199
+
+# OP4：先用 --online-m2-test 种完整缓存，再
+build\release\bin\lapian.exe --online-m2-test --m2-op4 --m2-play-seconds 300 `
+  --bvid BV14Enb6LEDe --cid 42979362482 --timeout-ms 120000 `
+  --online-cache-root build\t8.14-m2\op4\long\cache ...
+
+# OP5：Medium 副本、默认 AppData；先 --m2-default-paths --m2-qn 80 种缓存，再
+lapian.exe --online-m2-test --m2-op5 --m2-default-paths `
+  --bvid BV1BMnv6jE5S --cid 42915922022 --timeout-ms 120000
+
+# OP3：冷缓存 + 1MB/s 节流；落点加 --uncached-landing
+build\release\bin\lapian.exe --online-m1-test --m1-throttle-bps 1048576 ...
+```
+
+- 测试根 `build\t8.14-m2\*`；日志/CSV 不入库。OP1 汇总：`build\t8.14-m2\op1b\op1b.csv`；OP5 日志：`build\t8.14-m2\op5\op5.log`。
+- 默认 AppData / Medium 证据：`%LOCALAPPDATA%\Programs\lapian-t814\lapian.exe`（integrity=medium）。工作区 Low 只用于显式 `build\t8.14-m2\*`。
+
+---
+
+## 附录 A：T8.10 DASH 双输入历史证据（原文保留）
+
+> 以下为 T8.10 的 DASH 双输入实现/测量记录（2026-10-24，非 M2 门）。保留作历史章节；M2 门判定以上文 §1–§11 为准。
+
+
+### T8.10 DASH 双输入（2026-10-24）
 
 - **任务**：[tasks-v2.md](../../tasks-v2.md) **T8.10**（M2 第 2 项）；依据 [spec-v1.0-delta.md](../spec-v1.0-delta.md) v0.4 的 O2/O3/O4/O6、OP1–OP7、DEC-2/DEC-4，[ADR-007](../adr/ADR-007-bilibili-online.md) D3/D4，[T8.9 证据](v2-online-quality.md)。
 - **状态**：**T8.10 完成（不等同 M2 门）**。DASH 视频+音频双输入、共享音频主时钟、seek fan-out、单流 EOF、durl 回退、DASH 缓存命中已实现；**未做** T8.11 渐进索引/波形、T8.12 切档策略/降帧提示、T8.13 故障加固、T8.14 M2 门、T8.15 大会员条件验收、T8.16 打包、T8.6.1b 拖动预览。

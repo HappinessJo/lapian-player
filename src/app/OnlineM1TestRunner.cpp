@@ -15,11 +15,60 @@
 #include <thread>
 #include <vector>
 
+#include <windows.h>
+
+#include <dbghelp.h>
+
+#pragma comment(lib, "dbghelp.lib")
+
 #include "app/MainWindow.h"
 #include "app/OnlineResolveDialog.h"
 
 namespace lapian::app {
 namespace {
+
+// T8.14：M2 门期间复现过一次未定位的 teardown 崩溃；探针进程记录符号化栈，
+// 产品不安装这个过滤器。
+LONG WINAPI M1CrashFilter(EXCEPTION_POINTERS* info) {
+  static LONG handled = 0;
+  if (InterlockedExchange(&handled, 1) != 0) {
+    return EXCEPTION_EXECUTE_HANDLER;
+  }
+  const DWORD code = info != nullptr && info->ExceptionRecord != nullptr
+                         ? info->ExceptionRecord->ExceptionCode
+                         : 0;
+  std::fprintf(stderr, "online_m1_crash code=0x%08lx\n",
+               static_cast<unsigned long>(code));
+  void* frames[48] = {};
+  const USHORT count = CaptureStackBackTrace(0, 48, frames, nullptr);
+  HANDLE process = GetCurrentProcess();
+  SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+  SymInitialize(process, nullptr, TRUE);
+  for (USHORT i = 0; i < count; ++i) {
+    char buffer[sizeof(SYMBOL_INFO) + 256] = {};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+    DWORD64 displacement = 0;
+    IMAGEHLP_LINE64 line{};
+    line.SizeOfStruct = sizeof(line);
+    DWORD line_displacement = 0;
+    const bool has_line = SymGetLineFromAddr64(
+        process, reinterpret_cast<DWORD64>(frames[i]), &line_displacement,
+        &line);
+    if (SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]),
+                    &displacement, symbol)) {
+      std::fprintf(stderr, "online_m1_crash_frame %u %s+0x%llx %s:%lu\n", i,
+                   symbol->Name,
+                   static_cast<unsigned long long>(displacement),
+                   has_line ? line.FileName : "", has_line ? line.LineNumber : 0);
+    } else {
+      std::fprintf(stderr, "online_m1_crash_frame %u addr=%p\n", i, frames[i]);
+    }
+    std::fflush(stderr);
+  }
+  return EXCEPTION_EXECUTE_HANDLER;
+}
 
 void Print(const QString& text) {
   std::fprintf(stderr, "%s\n", text.toUtf8().constData());
@@ -66,6 +115,7 @@ void OnlineM1TestRunner::Start() {
 }
 
 void OnlineM1TestRunner::Run() {
+  SetUnhandledExceptionFilter(M1CrashFilter);
   auto check = [this](const char* name, bool ok, const QString& detail = {}) {
     ++checks_;
     if (!ok) {
@@ -91,6 +141,10 @@ void OnlineM1TestRunner::Run() {
     window_->FocusVideoForTest();
   };
   activate_window();
+  if (options_.throttle_bytes_per_sec > 0) {
+    // T8.14 OP3：只节流视频流，让未缓存区在测试窗口内仍然存在。
+    window_->SetOnlineDownloadThrottleForTest(options_.throttle_bytes_per_sec);
+  }
   window_->OpenOnlineDialogForTest();
   OnlineResolveDialog* dialog = window_->OnlineDialogForTest();
   if (dialog == nullptr) {
@@ -196,9 +250,37 @@ void OnlineM1TestRunner::Run() {
     QCoreApplication::exit(2);
     return;
   }
-  Print(QStringLiteral("online_m1_first_frame ms=%1 state=%2")
+  const bool first_frame_dash = window_->OnlineDashForTest();
+  const double first_frame_fps = window_->OnlineDashFpsForTest() > 0.0
+                                     ? window_->OnlineDashFpsForTest()
+                                     : window_->FrameRateForTest();
+  Print(QStringLiteral(
+            "online_m1_first_frame ms=%1 state=%2 dash=%3 fps=%4")
             .arg(first_frame_ms)
-            .arg(window_->OnlineStateForTest()));
+            .arg(window_->OnlineStateForTest())
+            .arg(first_frame_dash ? 1 : 0)
+            .arg(first_frame_fps, 0, 'f', 3));
+  {
+    // T8.14 OP1：首帧后 1s 采样真实下载路径的持续下行，证明测试时段
+    // 满足 DEC-2 的 ≥1MB/s 条件（不打印签名 URL/Cookie）。
+    const qint64 rate_start_bytes = window_->OnlinePublishedBytesForTest();
+    QElapsedTimer rate_timer;
+    rate_timer.start();
+    while (rate_timer.elapsed() < 1000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const qint64 rate_ms = std::max<qint64>(1, rate_timer.elapsed());
+    const qint64 rate_bytes =
+        window_->OnlinePublishedBytesForTest() - rate_start_bytes;
+    const double rate_mbps =
+        static_cast<double>(rate_bytes) / 1048576.0 /
+        (static_cast<double>(rate_ms) / 1000.0);
+    Print(QStringLiteral("online_m1_rate bytes=%1 ms=%2 mbps=%3")
+              .arg(rate_bytes)
+              .arg(rate_ms)
+              .arg(rate_mbps, 0, 'f', 3));
+  }
   const bool cache_hit = window_->OnlineCacheHitForTest();
   Print(QStringLiteral("online_m1_cache_hit cache_hit=%1 path=%2")
             .arg(cache_hit ? 1 : 0)

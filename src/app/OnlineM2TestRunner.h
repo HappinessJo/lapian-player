@@ -19,6 +19,14 @@ struct OnlineM2TestOptions {
   bool force_durl = false;
   bool cache_hit_only = false;
   bool skip_cache_hit = false;
+  // T8.14 M2 门探针：OP4 全缓存连续播放停顿、OP5 默认 AppData 断网缓存命中。
+  // 两者都直接按 bvid/cid 打开缓存命中路径，不做 nav/view/playurl。
+  bool op4 = false;
+  bool op5 = false;
+  bool default_paths = false;
+  // T8.14 缓存种子探针：只用于强制请求 1080P 档，避免默认缓存里旧 720P
+  // 条目命中而无法生成 DASH 1080P 种子；0 = 产品默认。
+  int requested_qn = 0;
   QString cache_root;
   QString pictures_root;
   QString records_root;

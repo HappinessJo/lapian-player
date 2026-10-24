@@ -524,6 +524,7 @@ int main(int argc, char* argv[]) {
   int online_m1_timeout_ms = 20000;
   bool online_m1_cancel_only = false;
   bool online_m1_uncached_landing = false;
+  qint64 online_m1_throttle_bps = 0;
   // T8.7：完整缓存命中/断网/在线记录 E2E。
   bool online_offline_test = false;
   QString online_offline_media;
@@ -546,6 +547,10 @@ int main(int argc, char* argv[]) {
   bool online_m2_force_durl = false;
   bool online_m2_cache_hit_only = false;
   bool online_m2_skip_cache_hit = false;
+  bool online_m2_op4 = false;
+  bool online_m2_op5 = false;
+  bool online_m2_default_paths = false;
+  int online_m2_requested_qn = 0;
   int online_m2_play_seconds = 60;
   int online_m2_seeks = 20;
   // T8.11：渐进索引/波形/总帧数（真实 OB-3 + 受控慢增长离线 case）。
@@ -687,6 +692,9 @@ int main(int argc, char* argv[]) {
       online_m1_cancel_only = true;
     } else if (arguments[i] == QStringLiteral("--uncached-landing")) {
       online_m1_uncached_landing = true;
+    } else if (arguments[i] == QStringLiteral("--m1-throttle-bps") &&
+               i + 1 < arguments.size()) {
+      online_m1_throttle_bps = arguments[++i].toLongLong();
     } else if (arguments[i] == QStringLiteral("--online-buffer-test")) {
       online_buffer_test = true;
     } else if (arguments[i] == QStringLiteral("--online-quality-test")) {
@@ -699,6 +707,15 @@ int main(int argc, char* argv[]) {
       online_m2_cache_hit_only = true;
     } else if (arguments[i] == QStringLiteral("--m2-skip-cache-hit")) {
       online_m2_skip_cache_hit = true;
+    } else if (arguments[i] == QStringLiteral("--m2-op4")) {
+      online_m2_op4 = true;
+    } else if (arguments[i] == QStringLiteral("--m2-op5")) {
+      online_m2_op5 = true;
+    } else if (arguments[i] == QStringLiteral("--m2-default-paths")) {
+      online_m2_default_paths = true;
+    } else if (arguments[i] == QStringLiteral("--m2-qn") &&
+               i + 1 < arguments.size()) {
+      online_m2_requested_qn = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--m2-play-seconds") &&
                i + 1 < arguments.size()) {
       online_m2_play_seconds = arguments[++i].toInt();
@@ -1074,7 +1091,7 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_quality_test ||
-      online_m2_test || online_index_test ||
+      (online_m2_test && !online_m2_default_paths) || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
       online_m1_cache_root =
@@ -1138,7 +1155,7 @@ int main(int argc, char* argv[]) {
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
   } else if (online_m1_test || online_longpress_test || online_quality_test ||
-             online_m2_test || online_index_test) {
+             (online_m2_test && !online_m2_default_paths) || online_index_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
@@ -1328,6 +1345,7 @@ int main(int argc, char* argv[]) {
     options.pictures_root = online_m1_pictures;
     options.cancel_only = online_m1_cancel_only;
     options.uncached_landing = online_m1_uncached_landing;
+    options.throttle_bytes_per_sec = online_m1_throttle_bps;
     online_m1_runner =
         std::make_unique<lapian::app::OnlineM1TestRunner>(&window, options);
     online_m1_runner->Start();
@@ -1368,6 +1386,10 @@ int main(int argc, char* argv[]) {
     options.force_durl = online_m2_force_durl;
     options.cache_hit_only = online_m2_cache_hit_only;
     options.skip_cache_hit = online_m2_skip_cache_hit;
+    options.op4 = online_m2_op4;
+    options.op5 = online_m2_op5;
+    options.default_paths = online_m2_default_paths;
+    options.requested_qn = online_m2_requested_qn;
     options.cache_root = online_m1_cache_root;
     options.pictures_root = online_m1_pictures;
     options.records_root = online_records_root;

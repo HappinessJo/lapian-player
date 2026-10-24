@@ -10,8 +10,11 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <random>
 #include <vector>
 
@@ -19,6 +22,7 @@
 #include "app/ProcessMemory.h"
 #include "online/BiliAuth.h"
 #include "online/BiliResolveClient.h"
+#include "online/IHttpClient.h"
 #include "online/Sessdata.h"
 #include "online/WinHttpClient.h"
 
@@ -93,6 +97,25 @@ Secret ReadSecret(const QString& explicit_path) {
   return secret;
 }
 
+// T8.14 OP4/OP5：缓存命中路径不应发起任何 HTTP；一旦被调用就计数并失败。
+class CountingHttpClient final : public lapian::online::IHttpClient {
+ public:
+  explicit CountingHttpClient(std::shared_ptr<std::atomic<int>> calls)
+      : calls_(std::move(calls)) {}
+
+  lapian::online::HttpResponse Get(
+      const lapian::online::HttpRequest&,
+      const lapian::online::HttpCancelToken&) override {
+    calls_->fetch_add(1);
+    lapian::online::HttpResponse response;
+    response.error = QStringLiteral("T8.14 缓存命中探针：HTTP 不应被调用");
+    return response;
+  }
+
+ private:
+  std::shared_ptr<std::atomic<int>> calls_;
+};
+
 }  // namespace
 
 OnlineM2TestRunner::OnlineM2TestRunner(MainWindow* window,
@@ -144,6 +167,7 @@ bool OnlineM2TestRunner::StartAndWaitReady(const QString& bvid,
   request.title = title;
   request.duration_ms = duration_ms;
   request.sessdata = sessdata;
+  request.requested_qn = options_.requested_qn;
   QElapsedTimer timer;
   timer.start();
   const bool started = window_->StartOnlineSession(request);
@@ -183,6 +207,235 @@ void OnlineM2TestRunner::Run() {
               options_.cache_hit_only ? 1 : 0, options_.play_seconds,
               options_.seeks);
   std::fflush(stdout);
+
+  // T8.14 OP4/OP5：直接打开缓存命中路径，不做 nav/view/playurl；注入
+  // 永不成功的 HTTP 客户端，命中失败时也不会偷偷联网。
+  if (options_.op4 || options_.op5) {
+    auto http_calls = std::make_shared<std::atomic<int>>(0);
+    window_->SetOnlineHttpClientForTest(
+        std::make_unique<CountingHttpClient>(http_calls));
+    lapian::app::OnlineRequest request;
+    request.bvid = options_.bvid;
+    request.cid = options_.cid;
+    request.page = 1;
+    request.title = options_.op4 ? QStringLiteral("T8.14 OP4")
+                                 : QStringLiteral("T8.14 OP5");
+    request.duration_ms = 0;
+    request.requested_qn = options_.requested_qn;
+    QElapsedTimer open_timer;
+    open_timer.start();
+    const bool started = window_->StartOnlineSession(request);
+    const bool ready =
+        started && window_->WaitForOnlineReadyForTest(options_.timeout_ms);
+    const double ready_ms =
+        static_cast<double>(open_timer.nsecsElapsed()) / 1.0e6;
+    check(QStringLiteral("cache_only_started"), started,
+          window_->OnlineLastErrorForTest());
+    check(QStringLiteral("cache_only_ready"), ready,
+          window_->OnlineLastErrorForTest());
+    if (!ready) {
+      window_->ShutdownOnlineForTest();
+      finish();
+      return;
+    }
+    check(QStringLiteral("cache_only_hit"), window_->OnlineCacheHitForTest());
+    check(QStringLiteral("cache_only_dash"), window_->OnlineDashForTest());
+    check(QStringLiteral("cache_only_qn80"), window_->OnlineQualityForTest() == 80,
+          QStringLiteral("qn=%1").arg(window_->OnlineQualityForTest()));
+    check(QStringLiteral("cache_only_first_frame_le_2500ms"),
+          ready_ms <= 2500.0,
+          QStringLiteral("ms=%1").arg(ready_ms, 0, 'f', 1));
+    check(QStringLiteral("cache_only_zero_playurl"),
+          window_->OnlinePlayUrlRequestsForTest() == 0,
+          QStringLiteral("n=%1").arg(window_->OnlinePlayUrlRequestsForTest()));
+    check(QStringLiteral("cache_only_zero_dash"),
+          window_->OnlineDashRequestsForTest() == 0,
+          QStringLiteral("n=%1").arg(window_->OnlineDashRequestsForTest()));
+    check(QStringLiteral("cache_only_zero_quality_api"),
+          window_->OnlineQualityRequestsForTest() == 0,
+          QStringLiteral("n=%1").arg(window_->OnlineQualityRequestsForTest()));
+    check(QStringLiteral("cache_only_zero_http"), http_calls->load() == 0,
+          QStringLiteral("n=%1").arg(http_calls->load()));
+    std::printf(
+        "online_m2_cache_only mode=%s ready_ms=%.1f qn=%d dash=%d playurl=%lld "
+        "dash_requests=%lld quality_requests=%d http=%d\n",
+        options_.op4 ? "op4" : "op5", ready_ms,
+        window_->OnlineQualityForTest(), window_->OnlineDashForTest() ? 1 : 0,
+        static_cast<long long>(window_->OnlinePlayUrlRequestsForTest()),
+        static_cast<long long>(window_->OnlineDashRequestsForTest()),
+        window_->OnlineQualityRequestsForTest(), http_calls->load());
+    std::fflush(stdout);
+
+    if (options_.op5) {
+      window_->ShutdownOnlineForTest();
+      finish();
+      return;
+    }
+
+    // OP4：全缓存、连续播放；16ms 心跳统计 UI gap / 帧更新停顿。
+    const bool indexed = PumpUntil(
+        [this]() { return window_->IndexReadyForTest(); }, 30000,
+        "op4_index");
+    check(QStringLiteral("op4_index_ready"), indexed,
+          QStringLiteral("frames=%1")
+              .arg(static_cast<long long>(window_->IndexFrameCountForTest())));
+    window_->GoToFrameForTest(0);
+    const bool at_zero = PumpUntil(
+        [this]() {
+          return window_->OnlineSeekIdleForTest() &&
+                 window_->CurrentFrameForTest() == 0;
+        },
+        5000, "op4_frame0");
+    check(QStringLiteral("op4_frame0"), at_zero,
+          QStringLiteral("frame=%1")
+              .arg(static_cast<long long>(window_->CurrentFrameForTest())));
+
+    QElapsedTimer clock;
+    clock.start();
+    qint64 last_tick_ms = clock.elapsed();
+    qint64 last_frame = window_->CurrentFrameForTest();
+    qint64 last_pts = window_->CurrentPtsUsForTest();
+    qint64 last_change_ms = clock.elapsed();
+    qint64 ui_gap_max_ms = 0;
+    int ui_gaps_gt_200 = 0;
+    int frame_stalls_gt_200 = 0;
+    int freeze_stalls_gt_200 = 0;
+    int frame_changes = 0;
+    bool in_frame_stall = false;
+    std::uint64_t peak_ws = 0;
+    qint64 last_memory_ms = 0;
+    QTimer heartbeat;
+    heartbeat.setInterval(16);
+    heartbeat.setTimerType(Qt::PreciseTimer);
+    QObject::connect(&heartbeat, &QTimer::timeout, [&]() {
+      const qint64 now = clock.elapsed();
+      const qint64 gap = now - last_tick_ms;
+      last_tick_ms = now;
+      ui_gap_max_ms = std::max(ui_gap_max_ms, gap);
+      const qint64 frame = window_->CurrentFrameForTest();
+      const qint64 pts = window_->CurrentPtsUsForTest();
+      const bool changed = frame != last_frame || pts != last_pts;
+      if (changed) {
+        ++frame_changes;
+        last_frame = frame;
+        last_pts = pts;
+        last_change_ms = now;
+        in_frame_stall = false;
+      }
+      if (gap > 200) {
+        ++ui_gaps_gt_200;
+        // P5：UI 事件循环冻结且画面在同一间隔内没有更新。
+        if (!changed) {
+          ++freeze_stalls_gt_200;
+        }
+      }
+      if (window_->OnlinePlayingForTest() &&
+          now - last_change_ms > 200 && !in_frame_stall) {
+        ++frame_stalls_gt_200;
+        in_frame_stall = true;
+      }
+      if (now - last_memory_ms >= 1000) {
+        last_memory_ms = now;
+        ProcessMemorySample sample;
+        if (SampleProcessMemory(&sample)) {
+          peak_ws = std::max(peak_ws, sample.working_set_bytes);
+        }
+      }
+    });
+    const qulonglong underruns_before = window_->AudioUnderrunCountForTest();
+    const int presented_before = window_->PresentedFrameCountForTest();
+    heartbeat.start();
+    window_->StartPlaybackForTest();
+    last_change_ms = clock.elapsed();
+    last_frame = window_->CurrentFrameForTest();
+    last_pts = window_->CurrentPtsUsForTest();
+    const qint64 play_ms =
+        static_cast<qint64>(options_.play_seconds) * 1000;
+    qint64 steady_ms = 0;
+    qint64 segment_start_ms = clock.elapsed();
+    int restarts = 0;
+    while (true) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+      QThread::msleep(1);
+      const qint64 now = clock.elapsed();
+      if (steady_ms + (now - segment_start_ms) >= play_ms) {
+        break;
+      }
+      if (!window_->OnlinePlayingForTest()) {
+        steady_ms += now - segment_start_ms;
+        if (steady_ms >= play_ms) {
+          break;
+        }
+        if (!window_->OnlineReadyForTest()) {
+          break;
+        }
+        // 素材短于 5 分钟：播到 EOF 后回到 0 继续；这是探针动作，
+        // 停心跳并重置基线，避免把有意 seek 算成播放停顿。
+        ++restarts;
+        heartbeat.stop();
+        window_->GoToFrameForTest(0);
+        const bool restarted = PumpUntil(
+            [this]() {
+              return window_->OnlineSeekIdleForTest() &&
+                     window_->CurrentFrameForTest() == 0;
+            },
+            5000, "op4_restart");
+        window_->StartPlaybackForTest();
+        last_frame = window_->CurrentFrameForTest();
+        last_pts = window_->CurrentPtsUsForTest();
+        last_change_ms = clock.elapsed();
+        in_frame_stall = false;
+        segment_start_ms = clock.elapsed();
+        heartbeat.start();
+        if (!restarted) {
+          break;
+        }
+      }
+    }
+    if (window_->OnlinePlayingForTest()) {
+      steady_ms += clock.elapsed() - segment_start_ms;
+    }
+    window_->PausePlaybackForTest();
+    heartbeat.stop();
+    const qulonglong underruns =
+        window_->AudioUnderrunCountForTest() - underruns_before;
+    const int presented =
+        window_->PresentedFrameCountForTest() - presented_before;
+    const int stalls_gt_200 =
+        std::max(frame_stalls_gt_200, freeze_stalls_gt_200);
+    std::printf(
+        "online_m2_op4 steady_ms=%lld restarts=%d ui_gap_max_ms=%lld "
+        "ui_gaps_gt_200=%d frame_stalls_gt_200=%d freeze_stalls_gt_200=%d "
+        "stalls_gt_200=%d frame_changes=%d presented=%d underruns=%llu "
+        "memory_peak_mb=%.1f\n",
+        static_cast<long long>(steady_ms), restarts,
+        static_cast<long long>(ui_gap_max_ms), ui_gaps_gt_200,
+        frame_stalls_gt_200, freeze_stalls_gt_200, stalls_gt_200,
+        frame_changes, presented,
+        static_cast<unsigned long long>(underruns),
+        static_cast<double>(peak_ws) / (1024.0 * 1024.0));
+    std::fflush(stdout);
+    check(QStringLiteral("op4_steady_300s"), steady_ms >= play_ms - 1000,
+          QStringLiteral("steady_ms=%1 target=%2")
+              .arg(static_cast<long long>(steady_ms))
+              .arg(play_ms));
+    check(QStringLiteral("op4_stalls_gt_200_zero"), stalls_gt_200 == 0,
+          QStringLiteral("stalls=%1 frame=%2 freeze=%3")
+              .arg(stalls_gt_200)
+              .arg(frame_stalls_gt_200)
+              .arg(freeze_stalls_gt_200));
+    check(QStringLiteral("op4_underruns_zero"), underruns == 0,
+          QStringLiteral("n=%1").arg(static_cast<unsigned long long>(underruns)));
+    check(QStringLiteral("op4_memory_le_800mb"),
+          peak_ws > 0 && peak_ws <= 800ull * 1024ull * 1024ull,
+          QStringLiteral("peak_mb=%1")
+              .arg(static_cast<double>(peak_ws) / (1024.0 * 1024.0), 0, 'f', 1));
+    check(QStringLiteral("op4_frames_advanced"), presented > 0,
+          QStringLiteral("presented=%1").arg(presented));
+    window_->ShutdownOnlineForTest();
+    finish();
+    return;
+  }
 
   Secret secret = ReadSecret(options_.sessdata_file);
   if (!secret.ok) {

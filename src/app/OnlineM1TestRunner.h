@@ -21,6 +21,8 @@ struct OnlineM1TestOptions {
   // T8.8 OP3：未缓存 seek 后等下载追上，验证落点误差 0（默认不等，避免
   // 20 次冷启动测量被整片下载拖慢）。
   bool uncached_landing = false;
+  // T8.14 OP3：只在探针内节流视频下载，保证测试期间仍有“未缓存区”可测。
+  qint64 throttle_bytes_per_sec = 0;
 };
 
 // T8.6 真实窗口 E2E：输入 BV → 解析确认 → 首帧 → Space → PgUp/PgDn → seek →
