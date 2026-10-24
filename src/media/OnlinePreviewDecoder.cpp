@@ -5,8 +5,13 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdarg>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -27,6 +32,10 @@ extern "C" {
 #pragma warning(pop)
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include "media/FrameIndex.h"
 #include "media/VideoDecoder.h"
 #include "online/GrowingSource.h"
@@ -34,15 +43,31 @@ extern "C" {
 namespace lapian::media {
 namespace {
 
-// 预览解码主动让出 CPU 的切片；与本地 PreviewDecoder 相同，避免一次目标
-// 长时间占住预览线程而无法响应新目标/松手。
+// 预览解码主动让出 CPU 的切片；与本地 PreviewDecoder 相同。
 constexpr auto kDecodeSlice = std::chrono::milliseconds(15);
-// 预览最长边约 1280；4K/1080p 都先降采样再上传，避免 UI 线程上传大帧。
-constexpr int kPreviewMaxSide = 1280;
-// 反向拖动最近帧缓存：只存已降采样的 NV12；24 帧约 33MB @720p，End/Close 释放。
-constexpr std::size_t kMaxCachedFrames = 24;
-// 正向小步拖动直接续解，避免每个目标都从关键帧重解。
+// 预览最长边 1024：比本地 1280 略低，但 16:9 一帧 1024x576 NV12 约 0.84MiB，
+// 72 帧约 60.7MiB；一次 60 帧来回拖动（15→75→15）可以整段留在缓存里，
+// 反向跨过缓存边界时不会重新解 27 帧造成空档。
+constexpr int kPreviewMaxSide = 1024;
+// 远跳粗帧最长边 320；只用于“先出一张画面”，随后必须精确目标或更近缓存。
+constexpr int kCoarseMaxSide = 320;
+// 有界缓存：72 帧 x 1024x576 NV12 约 60.7MiB，低于 64MiB 预算。
+constexpr std::size_t kMaxCachedFrames = 72;
+constexpr std::size_t kCacheBudgetBytes = 64u * 1024u * 1024u;
+// 正向连续解码窗口；目标在该窗口内直接续解，不重新 seek。
 constexpr std::int64_t kContinueWindowUs = 2'000'000;
+// 目标在解码期间回退、当前目标先命中缓存时，把当前目标之后最多 10 帧
+// 继续解完并缓存（不发布），避免下一次向前拖动缺帧重新 seek（长 GOP 冷启动
+// 后缓存窗口上沿不完整）。
+constexpr std::int64_t kCompletionLookaheadFrames = 10;
+// 反向预取：只解“目标关键帧之前最近 30 帧”，覆盖连续反向拖动。
+constexpr std::int64_t kBackwardPrefetchFrames = 30;
+// 远跳阈值（与 DragStrategy FarJump 一致）：>=300 帧才先出粗帧。
+constexpr std::int64_t kFarJumpFrames = 300;
+// 一次 Process 最多服务多少个目标（避免目标抖动时无限循环）。
+constexpr int kMaxProcessIterations = 6;
+// 目标跨到解码起点另一侧超过该步长时，放弃当前解码重新服务新目标。
+constexpr std::int64_t kOppositeSideStep = 8;
 
 struct CachedPreview {
   std::int64_t pts_us = 0;
@@ -50,13 +75,56 @@ struct CachedPreview {
   AVFrame* frame = nullptr;
 };
 
+std::int64_t Distance(std::int64_t a, std::int64_t b) {
+  return a >= b ? a - b : b - a;
+}
+
+bool LogEnabled() {
+  static const bool enabled =
+      std::getenv("LAPIAN_ONLINE_PREVIEW_LOG") != nullptr;
+  return enabled;
+}
+
+void Log(const char* format, ...) {
+  if (!LogEnabled()) {
+    return;
+  }
+  static const auto log_start = std::chrono::steady_clock::now();
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - log_start)
+                           .count();
+  va_list arguments;
+  va_start(arguments, format);
+  std::fprintf(stderr, "OPD t=%lldms ", static_cast<long long>(elapsed));
+  std::vfprintf(stderr, format, arguments);
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+  va_end(arguments);
+}
+
 }  // namespace
 
 struct OnlinePreviewDecoder::Impl {
+  // 一次目标/索引快照；worker 解码期间目标仍可变化，发布判定读最新值。
+  struct TargetSnapshot {
+    bool active = false;
+    bool cached = false;
+    std::int64_t target = 0;
+    std::uint64_t generation = 0;
+    int direction = 0;
+    std::shared_ptr<const FrameIndex> index;
+  };
+
   mutable std::mutex mutex;
   std::condition_variable condition;
   std::thread thread;
+  std::thread prefetch_thread;
+
   bool running = false;
+  bool stop = false;
+  bool active = false;
+  // Pause 时让 worker/预取线程退出并关闭 reader（不释缓存），Resume 重启线程。
+  bool pause_requested = false;
 
   std::shared_ptr<lapian::online::GrowingSource> source;
   std::string path;
@@ -66,12 +134,9 @@ struct OnlinePreviewDecoder::Impl {
 
   std::int64_t target_frame = 0;
   bool target_cached = false;
-  // <0：目标在回退，只发布目标帧；>0：目标在前进，可连续发布中间帧。
   int target_direction = 0;
   std::uint64_t generation = 0;
   std::uint64_t handled_generation = 0;
-  bool active = false;
-  bool stop = false;
   bool waiting = true;
 
   bool open_attempted = false;
@@ -82,17 +147,50 @@ struct OnlinePreviewDecoder::Impl {
   std::int64_t latest_pts_us = 0;
   std::int64_t latest_frame_index = -1;
   std::uint64_t latest_generation = 0;
+  bool latest_coarse = false;
+  bool latest_from_cache = false;
+
+  // 上一次真正被 UI 取走的帧；发布判定以它为基准，保证单调靠近目标。
+  std::int64_t last_delivered_frame = -1;
+  bool last_delivered_coarse = false;
+
   std::deque<CachedPreview> cache;
+  std::size_t cache_bytes = 0;
+  std::size_t cache_peak_bytes = 0;
   SwsContext* sws = nullptr;
+  SwsContext* coarse_sws = nullptr;
+
   std::int64_t last_pts_us = 0;
+  std::int64_t last_decoded_frame = -1;
   bool position_valid = false;
+
+  // 反向预取请求：保证 [prefetch_from, prefetch_to] 进缓存（目标回退方向的
+  // 下一段，通常是“缓存窗口下沿之前的 30 帧”）。
+  std::condition_variable prefetch_condition;
+  bool prefetch_stop = false;
+  std::int64_t prefetch_from = -1;
+  std::int64_t prefetch_to = -1;
+  // 只在“请求区间/方向真正变化”时递增，避免 60Hz 目标更新反复取消
+  // 正在预取的同一段。
+  std::uint64_t prefetch_epoch = 0;
+  std::int64_t prefetch_served_to = -1;
 
   std::uint64_t frames_published = 0;
   std::uint64_t stale_dropped = 0;
   std::uint64_t seek_count = 0;
+  std::uint64_t cache_hits = 0;
+  std::uint64_t cache_misses = 0;
+  std::uint64_t coarse_published = 0;
+  std::uint64_t prefetched_frames = 0;
+  std::uint64_t decoded_frames = 0;
   std::int64_t last_published_frame = -1;
 
   ~Impl() { Close(); }
+
+  bool IsActive() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return active && !stop;
+  }
 
   void FreeLatestLocked() {
     if (latest != nullptr) {
@@ -101,6 +199,8 @@ struct OnlinePreviewDecoder::Impl {
     latest_pts_us = 0;
     latest_frame_index = -1;
     latest_generation = 0;
+    latest_coarse = false;
+    latest_from_cache = false;
   }
 
   void ClearCacheLocked() {
@@ -110,87 +210,77 @@ struct OnlinePreviewDecoder::Impl {
       }
     }
     cache.clear();
+    cache_bytes = 0;
   }
 
-  void End() {
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      stop = true;
-      active = false;
-      waiting = false;
-      ++generation;
-      if (interrupt != nullptr) {
-        interrupt->store(true, std::memory_order_relaxed);
+  static std::size_t FrameBytes(const AVFrame* frame) {
+    if (frame == nullptr || frame->width <= 0 || frame->height <= 0) {
+      return 0;
+    }
+    return static_cast<std::size_t>(frame->width) *
+           static_cast<std::size_t>(frame->height) * 3u / 2u;
+  }
+
+  void UpdateCachePeakLocked() {
+    cache_peak_bytes = std::max(cache_peak_bytes, cache_bytes);
+  }
+
+  // 按“距当前目标最远”淘汰，保证目标两侧都留帧（+-1 振荡/反向都靠缓存）。
+  void EvictCacheLocked(std::int64_t anchor) {
+    while (!cache.empty() &&
+           (cache.size() > kMaxCachedFrames || cache_bytes > kCacheBudgetBytes)) {
+      std::size_t victim = cache.size();
+      std::int64_t victim_distance = -1;
+      for (std::size_t i = 0; i < cache.size(); ++i) {
+        const std::int64_t distance =
+            cache[i].frame_index >= 0
+                ? Distance(cache[i].frame_index, anchor)
+                : std::numeric_limits<std::int64_t>::max();
+        if (distance > victim_distance) {
+          victim_distance = distance;
+          victim = i;
+        }
       }
-      condition.notify_all();
-    }
-    if (thread.joinable()) {
-      thread.join();
-    }
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      running = false;
-      FreeLatestLocked();
-      ClearCacheLocked();
-      if (sws != nullptr) {
-        sws_freeContext(sws);
-        sws = nullptr;
+      if (victim >= cache.size()) {
+        break;
       }
-      position_valid = false;
-      last_pts_us = 0;
-      target_cached = false;
-      target_frame = 0;
-      target_direction = 0;
-      generation = 0;
-      handled_generation = 0;
-      open_attempted = false;
-      open_ok = false;
-      interrupt.reset();
+      cache_bytes -= FrameBytes(cache[victim].frame);
+      if (cache[victim].frame != nullptr) {
+        av_frame_free(&cache[victim].frame);
+      }
+      cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(victim));
     }
+    UpdateCachePeakLocked();
   }
 
-  void Close() {
-    End();
-    std::lock_guard<std::mutex> lock(mutex);
-    source.reset();
-    path.clear();
-    stream_index = -1;
-    index.reset();
-    error.clear();
-    waiting = true;
-  }
-
-  bool IsCurrent(std::uint64_t requested_generation) const {
-    std::lock_guard<std::mutex> lock(mutex);
-    return !stop && active && generation == requested_generation;
-  }
-
-  void SetError(const std::string& text) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (stop) {
+  // 接管 frame；重复帧替换旧副本，超预算按距 anchor 最远淘汰。
+  void CacheFrameLocked(AVFrame* frame, std::int64_t pts_us,
+                        std::int64_t frame_index, std::int64_t anchor) {
+    if (frame == nullptr || frame_index < 0) {
+      if (frame != nullptr) {
+        av_frame_free(&frame);
+      }
       return;
     }
-    error = text;
-    active = false;
-    waiting = false;
-    ++generation;
+    for (CachedPreview& cached : cache) {
+      if (cached.frame_index == frame_index) {
+        cache_bytes -= FrameBytes(cached.frame);
+        if (cached.frame != nullptr) {
+          av_frame_free(&cached.frame);
+        }
+        cached.pts_us = pts_us;
+        cached.frame = frame;
+        cache_bytes += FrameBytes(frame);
+        EvictCacheLocked(anchor);
+        return;
+      }
+    }
+    cache.push_back(CachedPreview{pts_us, frame_index, frame});
+    cache_bytes += FrameBytes(frame);
+    EvictCacheLocked(anchor);
   }
 
-  void SetWaiting(bool value, std::uint64_t requested_generation) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (stop || !active || generation != requested_generation) {
-      return;
-    }
-    waiting = value;
-  }
-
-  AVFrame* CloneCached(std::int64_t frame_index,
-                       std::uint64_t requested_generation) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (stop || !active) {
-      return nullptr;
-    }
-    (void)requested_generation;
+  AVFrame* CloneExactLocked(std::int64_t frame_index) const {
     for (auto it = cache.rbegin(); it != cache.rend(); ++it) {
       if (it->frame_index == frame_index && it->frame != nullptr) {
         return av_frame_clone(it->frame);
@@ -199,29 +289,150 @@ struct OnlinePreviewDecoder::Impl {
     return nullptr;
   }
 
-  void CacheFrame(AVFrame* frame, std::int64_t pts_us,
-                  std::int64_t frame_index,
-                  std::uint64_t requested_generation) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (stop || !active) {
+  bool HasExactLocked(std::int64_t frame_index) const {
+    for (const CachedPreview& cached : cache) {
+      if (cached.frame_index == frame_index && cached.frame != nullptr) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool RangeCachedLocked(std::int64_t from, std::int64_t to) const {
+    if (from > to) {
+      return true;
+    }
+    for (std::int64_t frame = from; frame <= to; ++frame) {
+      if (!HasExactLocked(frame)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // 缓存里“比上一张更接近目标且不越过目标”的最近帧。用于目标未命中精确
+  // 缓存时立即给一张更近的画面，而不是等整段解码。
+  AVFrame* CloneClosestLocked(std::int64_t target,
+                              std::int64_t* out_frame) const {
+    if (last_delivered_frame < 0 || out_frame == nullptr) {
+      return nullptr;
+    }
+    std::int64_t best = -1;
+    std::int64_t best_distance = std::numeric_limits<std::int64_t>::max();
+    for (const CachedPreview& cached : cache) {
+      if (cached.frame == nullptr || cached.frame_index < 0) {
+        continue;
+      }
+      bool in_range = false;
+      if (target > last_delivered_frame) {
+        in_range = cached.frame_index > last_delivered_frame &&
+                   cached.frame_index < target;
+      } else if (target < last_delivered_frame) {
+        in_range = cached.frame_index < last_delivered_frame &&
+                   cached.frame_index > target;
+      }
+      if (!in_range) {
+        continue;
+      }
+      const std::int64_t distance = Distance(cached.frame_index, target);
+      if (distance < best_distance) {
+        best_distance = distance;
+        best = cached.frame_index;
+      }
+    }
+    if (best < 0) {
+      return nullptr;
+    }
+    *out_frame = best;
+    return CloneExactLocked(best);
+  }
+
+  // 已发布的 latest 是否仍对当前目标“有用”：精确、或比上一张更接近且未越过
+  // 目标。目标 +-1 振荡时不要因为方向变化就清空 latest。
+  bool LatestUsefulLocked(std::int64_t target) const {
+    if (latest == nullptr) {
+      return false;
+    }
+    if (last_delivered_frame < 0) {
+      return latest_coarse || latest_frame_index == target;
+    }
+    if (latest_coarse) {
+      if (target < last_delivered_frame) {
+        return latest_frame_index < last_delivered_frame;
+      }
+      if (target > last_delivered_frame) {
+        return latest_frame_index > last_delivered_frame;
+      }
+      return false;
+    }
+    if (latest_frame_index == target) {
+      return true;
+    }
+    if (Distance(latest_frame_index, target) >=
+        Distance(last_delivered_frame, target)) {
+      return false;
+    }
+    if (target > last_delivered_frame) {
+      return latest_frame_index > last_delivered_frame &&
+             latest_frame_index < target;
+    }
+    if (target < last_delivered_frame) {
+      return latest_frame_index < last_delivered_frame &&
+             latest_frame_index > target;
+    }
+    return false;
+  }
+
+  // 统一的“发布更近帧”判定；调用方持锁。
+  bool ShouldPublishRegularLocked(std::int64_t frame_index,
+                                  std::int64_t target) const {
+    if (frame_index == target) {
+      return true;
+    }
+    if (last_delivered_frame < 0) {
+      return false;
+    }
+    std::int64_t reference = last_delivered_frame;
+    if (latest != nullptr && !latest_coarse) {
+      if (Distance(latest_frame_index, target) <= Distance(frame_index, target)) {
+        return false;
+      }
+      reference = latest_frame_index;
+    }
+    if (Distance(frame_index, target) >= Distance(reference, target)) {
+      return false;
+    }
+    if (reference < target) {
+      return frame_index > reference && frame_index < target;
+    }
+    if (reference > target) {
+      return frame_index < reference && frame_index > target;
+    }
+    return false;
+  }
+
+  // 接管 frame。
+  void PublishLocked(AVFrame* frame, std::int64_t pts_us,
+                     std::int64_t frame_index, std::uint64_t session,
+                     bool coarse, bool from_cache) {
+    if (stop || !active || frame == nullptr) {
       av_frame_free(&frame);
       return;
     }
-    (void)requested_generation;
-    cache.push_back(CachedPreview{pts_us, frame_index, frame});
-    while (cache.size() > kMaxCachedFrames) {
-      CachedPreview& oldest = cache.front();
-      if (oldest.frame != nullptr) {
-        av_frame_free(&oldest.frame);
-      }
-      cache.pop_front();
+    // 精确目标已经呈现：更远的帧不能覆盖它，粗帧更不行。
+    if (last_delivered_frame == target_frame && !last_delivered_coarse &&
+        !(frame_index == target_frame && !coarse)) {
+      av_frame_free(&frame);
+      return;
     }
-  }
-
-  void Publish(AVFrame* frame, std::int64_t pts_us, std::int64_t frame_index,
-               std::uint64_t requested_generation) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (stop || !active) {
+    // 暂存的精确目标已就位时，不允许更远的普通帧覆盖。
+    if (!coarse && latest != nullptr && !latest_coarse &&
+        latest_frame_index == target_frame && frame_index != target_frame) {
+      av_frame_free(&frame);
+      return;
+    }
+    // 普通帧必须比 pending/last 更接近目标；粗帧只做方向性占位。
+    if (!coarse && !ShouldPublishRegularLocked(frame_index, target_frame)) {
       av_frame_free(&frame);
       return;
     }
@@ -231,12 +442,53 @@ struct OnlinePreviewDecoder::Impl {
     latest = frame;
     latest_pts_us = pts_us;
     latest_frame_index = frame_index;
-    latest_generation = requested_generation;
+    latest_generation = session;
+    latest_coarse = coarse;
+    latest_from_cache = from_cache;
     ++frames_published;
     last_published_frame = frame_index;
+    if (coarse) {
+      ++coarse_published;
+    }
+    Log("publish frame=%lld target=%lld last=%lld coarse=%d cache=%d",
+        static_cast<long long>(frame_index),
+        static_cast<long long>(target_frame),
+        static_cast<long long>(last_delivered_frame), coarse ? 1 : 0,
+        from_cache ? 1 : 0);
   }
 
-  AVFrame* ScalePreviewFrame(const AVFrame* source_frame) {
+  void PublishExactLocked(AVFrame* frame, std::int64_t frame_index,
+                          std::uint64_t session, bool from_cache) {
+    if (frame == nullptr) {
+      return;
+    }
+    const std::int64_t pts =
+        index != nullptr ? index->PtsOfFrame(frame_index) : 0;
+    PublishLocked(frame, pts, frame_index, session, false, from_cache);
+  }
+
+  void SetWaiting(bool value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (stop || !active) {
+      return;
+    }
+    waiting = value;
+  }
+
+  TargetSnapshot Snapshot() {
+    TargetSnapshot snapshot;
+    std::lock_guard<std::mutex> lock(mutex);
+    snapshot.active = active && !stop;
+    snapshot.cached = target_cached;
+    snapshot.target = target_frame;
+    snapshot.generation = generation;
+    snapshot.direction = target_direction;
+    snapshot.index = index;
+    return snapshot;
+  }
+
+  AVFrame* ScaleToNv12(const AVFrame* source_frame, int max_side,
+                       SwsContext** context) {
     if (source_frame == nullptr || source_frame->data[0] == nullptr ||
         source_frame->width <= 0 || source_frame->height <= 0) {
       return nullptr;
@@ -244,8 +496,8 @@ struct OnlinePreviewDecoder::Impl {
     const int longest = std::max(source_frame->width, source_frame->height);
     int destination_width = source_frame->width;
     int destination_height = source_frame->height;
-    if (longest > kPreviewMaxSide) {
-      const double scale = static_cast<double>(kPreviewMaxSide) / longest;
+    if (longest > max_side) {
+      const double scale = static_cast<double>(max_side) / longest;
       destination_width = std::max(
           2, static_cast<int>(std::lround(source_frame->width * scale)));
       destination_height = std::max(
@@ -259,13 +511,10 @@ struct OnlinePreviewDecoder::Impl {
     if (destination_height < 2) {
       destination_height = 2;
     }
-
-    // 已经足够小：直接引用解码帧，让渲染器做 YUV→NV12 转换。
     if (destination_width == source_frame->width &&
         destination_height == source_frame->height) {
       return av_frame_clone(source_frame);
     }
-
     AVFrame* destination = av_frame_alloc();
     if (destination == nullptr) {
       return nullptr;
@@ -277,18 +526,17 @@ struct OnlinePreviewDecoder::Impl {
       av_frame_free(&destination);
       return nullptr;
     }
-
-    sws = sws_getCachedContext(
-        sws, source_frame->width, source_frame->height,
+    *context = sws_getCachedContext(
+        *context, source_frame->width, source_frame->height,
         static_cast<AVPixelFormat>(source_frame->format), destination_width,
         destination_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, nullptr,
         nullptr, nullptr);
-    if (sws == nullptr) {
+    if (*context == nullptr) {
       av_frame_free(&destination);
       return nullptr;
     }
     const int scaled =
-        sws_scale(sws, source_frame->data, source_frame->linesize, 0,
+        sws_scale(*context, source_frame->data, source_frame->linesize, 0,
                   source_frame->height, destination->data,
                   destination->linesize);
     if (scaled <= 0) {
@@ -296,8 +544,7 @@ struct OnlinePreviewDecoder::Impl {
       return nullptr;
     }
     destination->pts = source_frame->pts;
-    destination->best_effort_timestamp =
-        source_frame->best_effort_timestamp;
+    destination->best_effort_timestamp = source_frame->best_effort_timestamp;
     destination->sample_aspect_ratio = source_frame->sample_aspect_ratio;
     destination->colorspace = source_frame->colorspace;
     destination->color_range = source_frame->color_range;
@@ -306,95 +553,261 @@ struct OnlinePreviewDecoder::Impl {
     return destination;
   }
 
-  void Process(VideoDecoder& decoder, const FrameIndex& frame_index,
-               std::int64_t target, int direction,
-               std::uint64_t requested_generation) {
-    if (!IsCurrent(requested_generation) || target < 0 ||
-        static_cast<std::size_t>(target) >= frame_index.size()) {
-      SetWaiting(true, requested_generation);
+  // 远跳第一帧：生成 320x180 粗帧；失败不影响精确目标。
+  void PublishCoarseFrom(const AVFrame* decoded, std::int64_t pts_us,
+                         std::int64_t frame_index, std::uint64_t session) {
+    AVFrame* coarse = ScaleToNv12(decoded, kCoarseMaxSide, &coarse_sws);
+    if (coarse == nullptr) {
       return;
     }
+    std::lock_guard<std::mutex> lock(mutex);
+    PublishLocked(coarse, pts_us, frame_index, session, true, false);
+  }
 
-    const bool backward = direction < 0;
-    const std::int64_t target_pts = frame_index.PtsOfFrame(target);
-    // 反向拖动优先命中刚解码过的降采样帧，避免每一步都从关键帧重解。
-    if (backward) {
-      AVFrame* cached = CloneCached(target, requested_generation);
-      if (cached != nullptr) {
-        Publish(cached, target_pts, target, requested_generation);
-        SetWaiting(false, requested_generation);
+  // 先按发布判定决定是否克隆，再缓存并发布；缓存接管 preview 所有权。
+  // suppress_publish=true（远跳）：只缓存，等精确目标；中间帧不再逐帧
+  // 发布，避免 5s GOP 下“关键帧幻灯片”占满 presented。
+  void CacheAndMaybePublish(AVFrame* preview, std::int64_t pts_us,
+                            std::int64_t frame_index, std::int64_t target,
+                            std::uint64_t session, bool suppress_publish) {
+    bool publish = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      publish = !stop && active && !suppress_publish &&
+                ShouldPublishRegularLocked(frame_index, target);
+    }
+    AVFrame* copy = publish ? av_frame_clone(preview) : nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop || !active) {
+        av_frame_free(&preview);
+        av_frame_free(&copy);
         return;
       }
+      CacheFrameLocked(preview, pts_us, frame_index, target_frame);
     }
-    // 正向小步拖动继续解码；后退/远跳才重新 seek 到最近关键帧。
-    const bool can_continue =
-        position_valid && target_pts > last_pts_us &&
-        target_pts - last_pts_us <= kContinueWindowUs;
-    std::string error_text;
+    if (copy != nullptr) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop || !active) {
+        av_frame_free(&copy);
+        return;
+      }
+      PublishLocked(copy, pts_us, frame_index, session, false, false);
+      waiting = false;
+    }
+  }
+
+  bool PublishExactIfCached(std::int64_t target, std::uint64_t session) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (stop || !active) {
+      return false;
+    }
+    AVFrame* exact = CloneExactLocked(target);
+    if (exact == nullptr) {
+      return false;
+    }
+    PublishExactLocked(exact, target, session, true);
+    waiting = false;
+    return true;
+  }
+
+  // 解码到 pursue_target；不在每次目标变化时中断（否则 60Hz 目标会不断
+  // 重 seek、缓存永远填不满）。中途只更新发布判定，完成后由 worker 再服务
+  // 最新目标。返回 false 表示解码/seek 失败。
+  bool DecodeToward(VideoDecoder& decoder, const FrameIndex& frame_index,
+                    std::int64_t pursue_target, std::string* error_text) {
+    const std::int64_t pursue_pts = frame_index.PtsOfFrame(pursue_target);
+    if (pursue_pts == std::numeric_limits<std::int64_t>::min()) {
+      return true;
+    }
+    bool seeked = false;
+    std::int64_t seek_origin = -1;
+    bool can_continue = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      can_continue = position_valid && pursue_pts > last_pts_us &&
+                     pursue_pts - last_pts_us <= kContinueWindowUs;
+    }
     if (!can_continue) {
-      std::int64_t keyframe = frame_index.KeyframeAtOrBefore(target_pts);
+      std::int64_t keyframe = frame_index.KeyframeAtOrBeforeFrame(pursue_target);
       if (keyframe < 0) {
         keyframe = 0;
       }
+      seek_origin = keyframe;
       {
         std::lock_guard<std::mutex> lock(mutex);
         ++seek_count;
       }
-      if (!decoder.SeekToPts(frame_index.PtsOfFrame(keyframe), &error_text)) {
+      if (!decoder.SeekToPts(frame_index.PtsOfFrame(keyframe), error_text)) {
+        std::lock_guard<std::mutex> lock(mutex);
         position_valid = false;
-        SetError(error_text.empty() ? "在线预览 seek 失败" : error_text);
-        return;
+        return false;
       }
-      position_valid = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        position_valid = false;
+      }
+      seeked = true;
+      Log("seek target=%lld keyframe=%lld pursue=%lld can_continue=%d",
+          static_cast<long long>(pursue_target),
+          static_cast<long long>(keyframe),
+          static_cast<long long>(pursue_target),
+          can_continue ? 1 : 0);
+    } else {
+      Log("continue target=%lld last_pts=%lld", static_cast<long long>(pursue_target),
+          static_cast<long long>(pursue_pts));
     }
 
+    std::int64_t last_delivered = -1;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      last_delivered = last_delivered_frame;
+    }
+    const bool far_jump =
+        last_delivered >= 0 &&
+        Distance(pursue_target, last_delivered) >= kFarJumpFrames;
+    bool coarse_sent = false;
+    // 目标在解码期间回退时，当前目标可能先命中缓存而提前返回；把“当前目标
+    // 之后 10 帧”继续解完并缓存（不发布），下一次向前拖动不会因为缺少
+    // 66..75 而重新从关键帧 seek。
+    std::int64_t complete_until = -1;
+    const auto start_completion = [&](std::int64_t current) {
+      const std::int64_t desired = std::max<std::int64_t>(
+          pursue_target,
+          std::min<std::int64_t>(
+              static_cast<std::int64_t>(frame_index.size()) - 1,
+              current + kCompletionLookaheadFrames));
+      if (desired > current && desired - current <= 30) {
+        complete_until = desired;
+        Log("completion start current=%lld until=%lld pursue=%lld",
+            static_cast<long long>(current),
+            static_cast<long long>(complete_until),
+            static_cast<long long>(pursue_target));
+        return true;
+      }
+      return false;
+    };
     auto slice_start = std::chrono::steady_clock::now();
     int guard = 0;
     for (;;) {
-      if (!IsCurrent(requested_generation)) {
-        return;
+      if (!IsActive()) {
+        return true;
       }
-      DecodedFrameInfo info;
-      if (!decoder.DecodeNextFrame(&info, &error_text)) {
-        position_valid = false;
-        SetError(error_text.empty() ? "在线预览解码失败" : error_text);
-        return;
+      const TargetSnapshot now = Snapshot();
+      if (!now.active) {
+        return true;
       }
-      last_pts_us = info.pts_us;
-      position_valid = true;
+      if (!now.cached || now.index == nullptr) {
+        SetWaiting(true);
+        return true;
+      }
+      const std::int64_t current_target = now.target;
+      if (complete_until >= 0) {
+        // 完成预解期间目标可能继续移动；这段最多 10 帧，先填完缓存再交回
+        // worker 服务最新目标（目标更新期间 UI 仍可从已缓存帧发布）。
+      } else {
+        // 当前目标已经进缓存：向前多解 10 帧（或解到进入时的目标，取较大者）
+        // 并缓存，再结束这次解码；下一次向前拖动不会缺帧重新 seek。
+        if (PublishExactIfCached(current_target, now.generation)) {
+          if (!start_completion(current_target)) {
+            return true;
+          }
+        }
+      }
+      // 目标跨到解码起点另一侧（例如正在向前解 60→74，目标跳到 50）：
+      // 放弃本次解码，worker 重新按新目标 seek。
+      if (seeked && seek_origin >= 0 &&
+          Distance(current_target, pursue_target) > kOppositeSideStep) {
+        if (pursue_target >= seek_origin && current_target < seek_origin) {
+          return true;
+        }
+        if (pursue_target < seek_origin && current_target >= seek_origin) {
+          return true;
+        }
+      }
 
-      AVFrame* preview = ScalePreviewFrame(info.av_frame);
-      if (preview == nullptr) {
-        SetError("在线预览帧降采样失败");
-        return;
+      DecodedFrameInfo info;
+      const bool decoded_ok = decoder.DecodeNextFrame(&info, error_text);
+      if (!decoded_ok) {
+        std::lock_guard<std::mutex> lock(mutex);
+        position_valid = false;
+        return false;
       }
       std::int64_t decoded_frame = frame_index.FrameOfPts(info.pts_us);
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        last_pts_us = info.pts_us;
+        last_decoded_frame = decoded_frame;
+        position_valid = true;
+        ++decoded_frames;
+      }
       if (decoded_frame < 0) {
-        decoded_frame = target;
+        decoded_frame = pursue_target;
       }
-      // 反向拖动不发布关键帧到目标之间的中间帧，避免“画面向前冲”的频闪；
-      // 正向拖动允许连续发布中间帧，画面才是连续更新而不是只跳帧号。
-      const bool publish_frame = !backward || info.pts_us >= target_pts;
-      AVFrame* publish_copy =
-          publish_frame ? av_frame_clone(preview) : nullptr;
-      CacheFrame(preview, info.pts_us, decoded_frame, requested_generation);
-      if (publish_copy != nullptr) {
-        Publish(publish_copy, info.pts_us, decoded_frame,
-                requested_generation);
+      AVFrame* preview = ScaleToNv12(info.av_frame, kPreviewMaxSide, &sws);
+      if (preview == nullptr) {
+        if (error_text != nullptr) {
+          *error_text = "在线预览帧降采样失败";
+        }
+        return false;
       }
-      if (info.pts_us >= target_pts) {
-        SetWaiting(false, requested_generation);
-        return;
+      // 远跳：seek 后第一帧先出粗帧，保证“先有画面”；精确目标随后继续。
+      if (seeked && !coarse_sent && far_jump) {
+        PublishCoarseFrom(info.av_frame, info.pts_us, decoded_frame,
+                          now.generation);
+        coarse_sent = true;
       }
-      // 新目标到达后，先把刚解出的这一帧发布/缓存，再退出；否则每次目标
-      // 更新都会丢掉一帧，慢拖只能到 ~34fps。TakeLatestFrame 会按当前目标
-      // 丢弃后退/超前帧，不会把旧目标帧当新目标帧。
-      if (!IsCurrent(requested_generation)) {
-        return;
+      if (complete_until >= 0) {
+        // 完成预解：只缓存；但如果正好解到当前目标（正向连续拖动），仍要
+        // 立即发布，不能等下一次目标更新。
+        CacheAndMaybePublish(preview, info.pts_us, decoded_frame,
+                             current_target, now.generation,
+                             decoded_frame != current_target);
+        if (decoded_frame == current_target) {
+          SetWaiting(false);
+        }
+        if (decoded_frame >= complete_until) {
+          Log("completion done frame=%lld until=%lld",
+              static_cast<long long>(decoded_frame),
+              static_cast<long long>(complete_until));
+          return true;
+        }
+        if (++guard > 100000) {
+          if (error_text != nullptr) {
+            *error_text = "在线预览解码超过上限";
+          }
+          return false;
+        }
+        if (std::chrono::steady_clock::now() - slice_start > kDecodeSlice) {
+          slice_start = std::chrono::steady_clock::now();
+          std::this_thread::yield();
+        }
+        continue;
+      }
+      CacheAndMaybePublish(preview, info.pts_us, decoded_frame, current_target,
+                           now.generation, far_jump);
+      if (decoded_frame == current_target) {
+        SetWaiting(false);
+        // 已发布精确目标：继续向前缓存 10 帧再返回，保持下一次目标/向前
+        // 拖动在缓存内（长 GOP 冷启动尤其重要）。
+        if (start_completion(current_target)) {
+          if (std::chrono::steady_clock::now() - slice_start > kDecodeSlice) {
+            slice_start = std::chrono::steady_clock::now();
+            std::this_thread::yield();
+          }
+          continue;
+        }
+        return true;
+      }
+      // 已经解到（或越过）进入时的目标：交回 worker 取最新目标。
+      if (pursue_pts <= info.pts_us) {
+        return true;
       }
       if (++guard > 100000) {
-        SetError("在线预览解码超过上限");
-        return;
+        if (error_text != nullptr) {
+          *error_text = "在线预览解码超过上限";
+        }
+        return false;
       }
       if (std::chrono::steady_clock::now() - slice_start > kDecodeSlice) {
         slice_start = std::chrono::steady_clock::now();
@@ -404,8 +817,6 @@ struct OnlinePreviewDecoder::Impl {
   }
 
   void Run() {
-    // 预览频繁 seek 会触发 H.264 “missing picture in access unit” 警告；
-    // 只保留 error 级别，避免刷屏影响 UI/日志与测量。
     av_log_set_level(AV_LOG_ERROR);
 
     std::shared_ptr<lapian::online::GrowingSource> local_source;
@@ -470,34 +881,383 @@ struct OnlinePreviewDecoder::Impl {
     for (;;) {
       std::unique_lock<std::mutex> lock(mutex);
       condition.wait(lock, [this] {
-        return stop || (active && generation != handled_generation);
+        return stop || pause_requested ||
+               (active && generation != handled_generation);
       });
-      if (stop) {
+      if (stop || pause_requested) {
         break;
       }
-      const std::uint64_t requested_generation = generation;
-      const std::int64_t target = target_frame;
-      const bool cached = target_cached;
-      const int direction = target_direction;
-      const bool active_now = active;
-      const std::shared_ptr<const FrameIndex> current_index = index;
+      const std::uint64_t observed_generation = generation;
       lock.unlock();
 
-      if (active_now && cached && current_index != nullptr) {
-        Process(decoder, *current_index, target, direction,
-                requested_generation);
-      } else if (active_now) {
-        SetWaiting(true, requested_generation);
+      if (active) {
+        std::string error_text;
+        Process(decoder, &error_text);
+        // 正向由需求解码直接续解；不再额外预解 30 帧（会和需求解码/UI
+        // 抢 CPU，实测把正向 presented 从 55 拉到 38）。
       }
 
       lock.lock();
-      handled_generation = requested_generation;
+      handled_generation = observed_generation;
     }
 
     decoder.Close();
     format.Close();
     std::lock_guard<std::mutex> lock(mutex);
     running = false;
+  }
+
+  void Process(VideoDecoder& decoder, std::string* error_text) {
+    for (int iteration = 0; iteration < kMaxProcessIterations; ++iteration) {
+      const TargetSnapshot snapshot = Snapshot();
+      if (!snapshot.active) {
+        return;
+      }
+      if (!snapshot.cached || snapshot.index == nullptr) {
+        SetWaiting(true);
+        return;
+      }
+      if (PublishExactIfCached(snapshot.target, snapshot.generation)) {
+        return;
+      }
+      if (!DecodeToward(decoder, *snapshot.index, snapshot.target,
+                        error_text)) {
+        const std::string text =
+            error_text != nullptr && !error_text->empty()
+                ? *error_text
+                : std::string("在线预览解码失败");
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!stop && active) {
+          error = text;
+          active = false;
+          waiting = false;
+          ++generation;
+          condition.notify_all();
+        }
+        return;
+      }
+      const TargetSnapshot now = Snapshot();
+      if (!now.active) {
+        return;
+      }
+      if (!now.cached) {
+        SetWaiting(true);
+        return;
+      }
+      if (PublishExactIfCached(now.target, now.generation)) {
+        return;
+      }
+      if (now.target == snapshot.target) {
+        // 已解到/越过目标但缓存里没有目标帧（索引不可靠/解码越界）：
+        // 不再空转，等下一次目标或索引更新。
+        return;
+      }
+      // 目标在解码期间变化：继续服务最新目标（通常命中缓存或只差几帧）。
+    }
+  }
+
+  void RunPrefetch() {
+#if defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+    std::shared_ptr<lapian::online::GrowingSource> local_source;
+    std::string local_path;
+    int local_stream = -1;
+    std::shared_ptr<std::atomic<bool>> local_interrupt;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      local_source = source;
+      local_path = path;
+      local_stream = stream_index;
+      local_interrupt = interrupt;
+    }
+    lapian::online::GrowingFormat format;
+    VideoDecoder decoder;
+    SwsContext* prefetch_sws = nullptr;
+    bool opened = false;
+    for (;;) {
+      std::int64_t request_from = -1;
+      std::int64_t request_to = -1;
+      std::uint64_t request_epoch = 0;
+      std::shared_ptr<const FrameIndex> current_index;
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        prefetch_condition.wait(lock, [this] {
+          return prefetch_stop || (active && prefetch_to >= 0);
+        });
+        if (prefetch_stop) {
+          break;
+        }
+        request_from = prefetch_from;
+        request_to = prefetch_to;
+        request_epoch = prefetch_epoch;
+        current_index = index;
+      }
+      if (current_index == nullptr || request_to < 0 || request_from < 0 ||
+          request_from > request_to) {
+        continue;
+      }
+      Log("prefetch range from=%lld to=%lld opened=%d",
+          static_cast<long long>(request_from),
+          static_cast<long long>(request_to), opened ? 1 : 0);
+      bool already_cached = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        already_cached = RangeCachedLocked(request_from, request_to);
+        if (already_cached && prefetch_epoch == request_epoch) {
+          prefetch_to = -1;
+        }
+      }
+      if (already_cached) {
+        continue;
+      }
+      if (!opened) {
+        if (!local_source || local_path.empty()) {
+          break;
+        }
+        const QString qpath =
+            QString::fromUtf8(local_path.c_str(),
+                              static_cast<int>(local_path.size()));
+        QString open_error;
+        if (!format.Open(local_source, qpath, &open_error, 0)) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
+        if (format.cursor() != nullptr && local_interrupt != nullptr) {
+          format.cursor()->SetInterruptFlag(local_interrupt);
+        }
+        std::string decoder_error;
+        if (!decoder.OpenWithFormat(format.context(), local_stream, nullptr,
+                                    false, &decoder_error, 2)) {
+          format.Close();
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
+        opened = true;
+      }
+      std::string error_text;
+      // SeekToPts 落到 request_from 之前最近关键帧；随后跳过 < from 的帧。
+      if (!decoder.SeekToPts(current_index->PtsOfFrame(request_from),
+                             &error_text)) {
+        decoder.Close();
+        format.Close();
+        opened = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        continue;
+      }
+      bool cancelled = false;
+      int guard = 0;
+      for (;;) {
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (prefetch_stop || !active || prefetch_to < 0 ||
+              prefetch_epoch != request_epoch) {
+            cancelled = true;
+            break;
+          }
+        }
+        if (++guard > 100000) {
+          cancelled = true;
+          break;
+        }
+        DecodedFrameInfo info;
+        if (!decoder.DecodeNextFrame(&info, &error_text)) {
+          decoder.Close();
+          format.Close();
+          opened = false;
+          cancelled = true;
+          break;
+        }
+        const std::int64_t decoded_frame =
+            current_index->FrameOfPts(info.pts_us);
+        if (decoded_frame < 0) {
+          continue;
+        }
+        if (decoded_frame < request_from) {
+          continue;
+        }
+        if (decoded_frame > request_to) {
+          break;
+        }
+        AVFrame* preview =
+            ScaleToNv12(info.av_frame, kPreviewMaxSide, &prefetch_sws);
+        if (preview == nullptr) {
+          continue;
+        }
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (prefetch_stop || !active) {
+            av_frame_free(&preview);
+            cancelled = true;
+            break;
+          }
+          CacheFrameLocked(preview, info.pts_us, decoded_frame, target_frame);
+          ++prefetched_frames;
+        }
+      }
+      if (!cancelled) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active && prefetch_epoch == request_epoch) {
+          prefetch_from = -1;
+          prefetch_to = -1;
+          prefetch_served_to = request_to;
+        }
+      }
+    }
+    if (prefetch_sws != nullptr) {
+      sws_freeContext(prefetch_sws);
+      prefetch_sws = nullptr;
+    }
+    decoder.Close();
+    format.Close();
+  }
+
+  // 拖动结束但会话仍打开：关闭预览 reader（不与松手后的精确 seek/finalize
+  // 抢 `.part`），保留已解码缓存；下一次 Resume 重启线程并复用缓存。
+  void Pause() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop) {
+        return;
+      }
+      pause_requested = true;
+      active = false;
+      waiting = false;
+      ++generation;
+      if (interrupt != nullptr) {
+        interrupt->store(true, std::memory_order_relaxed);
+      }
+      condition.notify_all();
+      prefetch_stop = true;
+      prefetch_condition.notify_all();
+    }
+    if (thread.joinable()) {
+      thread.join();
+    }
+    if (prefetch_thread.joinable()) {
+      prefetch_thread.join();
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    pause_requested = false;
+    prefetch_stop = false;
+    running = false;
+    position_valid = false;
+    last_pts_us = 0;
+    last_decoded_frame = -1;
+    FreeLatestLocked();
+    Log("pause cache_frames=%d", static_cast<int>(cache.size()));
+  }
+
+  void Resume(std::int64_t frame, bool cached) {
+    bool start_threads = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop) {
+        return;
+      }
+      const bool covered =
+          index != nullptr && frame >= 0 &&
+          static_cast<std::size_t>(frame) < index->size();
+      start_threads = !thread.joinable();
+      active = true;
+      target_frame = frame;
+      target_cached = cached && covered;
+      target_direction = 0;
+      waiting = !target_cached;
+      last_delivered_frame = -1;
+      last_delivered_coarse = false;
+      position_valid = false;
+      last_pts_us = 0;
+      last_decoded_frame = -1;
+      FreeLatestLocked();
+      prefetch_from = -1;
+      prefetch_to = -1;
+      ++prefetch_epoch;
+      // 新线程使用新的中断标志；旧 reader 已在 Pause 关闭。
+      interrupt = std::make_shared<std::atomic<bool>>(false);
+      generation = 1;
+      handled_generation = 0;
+      running = true;
+      condition.notify_all();
+      prefetch_condition.notify_all();
+      Log("resume target=%lld cached=%d cache_frames=%d start=%d",
+          static_cast<long long>(frame), target_cached ? 1 : 0,
+          static_cast<int>(cache.size()), start_threads ? 1 : 0);
+    }
+    if (start_threads) {
+      StartThreads();
+    }
+  }
+
+  void StartThreads() {
+    thread = std::thread([this] { Run(); });
+    prefetch_thread = std::thread([this] { RunPrefetch(); });
+  }
+
+  void End() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      stop = true;
+      active = false;
+      waiting = false;
+      ++generation;
+      if (interrupt != nullptr) {
+        interrupt->store(true, std::memory_order_relaxed);
+      }
+      condition.notify_all();
+      prefetch_stop = true;
+      prefetch_condition.notify_all();
+    }
+    if (thread.joinable()) {
+      thread.join();
+    }
+    if (prefetch_thread.joinable()) {
+      prefetch_thread.join();
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      running = false;
+      pause_requested = false;
+      FreeLatestLocked();
+      ClearCacheLocked();
+      if (sws != nullptr) {
+        sws_freeContext(sws);
+        sws = nullptr;
+      }
+      if (coarse_sws != nullptr) {
+        sws_freeContext(coarse_sws);
+        coarse_sws = nullptr;
+      }
+      position_valid = false;
+      last_pts_us = 0;
+      last_decoded_frame = -1;
+      target_cached = false;
+      target_frame = 0;
+      target_direction = 0;
+      generation = 0;
+      handled_generation = 0;
+      open_attempted = false;
+      open_ok = false;
+      interrupt.reset();
+      prefetch_stop = false;
+      prefetch_from = -1;
+      prefetch_to = -1;
+      prefetch_epoch = 0;
+      prefetch_served_to = -1;
+      last_delivered_frame = -1;
+      last_delivered_coarse = false;
+    }
+  }
+
+  void Close() {
+    End();
+    std::lock_guard<std::mutex> lock(mutex);
+    source.reset();
+    path.clear();
+    stream_index = -1;
+    index.reset();
+    error.clear();
+    waiting = true;
   }
 };
 
@@ -519,6 +1279,10 @@ void OnlinePreviewDecoder::Begin(
   const bool initial_covered =
       initial_frame >= 0 &&
       static_cast<std::size_t>(initial_frame) < index->size();
+  std::int64_t initial_keyframe = -1;
+  if (initial_covered) {
+    initial_keyframe = index->KeyframeAtOrBeforeFrame(initial_frame);
+  }
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->source = std::move(source);
@@ -529,22 +1293,46 @@ void OnlinePreviewDecoder::Begin(
     impl_->stop = false;
     impl_->active = true;
     impl_->running = true;
+    impl_->pause_requested = false;
     impl_->waiting = !(initial_cached && initial_covered);
+    // generation 从 1 起步，保证 worker 立即处理初始目标（不必等第一次
+    // UpdateTarget）。
+    impl_->generation = 1;
     impl_->handled_generation = 0;
-    impl_->generation = 0;
     impl_->target_frame = initial_frame;
     impl_->target_cached = initial_cached && initial_covered;
-    // 按下时先只显示起点目标帧，避免从关键帧向前“冲”一段。
-    impl_->target_direction = -1;
+    impl_->target_direction = 0;
     impl_->open_attempted = false;
     impl_->open_ok = false;
     impl_->error.clear();
     impl_->frames_published = 0;
     impl_->stale_dropped = 0;
     impl_->seek_count = 0;
+    impl_->cache_hits = 0;
+    impl_->cache_misses = 0;
+    impl_->coarse_published = 0;
+    impl_->prefetched_frames = 0;
+    impl_->decoded_frames = 0;
+    impl_->cache_bytes = 0;
+    impl_->cache_peak_bytes = 0;
     impl_->last_published_frame = -1;
+    impl_->last_delivered_frame = -1;
+    impl_->last_delivered_coarse = false;
+    impl_->last_pts_us = 0;
+    impl_->last_decoded_frame = -1;
+    impl_->position_valid = false;
+    impl_->prefetch_stop = false;
+    impl_->prefetch_from = -1;
+    impl_->prefetch_to = -1;
+    impl_->prefetch_epoch = 0;
+    impl_->prefetch_served_to = -1;
   }
   impl_->thread = std::thread([impl = impl_.get()] { impl->Run(); });
+  impl_->prefetch_thread =
+      std::thread([impl = impl_.get()] { impl->RunPrefetch(); });
+  Log("begin target=%lld cached=%d keyframe=%lld",
+      static_cast<long long>(initial_frame), initial_cached ? 1 : 0,
+      static_cast<long long>(initial_keyframe));
 }
 
 void OnlinePreviewDecoder::UpdateIndex(
@@ -556,8 +1344,15 @@ void OnlinePreviewDecoder::UpdateIndex(
   if (impl_->stop) {
     return;
   }
+  const bool target_covered =
+      impl_->target_frame >= 0 &&
+      static_cast<std::size_t>(impl_->target_frame) < index->size();
   impl_->index = std::move(index);
-  ++impl_->generation;
+  // 索引增长本身不需要 worker 重发同一目标帧（会导致每 30 帧一次重复
+  // publish）；只有目标从“快照外”变成“已覆盖”时才唤醒重解。
+  if (target_covered && !impl_->target_cached) {
+    ++impl_->generation;
+  }
   impl_->condition.notify_all();
 }
 
@@ -569,6 +1364,10 @@ void OnlinePreviewDecoder::UpdateTarget(std::int64_t frame, bool cached) {
   const bool covered =
       impl_->index != nullptr && frame >= 0 &&
       static_cast<std::size_t>(frame) < impl_->index->size();
+  bool exact_hit = false;
+  const std::int64_t previous_target = impl_->target_frame;
+  const bool far_jump =
+      previous_target >= 0 && Distance(frame, previous_target) >= kFarJumpFrames;
   if (frame < impl_->target_frame) {
     impl_->target_direction = -1;
   } else if (frame > impl_->target_frame) {
@@ -577,19 +1376,84 @@ void OnlinePreviewDecoder::UpdateTarget(std::int64_t frame, bool cached) {
   impl_->target_frame = frame;
   impl_->target_cached = cached && covered;
   impl_->waiting = !impl_->target_cached;
-  // 目标回退时，旧目标留下的“更靠后”帧立即作废，下一次 tick 不会显示。
-  if (impl_->latest != nullptr &&
-      impl_->latest_frame_index > impl_->target_frame) {
+  ++impl_->generation;
+  // 目标变化只丢弃“比上一张更远/越过目标”的旧帧；+-1 振荡不清空 latest。
+  if (impl_->latest != nullptr && !impl_->LatestUsefulLocked(frame)) {
     impl_->FreeLatestLocked();
     ++impl_->stale_dropped;
   }
-  ++impl_->generation;
+  if (impl_->target_cached) {
+    // 先查精确缓存；命中立即发布，不依赖 worker seek/下一次 tick。
+    if (AVFrame* exact = impl_->CloneExactLocked(frame)) {
+      impl_->PublishExactLocked(exact, frame, impl_->generation, true);
+      ++impl_->cache_hits;
+      impl_->waiting = false;
+      exact_hit = true;
+    } else {
+      ++impl_->cache_misses;
+      // 没命中精确缓存：发布缓存里“更接近目标且不越过目标”的最近帧，
+      // 让反向拖动在解码跟上前就持续有画面。远跳不发旧的最近缓存帧
+      // （否则会被当成“粗帧”但其实离目标还很远），交给 worker 的关键帧
+      // 粗帧 + 精确目标。
+      std::int64_t closest = -1;
+      if (!far_jump) {
+        if (AVFrame* close = impl_->CloneClosestLocked(frame, &closest)) {
+          const std::int64_t pts = impl_->index != nullptr
+                                       ? impl_->index->PtsOfFrame(closest)
+                                       : 0;
+          impl_->PublishLocked(close, pts, closest, impl_->generation, false,
+                               true);
+        }
+      }
+    }
+  }
+  // 反向：保证“缓存窗口下沿之前的 30 帧”进缓存，目标拖到边界时已经解好；
+  // 正向：取消反向预取，由需求解码向前续解。+-1 振荡反复请求同一区间时
+  // epoch 不变，预取线程继续而不会被反复取消。
+  if (impl_->target_cached && impl_->index != nullptr) {
+    if (impl_->target_direction < 0 && !impl_->cache.empty()) {
+      std::int64_t cache_min = std::numeric_limits<std::int64_t>::max();
+      for (const CachedPreview& entry : impl_->cache) {
+        if (entry.frame != nullptr && entry.frame_index >= 0) {
+          cache_min = std::min(cache_min, entry.frame_index);
+        }
+      }
+      if (cache_min > 0) {
+        const std::int64_t to = cache_min - 1;
+        const std::int64_t from =
+            std::max<std::int64_t>(0, to - kBackwardPrefetchFrames);
+        if ((from != impl_->prefetch_from || to != impl_->prefetch_to) &&
+            to != impl_->prefetch_served_to) {
+          impl_->prefetch_from = from;
+          impl_->prefetch_to = to;
+          ++impl_->prefetch_epoch;
+        }
+      }
+    } else if (impl_->target_direction > 0) {
+      if (impl_->prefetch_to >= 0) {
+        impl_->prefetch_from = -1;
+        impl_->prefetch_to = -1;
+        ++impl_->prefetch_epoch;
+      }
+    }
+  }
+  impl_->prefetch_condition.notify_all();
   impl_->condition.notify_all();
+  Log("target frame=%lld cached=%d exact_hit=%d dir=%d cache_frames=%d",
+      static_cast<long long>(frame), impl_->target_cached ? 1 : 0,
+      exact_hit ? 1 : 0, impl_->target_direction,
+      static_cast<int>(impl_->cache.size()));
 }
 
 void OnlinePreviewDecoder::End() { impl_->End(); }
 
 void OnlinePreviewDecoder::Close() { impl_->Close(); }
+
+void OnlinePreviewDecoder::Pause() { impl_->Pause(); }
+
+void OnlinePreviewDecoder::Resume(std::int64_t frame, bool cached) {
+  impl_->Resume(frame, cached);
+}
 
 PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
   PreviewFrame result;
@@ -597,15 +1461,49 @@ PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
   if (!impl_->active || impl_->latest == nullptr) {
     return result;
   }
-  // 目标回退后，比当前目标更靠后的旧帧一律丢弃；反向拖动只接受正好是
-  // 当前目标的那一帧，避免显示关键帧到目标之间的中间帧。
-  const bool ahead_of_target =
-      impl_->latest_frame_index > impl_->target_frame;
-  const bool backward_mismatch =
-      impl_->target_direction < 0 &&
-      impl_->latest_frame_index != impl_->target_frame;
-  if (ahead_of_target || backward_mismatch) {
-    impl_->FreeLatestLocked();
+  const std::int64_t target = impl_->target_frame;
+  const std::int64_t latest_frame = impl_->latest_frame_index;
+  const bool latest_coarse = impl_->latest_coarse;
+  const std::int64_t last = impl_->last_delivered_frame;
+  bool accept = false;
+  if (latest_coarse) {
+    if (last < 0) {
+      accept = true;
+    } else if (target < last) {
+      accept = latest_frame < last;
+    } else if (target > last) {
+      accept = latest_frame > last;
+    } else {
+      accept = false;
+    }
+    // 精确目标已呈现后，粗帧不得再覆盖它。
+    if (last == target && !impl_->last_delivered_coarse) {
+      accept = false;
+    }
+  } else {
+    if (latest_frame == target) {
+      accept = true;
+    } else if (last < 0) {
+      accept = false;
+    } else if (target > last) {
+      accept = latest_frame > last && latest_frame < target;
+    } else if (target < last) {
+      accept = latest_frame < last && latest_frame > target;
+    } else {
+      accept = false;
+    }
+    // 同一帧不重复呈现（避免 presented 注水）。
+    if (latest_frame == last) {
+      accept = false;
+    }
+  }
+  if (!accept) {
+    av_frame_free(&impl_->latest);
+    impl_->latest_pts_us = 0;
+    impl_->latest_frame_index = -1;
+    impl_->latest_generation = 0;
+    impl_->latest_coarse = false;
+    impl_->latest_from_cache = false;
     ++impl_->stale_dropped;
     return result;
   }
@@ -613,8 +1511,17 @@ PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
   result.pts_us = impl_->latest_pts_us;
   result.frame_index = impl_->latest_frame_index;
   result.generation = impl_->latest_generation;
+  result.coarse = impl_->latest_coarse;
+  result.from_cache = impl_->latest_from_cache;
+  result.hardware = false;
+  impl_->last_delivered_frame = impl_->latest_frame_index;
+  impl_->last_delivered_coarse = impl_->latest_coarse;
   impl_->latest = nullptr;
+  impl_->latest_pts_us = 0;
   impl_->latest_frame_index = -1;
+  impl_->latest_generation = 0;
+  impl_->latest_coarse = false;
+  impl_->latest_from_cache = false;
   return result;
 }
 
@@ -661,6 +1568,41 @@ int OnlinePreviewDecoder::cached_frames() const {
 std::int64_t OnlinePreviewDecoder::last_published_frame() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->last_published_frame;
+}
+
+std::size_t OnlinePreviewDecoder::cache_bytes() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->cache_bytes;
+}
+
+std::size_t OnlinePreviewDecoder::cache_peak_bytes() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->cache_peak_bytes;
+}
+
+std::uint64_t OnlinePreviewDecoder::cache_hits() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->cache_hits;
+}
+
+std::uint64_t OnlinePreviewDecoder::cache_misses() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->cache_misses;
+}
+
+std::uint64_t OnlinePreviewDecoder::coarse_published() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->coarse_published;
+}
+
+std::uint64_t OnlinePreviewDecoder::prefetched_frames() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->prefetched_frames;
+}
+
+std::uint64_t OnlinePreviewDecoder::decoded_frames() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->decoded_frames;
 }
 
 }  // namespace lapian::media

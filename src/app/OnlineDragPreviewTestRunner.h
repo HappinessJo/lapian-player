@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 class MainWindow;
 
@@ -24,6 +25,11 @@ struct OnlineDragPreviewTestOptions {
   bool cache_hit_only = false;
   // 只节流视频下载，保证未缓存区在测试窗口内仍然存在（0 = 不节流）。
   qint64 throttle_bytes_per_sec = 0;
+  // 2026-10-25：前后一致 + 丝滑验收（--online-drag-parity-test）。
+  bool parity = false;
+  // 本地 1080p 同目标序列基线（--local-drag-parity-test）。
+  bool local_only = false;
+  QString local_file;
 };
 
 // T8.6.1b 真实窗口探针：在线增长会话拖动预览。
@@ -65,6 +71,7 @@ class OnlineDragPreviewTestRunner {
                  const char* label);
   void Pump(int ms);
   bool OpenOnline(bool expect_cache_hit, QString* error);
+  bool OpenLocal(QString* error);
   bool WaitForCachedWindow(qint64* start, qint64* end, qint64 desired_span,
                            int timeout_ms);
   DragResult RunDragPass(const QString& label, qint64 start, qint64 end,
@@ -75,12 +82,69 @@ class OnlineDragPreviewTestRunner {
   void Run();
   void Check(const char* name, bool ok, const QString& detail = QString());
 
+  // 2026-10-25 前后一致 + 丝滑验收。
+  struct ParityResult {
+    QString label;
+    QString mode;
+    qint64 start_frame = 0;
+    qint64 end_frame = 0;
+    int updates = 0;
+    int presented = 0;
+    double first_response_ms = -1.0;
+    double first_from_start_ms = -1.0;
+    double response_p95_ms = 0.0;
+    double max_response_ms = 0.0;
+    double max_gap_ms = 0.0;
+    double active_fps = 0.0;
+    double target_lag_p95 = 0.0;
+    int stale_dropped = 0;
+    int coarse_presented = 0;
+    int cache_presented = 0;
+    int max_consecutive_missing = 0;
+    int flicker = 0;
+    qint64 release_ms = 0;
+    qint64 landing_ms = 0;
+    qint64 exact_ms = 0;
+    bool landing_frame_ok = false;
+    bool landing_pts_ok = false;
+    qint64 landing_pts = 0;
+    qint64 ui_gap_ms = 0;
+    bool ok = false;
+    // 内部统计：每次目标更新的响应/滞后样本，用于 p95。
+    std::vector<double> responses;
+    std::vector<double> lags;
+  };
+  void RunParity();
+  void RunLocalParity();
+  void RunOnlineParity();
+  bool EnsureLocalReady(QString* error);
+  ParityResult RunParitySequence(const QString& label, qint64 start, qint64 end,
+                                 int samples, int duration_ms, bool forward,
+                                 int gap_limit_ms, bool check_snapshot);
+  ParityResult RunParityFrames(const QString& label, qint64 start, qint64 end,
+                               const std::vector<qint64>& targets,
+                               const std::vector<int>& due_ms, bool forward,
+                               int gap_limit_ms);
+  ParityResult RunParityZoom(const QString& label, qint64 start, qint64 step,
+                             int steps, int step_ms);
+  ParityResult RunParityFar(const QString& label, qint64 start, qint64 target,
+                            bool forward);
+  void RunParityUncached();
+  void PrintParity(const ParityResult& result);
+  bool ParityLanding(qint64 target, ParityResult* result);
+  int PresentedNow() const;
+  qint64 DisplayedNow() const;
+  bool CoarseNow() const;
+  bool CacheNow() const;
+  int StaleNow() const;
+
   MainWindow* window_ = nullptr;
   OnlineDragPreviewTestOptions options_;
   int checks_ = 0;
   int failures_ = 0;
   qint64 heartbeat_max_ms_ = 0;
   int heartbeat_over_200_ = 0;
+  qint64 parity_ui_gap_max_ms_ = 0;
 };
 
 }  // namespace lapian::app

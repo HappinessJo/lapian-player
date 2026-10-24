@@ -140,8 +140,8 @@ int main(int argc, char** argv) {
   if (first.frame != nullptr) {
     const int longest = std::max(first.frame->width, first.frame->height);
     Check(first.frame->width > 0 && first.frame->height > 0 &&
-              longest <= 1280,
-          "预览帧降采样到最长边 ≤1280");
+              longest <= 1024,
+          "预览帧降采样到最长边 ≤1024（64MiB 预算内可缓存 72 帧）");
     Check(first.frame_index == 600, "起点预览帧号 == 目标帧");
     av_frame_free(&first.frame);
   }
@@ -183,7 +183,11 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(preview.frames_published()),
               static_cast<unsigned long long>(preview.stale_dropped()));  Check(presented > 0, "正向拖动期间有预览帧发布");
   Check(fps >= 30.0, "正向拖动预览发布/取走 ≥30fps（开发机）");
-  Check(preview.cached_frames() <= 24, "反向帧缓存有界（≤24）");
+  Check(preview.cached_frames() <= 72, "缓存帧数有界（≤72）");
+  Check(preview.cache_bytes() <= 64u * 1024u * 1024u,
+        "缓存字节数 ≤64MiB");
+  Check(preview.cache_peak_bytes() <= 64u * 1024u * 1024u,
+        "缓存峰值 ≤64MiB");
 
   // 反向拖动：600→560 每步必须是目标帧，且绝不向前跳。
   preview.UpdateTarget(600, true);
@@ -221,6 +225,69 @@ int main(int argc, char** argv) {
   Check(exact_target, "反向拖动每一步发布的都是目标帧");
   Check(monotonic, "反向拖动发布帧单调不增（无向前跳帧）");
 
+  // 反向 60Hz 连续拖动：与正向同一目标节奏（每 16ms -1 帧），统计实际
+  // 取走的帧；缓存已暖时不允许冻住，且帧号单调不增。
+  preview.UpdateTarget(600, true);
+  lapian::media::PreviewFrame reverse_warm = PollTarget(&preview, 600, 2000);
+  if (reverse_warm.frame != nullptr) {
+    av_frame_free(&reverse_warm.frame);
+  }
+  int reverse_presented = 0;
+  bool reverse_monotonic = true;
+  std::int64_t reverse_previous = 601;
+  const auto reverse_start = std::chrono::steady_clock::now();
+  for (int step = 0; step < 60; ++step) {
+    const std::int64_t reverse_target = 599 - step;
+    preview.UpdateTarget(reverse_target, true);
+    const auto slice_end = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(16);
+    do {
+      lapian::media::PreviewFrame frame = preview.TakeLatestFrame();
+      if (frame.frame != nullptr) {
+        ++reverse_presented;
+        if (frame.frame_index > reverse_previous) {
+          reverse_monotonic = false;
+        }
+        reverse_previous = frame.frame_index;
+        av_frame_free(&frame.frame);
+      }
+      std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < slice_end);
+  }
+  const double reverse_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                    reverse_start)
+          .count();
+  const double reverse_fps =
+      reverse_presented / std::max(0.001, reverse_seconds);
+  std::printf("[perf] online_preview_reverse_fps=%.2f (%d frames / %.3fs)\n",
+              reverse_fps, reverse_presented, reverse_seconds);
+  Check(reverse_presented >= 30, "反向 60Hz 拖动 presented ≥30（不冻住）");
+  Check(reverse_fps >= 30.0, "反向 60Hz 拖动 presented ≥30fps");
+  Check(reverse_monotonic, "反向 60Hz 拖动发布帧单调不增");
+
+  // Pause/Resume：松手后保留有界缓存，下一次拖动直接命中；End 释放。
+  const int cached_before_pause = preview.cached_frames();
+  preview.Pause();
+  Check(cached_before_pause > 0 && preview.cached_frames() == cached_before_pause,
+        "Pause 保留有界缓存");
+  Check(!preview.IsWaiting(), "Pause 后不处于 waiting");
+  preview.Resume(540, true);
+  const auto resume_start = std::chrono::steady_clock::now();
+  lapian::media::PreviewFrame resumed = PollTarget(&preview, 540, 2000);
+  const double resume_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - resume_start)
+                               .count();
+  Check(resumed.frame != nullptr, "Resume 后目标帧可立即命中缓存");
+  if (resumed.frame != nullptr) {
+    Check(resumed.from_cache, "Resume 目标帧来自缓存（from_cache=true）");
+  }
+  std::printf("[perf] online_preview_resume=%.2fms\n", resume_ms);
+  if (resumed.frame != nullptr) {
+    av_frame_free(&resumed.frame);
+  }
+  Check(resume_ms <= 200.0, "Resume 命中缓存首帧 ≤200ms");
+
   // 未缓存目标：只进入 waiting，不阻塞、不产生新帧。
   preview.UpdateTarget(650, false);
   Check(preview.IsWaiting(), "未缓存目标标记 waiting");
@@ -241,6 +308,8 @@ int main(int argc, char** argv) {
   std::printf("[perf] online_preview_end=%.2fms\n", end_ms);
   Check(!preview.IsThreadRunning(), "End 后预览线程已退出");
   Check(!preview.IsReady(), "End 后预览器不再 ready");
+  Check(preview.cached_frames() == 0, "End 释放帧缓存");
+  Check(preview.cache_bytes() == 0, "End 释放缓存字节");
   Check(end_ms <= 1000.0, "End 有界（≤1000ms）");
   preview.Close();
 

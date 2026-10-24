@@ -47,9 +47,11 @@ class VideoDecoder {
                            std::string* error, int extra_hw_frames = -1);
   // T8.6：使用调用方拥有的（可增长读层）AVFormatContext；Decoder 不关闭它。
   // 调用方必须保证 context 的生命周期长于本对象，且同一时刻只有一个线程使用。
+  // thread_count > 0 时覆盖 FFmpeg 解码线程数（仅在线预览预取用于避免和
+  // 需求解码线程抢满 CPU）；0 = FFmpeg 默认（所有既有调用不变）。
   bool OpenWithFormat(AVFormatContext* format, int video_stream_index,
                       ID3D11Device* d3d11_device, bool prefer_hardware,
-                      std::string* error);
+                      std::string* error, int thread_count = 0);
   void Close();
 
   bool DecodeFirstFrame(DecodedFrameInfo* info, std::string* error);

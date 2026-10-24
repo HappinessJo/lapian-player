@@ -5068,7 +5068,8 @@ QString MainWindow::OnlinePreviewStateForTest() const {
   return QStringLiteral(
              "active=%1 waiting=%2 thread=%3 target=%4 presented=%5 "
              "dropped=%6 last_frame=%7 last_pts=%8 index_frames=%9 "
-             "cache_frames=%10 seeks=%11 error=%12")
+             "cache_frames=%10 seeks=%11 coarse=%12 cache_hits=%13 "
+             "prefetched=%14 cache_bytes=%15 peak_bytes=%16 error=%17")
       .arg(active ? 1 : 0)
       .arg(OnlinePreviewWaitingForTest() ? 1 : 0)
       .arg(OnlinePreviewThreadRunningForTest() ? 1 : 0)
@@ -5078,9 +5079,46 @@ QString MainWindow::OnlinePreviewStateForTest() const {
       .arg(online_preview_last_frame_)
       .arg(online_preview_last_pts_)
       .arg(static_cast<qint64>(online_preview_index_frames_))
-      .arg(active ? online_preview_->cached_frames() : 0)
-      .arg(active ? static_cast<qint64>(online_preview_->seek_count()) : 0)
+      .arg(OnlinePreviewCachedFramesForTest())
+      .arg(OnlinePreviewSeekCountForTest())
+      .arg(OnlinePreviewCoarsePresentedForTest())
+      .arg(OnlinePreviewCacheHitsForTest())
+      .arg(OnlinePreviewPrefetchedForTest())
+      .arg(static_cast<qint64>(OnlinePreviewCacheBytesForTest()))
+      .arg(static_cast<qint64>(OnlinePreviewCachePeakBytesForTest()))
       .arg(error.isEmpty() ? QStringLiteral("none") : error);
+}
+
+std::size_t MainWindow::OnlinePreviewCacheBytesForTest() const {
+  return online_preview_ != nullptr ? online_preview_->cache_bytes() : 0;
+}
+
+std::size_t MainWindow::OnlinePreviewCachePeakBytesForTest() const {
+  return online_preview_ != nullptr ? online_preview_->cache_peak_bytes() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewCacheHitsForTest() const {
+  return online_preview_ != nullptr ? online_preview_->cache_hits() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewPrefetchedForTest() const {
+  return online_preview_ != nullptr ? online_preview_->prefetched_frames() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewSeekCountForTest() const {
+  return online_preview_ != nullptr ? online_preview_->seek_count() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewCoarsePublishedForTest() const {
+  return online_preview_ != nullptr ? online_preview_->coarse_published() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewStaleDroppedForTest() const {
+  return online_preview_ != nullptr ? online_preview_->stale_dropped() : 0;
+}
+
+int MainWindow::OnlinePreviewCachedFramesForTest() const {
+  return online_preview_ != nullptr ? online_preview_->cached_frames() : 0;
 }
 
 void MainWindow::ResetPreviewStatsForTest() {
@@ -5088,6 +5126,10 @@ void MainWindow::ResetPreviewStatsForTest() {
   online_preview_last_frame_ = -1;
   online_preview_last_pts_ = 0;
   online_preview_presented_ = 0;
+  online_preview_coarse_presented_ = 0;
+  online_preview_cache_presented_ = 0;
+  online_preview_last_coarse_ = false;
+  online_preview_last_from_cache_ = false;
   online_preview_dropped_ = 0;
   online_preview_errors_ = 0;
   preview_presented_count_ = 0;
@@ -5577,9 +5619,21 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   }
   if (OnlineStepEligible()) {
     // T8.6.1b：增长会话走独立的 GrowingSource 预览读层；未缓存区只提示等待。
+    const bool cached = OnlineFrameCached(frame);
     EnsureOnlinePreviewStarted(frame);
     if (online_preview_ != nullptr) {
-      if (!OnlineFrameCached(frame)) {
+      online_preview_target_ = frame;
+      MaybeRefreshOnlinePreviewIndex();
+      // 上一次拖动松手后只 Pause，保留有界帧缓存；这里复用解码器/缓存，
+      // 不再从关键帧重解（长 GOP 冷启动空档）。
+      online_preview_->Resume(frame, cached);
+      if (preview_timer_ != nullptr) {
+        preview_timer_->setInterval(16);
+        if (!preview_timer_->isActive()) {
+          preview_timer_->start();
+        }
+      }
+      if (!cached) {
         ApplyOnlinePreviewWaitPrompt(frame, true);
       } else {
         statusBar()->showMessage(
@@ -5671,8 +5725,25 @@ void MainWindow::OnScrubFinished(qint64 frame) {
     return;
   }
   // 先停预览/join 预览线程，再走精确 seek；预览线程的 reader 不能和松手后的
-  // 精确 seek/finalize 抢同一个 `.part` 句柄。
-  EndScrubPreview();
+  // 精确 seek/finalize 抢同一个 `.part` 句柄。在线增长会话只 Pause：保留
+  // 有界帧缓存供下一次拖动直接命中，会话关闭/切档仍走 EndScrubPreview。
+  const bool pause_online_preview =
+      preview_ == nullptr && online_preview_ != nullptr;
+  if (pause_online_preview) {
+    if (preview_timer_ != nullptr) {
+      preview_timer_->stop();
+    }
+    online_preview_dropped_ =
+        static_cast<int>(online_preview_->stale_dropped());
+    if (!online_preview_error_shown_ &&
+        !online_preview_->last_error().empty()) {
+      ++online_preview_errors_;
+    }
+    online_preview_->Pause();
+    ClearOnlinePreviewWaitPrompt();
+  } else {
+    EndScrubPreview();
+  }
   if (session_->index().empty() && !OnlineStepEligible()) {
     return;
   }
@@ -5718,6 +5789,8 @@ void MainWindow::EndScrubPreview() {
   }
   online_preview_index_frames_ = 0;
   online_preview_error_shown_ = false;
+  online_preview_last_coarse_ = false;
+  online_preview_last_from_cache_ = false;
   ClearOnlinePreviewWaitPrompt();
 }
 
@@ -5827,6 +5900,14 @@ void MainWindow::TickOnlinePreview() {
     ++online_preview_presented_;
     online_preview_last_frame_ = preview_frame.frame_index;
     online_preview_last_pts_ = preview_frame.pts_us;
+    online_preview_last_coarse_ = preview_frame.coarse;
+    online_preview_last_from_cache_ = preview_frame.from_cache;
+    if (preview_frame.coarse) {
+      ++online_preview_coarse_presented_;
+    }
+    if (preview_frame.from_cache) {
+      ++online_preview_cache_presented_;
+    }
     av_frame_free(&preview_frame.frame);
   }
   online_preview_dropped_ =
@@ -5891,6 +5972,8 @@ void MainWindow::StopPreview() {
   }
   online_preview_index_frames_ = 0;
   online_preview_error_shown_ = false;
+  online_preview_last_coarse_ = false;
+  online_preview_last_from_cache_ = false;
   ClearOnlinePreviewWaitPrompt();
 }
 

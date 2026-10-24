@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -462,6 +463,26 @@ class MainWindow : public QMainWindow {
   int OnlinePreviewPresentedForTest() const {
     return online_preview_presented_;
   }
+  bool OnlinePreviewLastCoarseForTest() const {
+    return online_preview_last_coarse_;
+  }
+  bool OnlinePreviewLastFromCacheForTest() const {
+    return online_preview_last_from_cache_;
+  }
+  int OnlinePreviewCoarsePresentedForTest() const {
+    return online_preview_coarse_presented_;
+  }
+  int OnlinePreviewCachePresentedForTest() const {
+    return online_preview_cache_presented_;
+  }
+  std::size_t OnlinePreviewCacheBytesForTest() const;
+  std::size_t OnlinePreviewCachePeakBytesForTest() const;
+  std::uint64_t OnlinePreviewCacheHitsForTest() const;
+  std::uint64_t OnlinePreviewPrefetchedForTest() const;
+  std::uint64_t OnlinePreviewSeekCountForTest() const;
+  std::uint64_t OnlinePreviewCoarsePublishedForTest() const;
+  std::uint64_t OnlinePreviewStaleDroppedForTest() const;
+  int OnlinePreviewCachedFramesForTest() const;
   int OnlinePreviewDroppedForTest() const { return online_preview_dropped_; }
   int OnlinePreviewErrorsForTest() const { return online_preview_errors_; }
   QString OnlinePreviewStateForTest() const;
@@ -765,6 +786,10 @@ class MainWindow : public QMainWindow {
   std::int64_t online_preview_last_pts_ = 0;
   std::size_t online_preview_index_frames_ = 0;
   int online_preview_presented_ = 0;
+  int online_preview_coarse_presented_ = 0;
+  int online_preview_cache_presented_ = 0;
+  bool online_preview_last_coarse_ = false;
+  bool online_preview_last_from_cache_ = false;
   int online_preview_dropped_ = 0;
   int online_preview_errors_ = 0;
   int preview_presented_count_ = 0;

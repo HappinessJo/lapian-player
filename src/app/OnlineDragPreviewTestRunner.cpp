@@ -8,9 +8,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "app/MainWindow.h"
 #include "app/OnlineResolveDialog.h"
@@ -32,6 +35,19 @@ double StreamFps(MainWindow* window) {
     fps = 30.0;
   }
   return fps;
+}
+
+double Percentile(std::vector<double> values, double fraction) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  std::sort(values.begin(), values.end());
+  std::size_t index = static_cast<std::size_t>(
+      static_cast<double>(values.size() - 1) * fraction);
+  if (index >= values.size()) {
+    index = values.size() - 1;
+  }
+  return values[index];
 }
 
 }  // namespace
@@ -457,22 +473,26 @@ void OnlineDragPreviewTestRunner::RunUncachedPass() {
   Check("uncached_preview_waiting", window_->OnlinePreviewWaitingForTest(),
         window_->OnlinePreviewStateForTest());
 
-  // 拖回已缓存区：旧目标取消，预览恢复。
+  // 拖回已缓存区：旧目标取消，预览恢复。回到的帧可能仍停留在屏幕上
+  // （未缓存目标期间画面保持），此时不重复呈现同一帧也算恢复；以
+  // waiting=false + target/显示帧都回到 cached_start 为准。
   const int presented_before = window_->OnlinePreviewPresentedForTest();
   window_->ScrubTargetForTest(cached_start);
   const bool resumed = WaitUntil(
-      [this, presented_before]() {
+      [this, cached_start]() {
         return !window_->OnlinePreviewWaitingForTest() &&
-               window_->OnlinePreviewPresentedForTest() > presented_before;
+               window_->OnlinePreviewTargetForTest() == cached_start &&
+               window_->OnlinePreviewLastFrameForTest() == cached_start;
       },
       3000, "uncached_back_to_cached");
   Check("uncached_back_to_cached_not_waiting",
         !window_->OnlinePreviewWaitingForTest(),
         window_->OnlinePreviewStateForTest());
   Check("uncached_back_to_cached_preview_resumes", resumed,
-        QStringLiteral("before=%1 after=%2")
+        QStringLiteral("before=%1 after=%2 last=%3")
             .arg(presented_before)
-            .arg(window_->OnlinePreviewPresentedForTest()));
+            .arg(window_->OnlinePreviewPresentedForTest())
+            .arg(window_->OnlinePreviewLastFrameForTest()));
   window_->ScrubFinishForTest(cached_start);
   const bool back_landed = WaitUntil(
       [this, cached_start]() {
@@ -539,7 +559,844 @@ void OnlineDragPreviewTestRunner::RunCloseDuringDrag() {
   Print(QStringLiteral("online_drag_preview_close ms=%1").arg(close_ms));
 }
 
+int OnlineDragPreviewTestRunner::PresentedNow() const {
+  return options_.local_only ? window_->PreviewPresentedForTest()
+                             : window_->OnlinePreviewPresentedForTest();
+}
+
+qint64 OnlineDragPreviewTestRunner::DisplayedNow() const {
+  if (options_.local_only) {
+    return window_->PreviewDiagnosticsForTest().displayed_frame;
+  }
+  return window_->OnlinePreviewLastFrameForTest();
+}
+
+bool OnlineDragPreviewTestRunner::CoarseNow() const {
+  if (options_.local_only) {
+    return window_->PreviewDiagnosticsForTest().displayed_coarse;
+  }
+  return window_->OnlinePreviewLastCoarseForTest();
+}
+
+bool OnlineDragPreviewTestRunner::CacheNow() const {
+  if (options_.local_only) {
+    return window_->PreviewDiagnosticsForTest().displayed_from_cache;
+  }
+  return window_->OnlinePreviewLastFromCacheForTest();
+}
+
+int OnlineDragPreviewTestRunner::StaleNow() const {
+  if (options_.local_only) {
+    return 0;
+  }
+  return static_cast<int>(window_->OnlinePreviewStaleDroppedForTest());
+}
+
+bool OnlineDragPreviewTestRunner::ParityLanding(qint64 target,
+                                                ParityResult* result) {
+  QElapsedTimer release_timer;
+  release_timer.start();
+  window_->ScrubFinishForTest(target);
+  result->release_ms = release_timer.elapsed();
+  QElapsedTimer landing_timer;
+  landing_timer.start();
+  const bool local = options_.local_only;
+  const bool landed = WaitUntil(
+      [this, local, target]() {
+        if (window_->CurrentFrameForTest() != target) {
+          return false;
+        }
+        return local || window_->OnlineSeekIdleForTest();
+      },
+      5000, "parity_exact_landing");
+  result->landing_ms = landing_timer.elapsed();
+  result->landing_frame_ok = landed;
+  result->landing_pts = window_->CurrentPtsUsForTest();
+  if (local) {
+    result->landing_pts_ok = landed;
+  } else {
+    result->landing_pts_ok =
+        landed &&
+        window_->CurrentPtsUsForTest() == window_->OnlineFramePtsForTest(target);
+  }
+  return landed && result->landing_pts_ok;
+}
+
+void OnlineDragPreviewTestRunner::PrintParity(const ParityResult& result) {
+  Print(QStringLiteral(
+            "online_drag_parity scenario=%1 mode=%2 start=%3 end=%4 "
+            "updates=%5 presented=%6 first_response_ms=%7 "
+            "first_from_start_ms=%8 response_p95_ms=%9 max_response_ms=%10 "
+            "max_gap_ms=%11 active_fps=%12 target_lag_p95=%13 "
+            "stale_dropped=%14 coarse_presented=%15 cache_presented=%16 "
+            "max_missing=%17 flicker=%18 release_ms=%19 landing_ms=%20 "
+            "landing_frame=%21 landing_pts=%22 landing_frame_ok=%23 "
+            "landing_pts_ok=%24 ui_gap_ms=%25 exact_ms=%26 ok=%27")
+            .arg(result.label)
+            .arg(result.mode)
+            .arg(result.start_frame)
+            .arg(result.end_frame)
+            .arg(result.updates)
+            .arg(result.presented)
+            .arg(QString::number(result.first_response_ms, 'f', 2))
+            .arg(QString::number(result.first_from_start_ms, 'f', 2))
+            .arg(QString::number(result.response_p95_ms, 'f', 2))
+            .arg(QString::number(result.max_response_ms, 'f', 2))
+            .arg(QString::number(result.max_gap_ms, 'f', 2))
+            .arg(QString::number(result.active_fps, 'f', 2))
+            .arg(QString::number(result.target_lag_p95, 'f', 2))
+            .arg(result.stale_dropped)
+            .arg(result.coarse_presented)
+            .arg(result.cache_presented)
+            .arg(result.max_consecutive_missing)
+            .arg(result.flicker)
+            .arg(result.release_ms)
+            .arg(result.landing_ms)
+            .arg(result.landing_pts)
+            .arg(result.landing_pts)
+            .arg(result.landing_frame_ok ? 1 : 0)
+            .arg(result.landing_pts_ok ? 1 : 0)
+            .arg(result.ui_gap_ms)
+            .arg(result.exact_ms)
+            .arg(result.ok ? 1 : 0));
+  parity_ui_gap_max_ms_ = std::max(parity_ui_gap_max_ms_, result.ui_gap_ms);
+}
+
+OnlineDragPreviewTestRunner::ParityResult
+OnlineDragPreviewTestRunner::RunParityFrames(
+    const QString& label, qint64 start, qint64 end,
+    const std::vector<qint64>& targets, const std::vector<int>& due_ms,
+    bool forward, int gap_limit_ms) {
+  ParityResult result;
+  result.label = label;
+  result.mode = options_.local_only ? QStringLiteral("local")
+                                    : QStringLiteral("online");
+  result.start_frame = start;
+  result.end_frame = end;
+  result.updates = static_cast<int>(targets.size());
+  heartbeat_max_ms_ = 0;
+  heartbeat_over_200_ = 0;
+  window_->ResetPreviewStatsForTest();
+  const int stale_base = StaleNow();
+  QElapsedTimer drag_clock;
+  drag_clock.start();
+  window_->ScrubStartForTest(start);
+  Pump(80);
+  const int base_presented = PresentedNow();
+  int last_presented = base_presented;
+  int presented_at_last_target = base_presented;
+  int unanswered = 0;
+  int missing_run = 0;
+  qint64 first_target_time = -1;
+  qint64 last_present_time = -1;
+  qint64 last_displayed = -1;
+  std::vector<qint64> target_times;
+  std::vector<double> lags;
+
+  const auto poll = [&](qint64 current_target) {
+    const int now_presented = PresentedNow();
+    if (now_presented <= last_presented) {
+      return;
+    }
+    const qint64 now = drag_clock.elapsed();
+    const int delta = now_presented - last_presented;
+    for (int i = 0; i < delta; ++i) {
+      if (unanswered < static_cast<int>(target_times.size())) {
+        const double latency =
+            static_cast<double>(now - target_times[unanswered]);
+        result.max_response_ms = std::max(result.max_response_ms, latency);
+        if (result.first_response_ms < 0.0 && unanswered == 0) {
+          result.first_response_ms = latency;
+          result.first_from_start_ms = static_cast<double>(now);
+        }
+        ++unanswered;
+      }
+      if (last_present_time >= 0) {
+        result.max_gap_ms = std::max(
+            result.max_gap_ms, static_cast<double>(now - last_present_time));
+      }
+      last_present_time = now;
+      const qint64 displayed = DisplayedNow();
+      if (displayed >= 0) {
+        lags.push_back(static_cast<double>(
+            displayed >= current_target ? displayed - current_target
+                                        : current_target - displayed));
+        if (last_displayed >= 0) {
+          if (forward && displayed < last_displayed) {
+            ++result.flicker;
+          }
+          if (!forward && displayed > last_displayed) {
+            ++result.flicker;
+          }
+        }
+        last_displayed = displayed;
+      }
+      if (CoarseNow()) {
+        ++result.coarse_presented;
+      }
+      if (CacheNow()) {
+        ++result.cache_presented;
+      }
+    }
+    last_presented = now_presented;
+  };
+
+  for (std::size_t i = 0; i < targets.size(); ++i) {
+    if (i > 0) {
+      const qint64 due = first_target_time + due_ms[i];
+      while (drag_clock.elapsed() < due) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+        poll(targets[i - 1]);
+        std::this_thread::yield();
+      }
+      if (PresentedNow() == presented_at_last_target) {
+        ++missing_run;
+        result.max_consecutive_missing =
+            std::max(result.max_consecutive_missing, missing_run);
+      } else {
+        missing_run = 0;
+      }
+    } else {
+      first_target_time = drag_clock.elapsed();
+    }
+    window_->ScrubTargetForTest(targets[i]);
+    target_times.push_back(drag_clock.elapsed());
+    presented_at_last_target = PresentedNow();
+    if (i == 0) {
+      last_present_time = target_times.front();
+    }
+    const qint64 next_due =
+        (i + 1 < targets.size())
+            ? first_target_time + due_ms[i + 1]
+            : drag_clock.elapsed() + std::max<int>(150, gap_limit_ms + 80);
+    while (drag_clock.elapsed() < next_due) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+      poll(targets[i]);
+      std::this_thread::yield();
+    }
+  }
+  const qint64 trailing_until =
+      drag_clock.elapsed() + std::max<int>(120, gap_limit_ms + 60);
+  while (drag_clock.elapsed() < trailing_until) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    poll(targets.empty() ? start : targets.back());
+    std::this_thread::yield();
+  }
+
+  result.presented = PresentedNow() - base_presented;
+  result.response_p95_ms = Percentile(result.responses, 0.95);
+  result.target_lag_p95 = Percentile(lags, 0.95);
+  result.stale_dropped = StaleNow() - stale_base;
+  result.ui_gap_ms = heartbeat_max_ms_;
+  if (result.first_from_start_ms < 0.0 && result.presented > 0) {
+    result.first_from_start_ms = 0.0;
+  }
+  if (result.presented >= 2 && last_present_time > first_target_time &&
+      first_target_time >= 0) {
+    result.active_fps =
+        static_cast<double>(result.presented) * 1000.0 /
+        static_cast<double>(last_present_time - first_target_time);
+  } else if (result.presented > 0 && drag_clock.elapsed() > 0) {
+    result.active_fps =
+        static_cast<double>(result.presented) * 1000.0 /
+        static_cast<double>(drag_clock.elapsed());
+  }
+  const bool landed = ParityLanding(end, &result);
+  result.ok = landed && result.first_response_ms >= 0.0 &&
+              result.first_response_ms <= 100.0 &&
+              result.response_p95_ms <= 100.0 &&
+              result.max_gap_ms <= static_cast<double>(gap_limit_ms) &&
+              result.max_consecutive_missing <= 1 && result.flicker == 0;
+  PrintParity(result);
+  return result;
+}
+
+OnlineDragPreviewTestRunner::ParityResult
+OnlineDragPreviewTestRunner::RunParitySequence(
+    const QString& label, qint64 start, qint64 end, int samples,
+    int duration_ms, bool forward, int gap_limit_ms, bool check_snapshot) {
+  (void)check_snapshot;
+  std::vector<qint64> targets;
+  std::vector<int> dues;
+  targets.reserve(static_cast<std::size_t>(std::max(1, samples)));
+  dues.reserve(static_cast<std::size_t>(std::max(1, samples)));
+  for (int i = 0; i < samples; ++i) {
+    const double ratio =
+        samples <= 1 ? 1.0 : static_cast<double>(i) / (samples - 1);
+    targets.push_back(
+        start + static_cast<qint64>(std::llround((end - start) * ratio)));
+    dues.push_back(samples <= 1 ? 0 : duration_ms * i / (samples - 1));
+  }
+  return RunParityFrames(label, start, end, targets, dues, forward,
+                         gap_limit_ms);
+}
+
+OnlineDragPreviewTestRunner::ParityResult
+OnlineDragPreviewTestRunner::RunParityZoom(const QString& label, qint64 start,
+                                           qint64 step, int steps,
+                                           int step_ms) {
+  std::vector<qint64> targets;
+  std::vector<int> dues;
+  for (int i = 0; i < steps; ++i) {
+    targets.push_back(start + step * i);
+    dues.push_back(i * step_ms);
+  }
+  const qint64 end = start + step * (steps - 1);
+  return RunParityFrames(label, start, end, targets, dues, step > 0, 150);
+}
+
+bool OnlineDragPreviewTestRunner::EnsureLocalReady(QString* error) {
+  if (options_.local_file.isEmpty()) {
+    *error = QStringLiteral("缺少 --file");
+    return false;
+  }
+  window_->OpenFile(options_.local_file);
+  const bool ready = WaitUntil(
+      [this]() {
+        return window_->HasMediaForTest() && window_->IndexReadyForTest() &&
+               window_->LastFrameIndexForTest() > 300;
+      },
+      std::max(10000, options_.timeout_ms), "online_drag_parity_local_ready");
+  if (!ready) {
+    *error = QStringLiteral("本地打开/索引超时");
+    return false;
+  }
+  window_->ClearFocusForTest();
+  window_->FocusVideoForTest();
+  return true;
+}
+
+bool OnlineDragPreviewTestRunner::OpenLocal(QString* error) {
+  return EnsureLocalReady(error);
+}
+
+OnlineDragPreviewTestRunner::ParityResult
+OnlineDragPreviewTestRunner::RunParityFar(const QString& label, qint64 start,
+                                          qint64 target, bool forward) {
+  ParityResult result;
+  result.label = label;
+  result.mode = options_.local_only ? QStringLiteral("local")
+                                    : QStringLiteral("online");
+  result.start_frame = start;
+  result.end_frame = target;
+  result.updates = 1;
+  (void)forward;
+  heartbeat_max_ms_ = 0;
+  heartbeat_over_200_ = 0;
+  window_->ResetPreviewStatsForTest();
+  const int stale_base = StaleNow();
+  window_->ScrubStartForTest(start);
+  Pump(120);
+  const int base_presented = PresentedNow();
+  QElapsedTimer far_clock;
+  far_clock.start();
+  window_->ScrubTargetForTest(target);
+  int last_presented = base_presented;
+  int presented = 0;
+  int coarse_count = 0;
+  int cache_count = 0;
+  qint64 first_ms = -1;
+  qint64 exact_ms = -1;
+  bool first_coarse = true;
+  bool exact_seen = false;
+  bool coarse_after_exact = false;
+  const auto poll = [&]() {
+    const int now = PresentedNow();
+    if (now <= last_presented) {
+      return;
+    }
+    const qint64 t = far_clock.elapsed();
+    const int delta = now - last_presented;
+    for (int i = 0; i < delta; ++i) {
+      ++presented;
+      if (first_ms < 0) {
+        first_ms = t;
+        first_coarse = CoarseNow();
+      }
+      if (CoarseNow()) {
+        ++coarse_count;
+      }
+      if (CacheNow()) {
+        ++cache_count;
+      }
+      if (!exact_seen) {
+        if (DisplayedNow() == target) {
+          exact_seen = true;
+          exact_ms = t;
+        }
+      } else if (CoarseNow()) {
+        coarse_after_exact = true;
+      }
+    }
+    last_presented = now;
+  };
+  const qint64 first_deadline = far_clock.elapsed() + 800;
+  while (far_clock.elapsed() < first_deadline && first_ms < 0) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    poll();
+    std::this_thread::yield();
+  }
+  const qint64 exact_deadline = far_clock.elapsed() + 3000;
+  while (far_clock.elapsed() < exact_deadline && !exact_seen) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    poll();
+    std::this_thread::yield();
+  }
+  const qint64 settle_deadline = far_clock.elapsed() + 150;
+  while (far_clock.elapsed() < settle_deadline) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    poll();
+    std::this_thread::yield();
+  }
+  result.presented = presented;
+  result.exact_ms = exact_ms;
+  result.first_response_ms =
+      first_ms >= 0 ? static_cast<double>(first_ms) : -1.0;
+  result.first_from_start_ms = result.first_response_ms;
+  result.max_response_ms = result.first_response_ms;
+  result.response_p95_ms = result.first_response_ms;
+  result.max_gap_ms = result.first_response_ms;
+  result.active_fps =
+      far_clock.elapsed() > 0
+          ? static_cast<double>(presented) * 1000.0 /
+                static_cast<double>(far_clock.elapsed())
+          : 0.0;
+  result.coarse_presented = coarse_count;
+  result.cache_presented = cache_count;
+  result.stale_dropped = StaleNow() - stale_base;
+  result.ui_gap_ms = heartbeat_max_ms_;
+  const bool landed = ParityLanding(target, &result);
+  result.ok = landed && first_ms >= 0 && first_ms <= 600 &&
+              exact_seen && !coarse_after_exact;
+  PrintParity(result);
+  if (first_coarse) {
+    result.coarse_presented = std::max(1, result.coarse_presented);
+  }
+  return result;
+}
+
+void OnlineDragPreviewTestRunner::RunParityUncached() {
+  if (window_->OnlineCacheCompleteForTest()) {
+    Check("parity_uncached_available", false,
+          QStringLiteral("cache_complete=1"));
+    return;
+  }
+  const qint64 last = window_->OnlineLastFrameForTest();
+  qint64 target = std::max<qint64>(1, last - 1);
+  int guard = 0;
+  while (target > 0 && window_->OnlineFrameCachedForTest(target) &&
+         guard++ < 5000) {
+    --target;
+  }
+  const bool uncached_available = !window_->OnlineFrameCachedForTest(target);
+  Check("parity_uncached_available", uncached_available,
+        QStringLiteral("target=%1 stable=%2 last=%3")
+            .arg(target)
+            .arg(window_->OnlineStableFramesForTest())
+            .arg(last));
+  if (!uncached_available) {
+    return;
+  }
+  const qint64 cached_start = 40;
+  Check("parity_uncached_start_cached",
+        window_->OnlineFrameCachedForTest(cached_start),
+        QStringLiteral("frame=%1").arg(cached_start));
+  window_->ResetPreviewStatsForTest();
+  window_->ScrubStartForTest(cached_start);
+  Pump(80);
+  const int before = PresentedNow();
+  QElapsedTimer target_timer;
+  target_timer.start();
+  window_->ScrubTargetForTest(target);
+  const qint64 ui_ms = target_timer.elapsed();
+  const QString status = window_->StatusMessageForTest();
+  Check("parity_uncached_prompt",
+        status.contains(QStringLiteral("缓冲中（预览）")) &&
+            status.contains(QString::number(target)),
+        status);
+  Check("parity_uncached_ui_le_100ms", ui_ms <= 100,
+        QStringLiteral("ms=%1").arg(ui_ms));
+  Pump(200);
+  Check("parity_uncached_waiting", window_->OnlinePreviewWaitingForTest(),
+        window_->OnlinePreviewStateForTest());
+  window_->ScrubTargetForTest(cached_start + 5);
+  const bool resumed = WaitUntil(
+      [this, before]() {
+        return !window_->OnlinePreviewWaitingForTest() &&
+               PresentedNow() > before;
+      },
+      3000, "parity_uncached_resume");
+  Check("parity_uncached_resume", resumed,
+        window_->OnlinePreviewStateForTest());
+  ParityResult result;
+  result.label = QStringLiteral("uncached");
+  result.mode = QStringLiteral("online");
+  result.start_frame = cached_start;
+  result.end_frame = cached_start + 5;
+  result.updates = 1;
+  result.first_response_ms = static_cast<double>(ui_ms);
+  result.first_from_start_ms = static_cast<double>(ui_ms);
+  result.ui_gap_ms = heartbeat_max_ms_;
+  result.presented = std::max(0, PresentedNow() - before);
+  const bool landed = ParityLanding(cached_start + 5, &result);
+  result.ok = landed;
+  PrintParity(result);
+  Check("parity_uncached_release_landing", landed,
+        QStringLiteral("frame=%1 pts=%2 expected=%3")
+            .arg(window_->CurrentFrameForTest())
+            .arg(window_->CurrentPtsUsForTest())
+            .arg(window_->OnlineFramePtsForTest(cached_start + 5)));
+}
+
+void OnlineDragPreviewTestRunner::RunParity() { RunOnlineParity(); }
+
+void OnlineDragPreviewTestRunner::RunLocalParity() {
+  parity_ui_gap_max_ms_ = 0;
+  window_->raise();
+  window_->activateWindow();
+  window_->FocusVideoForTest();
+  QElapsedTimer heartbeat_clock;
+  heartbeat_clock.start();
+  qint64 heartbeat_last = 0;
+  QTimer heartbeat;
+  heartbeat.setInterval(16);
+  heartbeat.setTimerType(Qt::PreciseTimer);
+  QObject::connect(&heartbeat, &QTimer::timeout,
+                   [this, &heartbeat_clock, &heartbeat_last]() {
+                     const qint64 now = heartbeat_clock.elapsed();
+                     if (heartbeat_last > 0) {
+                       const qint64 gap = now - heartbeat_last;
+                       if (gap > 200) {
+                         ++heartbeat_over_200_;
+                       }
+                       heartbeat_max_ms_ = std::max(heartbeat_max_ms_, gap);
+                     }
+                     heartbeat_last = now;
+                   });
+  heartbeat.start();
+
+  QString error;
+  const bool opened = OpenLocal(&error);
+  Check("online_drag_parity_local_open", opened, error);
+  if (!opened) {
+    heartbeat.stop();
+    Print(QStringLiteral(
+              "online_drag_parity_result mode=local checks=%1 failures=%2 "
+              "verdict=fail")
+              .arg(checks_)
+              .arg(failures_));
+    QCoreApplication::exit(2);
+    return;
+  }
+  const qint64 last = window_->LastFrameIndexForTest();
+  const qint64 far_target = std::min<qint64>(3000, last - 1);
+  const ParityResult forward = RunParitySequence(
+      QStringLiteral("local_forward"), 15, 75, 60, 1000, true, 50, false);
+  const ParityResult backward = RunParitySequence(
+      QStringLiteral("local_backward"), 75, 15, 60, 1000, false, 50, false);
+  const ParityResult zoom_forward = RunParityZoom(
+      QStringLiteral("local_zoom_forward"), 40, 1, 10, 60);
+  const ParityResult zoom_backward = RunParityZoom(
+      QStringLiteral("local_zoom_backward"), 50, -1, 10, 60);
+  const ParityResult far_forward = RunParityFar(
+      QStringLiteral("local_far_forward"), 15, far_target, true);
+  const ParityResult far_backward = RunParityFar(
+      QStringLiteral("local_far_backward"), far_target, 15, false);
+  Check("local_forward_presented", forward.presented > 0,
+        QStringLiteral("presented=%1 fps=%2")
+            .arg(forward.presented)
+            .arg(QString::number(forward.active_fps, 'f', 2)));
+  Check("local_forward_landing",
+        forward.landing_frame_ok && forward.landing_pts_ok,
+        QStringLiteral("frame=%1").arg(forward.landing_frame_ok ? 1 : 0));
+  Check("local_backward_presented", backward.presented > 0,
+        QStringLiteral("presented=%1 fps=%2")
+            .arg(backward.presented)
+            .arg(QString::number(backward.active_fps, 'f', 2)));
+  Check("local_backward_landing",
+        backward.landing_frame_ok && backward.landing_pts_ok);
+  Check("local_zoom_forward_steps", zoom_forward.max_consecutive_missing <= 1,
+        QStringLiteral("max_missing=%1 max_response=%2")
+            .arg(zoom_forward.max_consecutive_missing)
+            .arg(QString::number(zoom_forward.max_response_ms, 'f', 2)));
+  Check("local_zoom_backward_steps",
+        zoom_backward.max_consecutive_missing <= 1,
+        QStringLiteral("max_missing=%1 max_response=%2")
+            .arg(zoom_backward.max_consecutive_missing)
+            .arg(QString::number(zoom_backward.max_response_ms, 'f', 2)));
+  Check("local_far_forward_exact",
+        far_forward.ok || (far_forward.landing_frame_ok &&
+                           far_forward.landing_pts_ok),
+        QStringLiteral("first_ms=%1 coarse=%2")
+            .arg(QString::number(far_forward.first_response_ms, 'f', 2))
+            .arg(far_forward.coarse_presented));
+  Check("local_far_backward_exact",
+        far_backward.ok || (far_backward.landing_frame_ok &&
+                            far_backward.landing_pts_ok),
+        QStringLiteral("first_ms=%1 coarse=%2")
+            .arg(QString::number(far_backward.first_response_ms, 'f', 2))
+            .arg(far_backward.coarse_presented));
+  heartbeat.stop();
+  Print(QStringLiteral(
+            "online_drag_parity_result mode=local checks=%1 failures=%2 "
+            "forward_fps=%3 backward_fps=%4 forward_gap=%5 backward_gap=%6 "
+            "forward_first=%7 backward_first=%8 verdict=%9")
+            .arg(checks_)
+            .arg(failures_)
+            .arg(QString::number(forward.active_fps, 'f', 2))
+            .arg(QString::number(backward.active_fps, 'f', 2))
+            .arg(QString::number(forward.max_gap_ms, 'f', 2))
+            .arg(QString::number(backward.max_gap_ms, 'f', 2))
+            .arg(QString::number(forward.first_response_ms, 'f', 2))
+            .arg(QString::number(backward.first_response_ms, 'f', 2))
+            .arg(failures_ == 0 ? QStringLiteral("pass")
+                                : QStringLiteral("fail")));
+  QCoreApplication::exit(failures_ == 0 ? 0 : 1);
+}
+
+void OnlineDragPreviewTestRunner::RunOnlineParity() {
+  parity_ui_gap_max_ms_ = 0;
+  window_->raise();
+  window_->activateWindow();
+  window_->FocusVideoForTest();
+  QElapsedTimer heartbeat_clock;
+  heartbeat_clock.start();
+  qint64 heartbeat_last = 0;
+  QTimer heartbeat;
+  heartbeat.setInterval(16);
+  heartbeat.setTimerType(Qt::PreciseTimer);
+  QObject::connect(&heartbeat, &QTimer::timeout,
+                   [this, &heartbeat_clock, &heartbeat_last]() {
+                     const qint64 now = heartbeat_clock.elapsed();
+                     if (heartbeat_last > 0) {
+                       const qint64 gap = now - heartbeat_last;
+                       if (gap > 200) {
+                         ++heartbeat_over_200_;
+                       }
+                       heartbeat_max_ms_ = std::max(heartbeat_max_ms_, gap);
+                     }
+                     heartbeat_last = now;
+                   });
+  heartbeat.start();
+
+  QString error;
+  const bool opened = OpenOnline(false, &error);
+  Check("online_drag_parity_open", opened, error);
+  if (!opened) {
+    heartbeat.stop();
+    Print(QStringLiteral(
+              "online_drag_parity_result mode=online checks=%1 failures=%2 "
+              "verdict=fail")
+              .arg(checks_)
+              .arg(failures_));
+    QCoreApplication::exit(2);
+    return;
+  }
+  Check("online_drag_parity_growing_session",
+        !window_->OnlineCacheHitForTest(),
+        QStringLiteral("cache_hit=%1")
+            .arg(window_->OnlineCacheHitForTest() ? 1 : 0));
+  qint64 start = 15;
+  qint64 end = 75;
+  const bool window_ready = WaitForCachedWindow(
+      &start, &end, 60, std::max(10000, options_.timeout_ms));
+  Check("online_drag_parity_cached_window", window_ready,
+        QStringLiteral("start=%1 end=%2 stable=%3")
+            .arg(start)
+            .arg(end)
+            .arg(window_->OnlineStableFramesForTest()));
+  if (!window_ready) {
+    heartbeat.stop();
+    QCoreApplication::exit(1);
+    return;
+  }
+
+  // 冷启动（5s GOP）只记录：在线预览解码器从关键帧解到目标，首帧可能
+  // 超过 100ms；这是长 GOP 冷启动残余，不作为丝滑门槛。反向冷启动最能
+  // 暴露“从关键帧解 75 帧”的成本（75 在 5s GOP 内，关键帧为 0）。
+  const ParityResult cold = RunParitySequence(
+      QStringLiteral("cold_backward"), 75, 65, 10, 300, false, 3000, false);
+  Check("cold_backward_landing",
+        cold.landing_frame_ok && cold.landing_pts_ok,
+        QStringLiteral("first=%1")
+            .arg(QString::number(cold.first_response_ms, 'f', 2)));
+  // 预热一次短拖动：Pause/Resume 保留有界帧缓存，之后的拖动从缓存命中。
+  RunParityZoom(QStringLiteral("warmup"), 15, 1, 6, 60);
+
+  const ParityResult forward = RunParitySequence(
+      QStringLiteral("forward"), 15, 75, 60, 1000, true, 50, false);
+  const ParityResult backward = RunParitySequence(
+      QStringLiteral("backward"), 75, 15, 60, 1000, false, 50, false);
+  Check("forward_first_response_le_100",
+        forward.first_response_ms >= 0 && forward.first_response_ms <= 100.0,
+        QStringLiteral("first=%1 from_start=%2")
+            .arg(QString::number(forward.first_response_ms, 'f', 2))
+            .arg(QString::number(forward.first_from_start_ms, 'f', 2)));
+  Check("forward_response_p95_le_100", forward.response_p95_ms <= 100.0,
+        QStringLiteral("p95=%1")
+            .arg(QString::number(forward.response_p95_ms, 'f', 2)));
+  Check("forward_max_gap_le_50", forward.max_gap_ms <= 50.0,
+        QStringLiteral("max_gap=%1")
+            .arg(QString::number(forward.max_gap_ms, 'f', 2)));
+  Check("forward_active_fps_ge_42", forward.active_fps >= 42.0,
+        QStringLiteral("fps=%1 presented=%2")
+            .arg(QString::number(forward.active_fps, 'f', 2))
+            .arg(forward.presented));
+  Check("forward_no_consecutive_missing",
+        forward.max_consecutive_missing <= 1,
+        QStringLiteral("max_missing=%1")
+            .arg(forward.max_consecutive_missing));
+  Check("forward_no_flicker", forward.flicker == 0,
+        QStringLiteral("flicker=%1").arg(forward.flicker));
+  Check("forward_landing",
+        forward.landing_frame_ok && forward.landing_pts_ok);
+  Check("backward_first_response_le_100",
+        backward.first_response_ms >= 0 && backward.first_response_ms <= 100.0,
+        QStringLiteral("first=%1 from_start=%2")
+            .arg(QString::number(backward.first_response_ms, 'f', 2))
+            .arg(QString::number(backward.first_from_start_ms, 'f', 2)));
+  Check("backward_response_p95_le_100", backward.response_p95_ms <= 100.0,
+        QStringLiteral("p95=%1")
+            .arg(QString::number(backward.response_p95_ms, 'f', 2)));
+  Check("backward_max_gap_le_50", backward.max_gap_ms <= 50.0,
+        QStringLiteral("max_gap=%1")
+            .arg(QString::number(backward.max_gap_ms, 'f', 2)));
+  Check("backward_active_fps_ge_42", backward.active_fps >= 42.0,
+        QStringLiteral("fps=%1 presented=%2")
+            .arg(QString::number(backward.active_fps, 'f', 2))
+            .arg(backward.presented));
+  Check("backward_no_consecutive_missing",
+        backward.max_consecutive_missing <= 1,
+        QStringLiteral("max_missing=%1")
+            .arg(backward.max_consecutive_missing));
+  Check("backward_no_flicker", backward.flicker == 0,
+        QStringLiteral("flicker=%1").arg(backward.flicker));
+  Check("backward_landing",
+        backward.landing_frame_ok && backward.landing_pts_ok);
+  const double presented_max =
+      std::max(1, std::max(forward.presented, backward.presented));
+  const double presented_diff =
+      std::abs(forward.presented - backward.presented) / presented_max;
+  Check("parity_presented_diff_le_10pct", presented_diff <= 0.10,
+        QStringLiteral("forward=%1 backward=%2 diff=%3")
+            .arg(forward.presented)
+            .arg(backward.presented)
+            .arg(QString::number(presented_diff, 'f', 3)));
+
+  const ParityResult zoom_forward = RunParityZoom(
+      QStringLiteral("zoom_forward"), 40, 1, 10, 60);
+  const ParityResult zoom_backward = RunParityZoom(
+      QStringLiteral("zoom_backward"), 50, -1, 10, 60);
+  for (const ParityResult* zoom : {&zoom_forward, &zoom_backward}) {
+    Check(zoom->label == QStringLiteral("zoom_forward")
+              ? "zoom_forward_each_step_le_100"
+              : "zoom_backward_each_step_le_100",
+          zoom->max_response_ms <= 100.0,
+          QStringLiteral("max_response=%1")
+              .arg(QString::number(zoom->max_response_ms, 'f', 2)));
+    Check(zoom->label == QStringLiteral("zoom_forward")
+              ? "zoom_forward_gap_le_150"
+              : "zoom_backward_gap_le_150",
+          zoom->max_gap_ms <= 150.0,
+          QStringLiteral("max_gap=%1")
+              .arg(QString::number(zoom->max_gap_ms, 'f', 2)));
+    Check(zoom->label == QStringLiteral("zoom_forward")
+              ? "zoom_forward_no_two_missing"
+              : "zoom_backward_no_two_missing",
+          zoom->max_consecutive_missing <= 1,
+          QStringLiteral("max_missing=%1")
+              .arg(zoom->max_consecutive_missing));
+    Check(zoom->label == QStringLiteral("zoom_forward")
+              ? "zoom_forward_no_flicker"
+              : "zoom_backward_no_flicker",
+          zoom->flicker == 0, QStringLiteral("flicker=%1").arg(zoom->flicker));
+    Check(zoom->label == QStringLiteral("zoom_forward")
+              ? "zoom_forward_landing"
+              : "zoom_backward_landing",
+          zoom->landing_frame_ok && zoom->landing_pts_ok);
+  }
+
+  RunParityUncached();
+
+  const bool far_ready = WaitUntil(
+      [this]() { return window_->OnlineFrameCachedForTest(3000); },
+      150000, "online_drag_parity_far_cached");
+  Check("online_drag_parity_far_cached", far_ready,
+        QStringLiteral("stable=%1 last=%2")
+            .arg(window_->OnlineStableFramesForTest())
+            .arg(window_->OnlineLastFrameForTest()));
+  if (far_ready) {
+    const ParityResult far_forward = RunParityFar(
+        QStringLiteral("far_forward"), 15, 3000, true);
+    const ParityResult far_backward = RunParityFar(
+        QStringLiteral("far_backward"), 3000, 15, false);
+    Check("far_forward_coarse_le_100",
+          far_forward.first_response_ms >= 0 &&
+              far_forward.first_response_ms <= 100.0,
+          QStringLiteral("first=%1")
+              .arg(QString::number(far_forward.first_response_ms, 'f', 2)));
+    Check("far_forward_exact_after_coarse", far_forward.ok,
+          QStringLiteral("coarse=%1 presented=%2")
+              .arg(far_forward.coarse_presented)
+              .arg(far_forward.presented));
+    Check("far_forward_landing",
+          far_forward.landing_frame_ok && far_forward.landing_pts_ok);
+    Check("far_backward_coarse_le_100",
+          far_backward.first_response_ms >= 0 &&
+              far_backward.first_response_ms <= 100.0,
+          QStringLiteral("first=%1")
+              .arg(QString::number(far_backward.first_response_ms, 'f', 2)));
+    Check("far_backward_exact_after_coarse", far_backward.ok,
+          QStringLiteral("coarse=%1 presented=%2")
+              .arg(far_backward.coarse_presented)
+              .arg(far_backward.presented));
+    Check("far_backward_landing",
+          far_backward.landing_frame_ok && far_backward.landing_pts_ok);
+  }
+
+  const qint64 cache_peak =
+      static_cast<qint64>(window_->OnlinePreviewCachePeakBytesForTest());
+  Check("online_drag_parity_cache_peak_le_64mib",
+        cache_peak <= 64LL * 1024LL * 1024LL,
+        QStringLiteral("peak=%1").arg(cache_peak));
+  Check("online_drag_parity_cache_frames_le_72",
+        window_->OnlinePreviewCachedFramesForTest() <= 72,
+        QStringLiteral("frames=%1")
+            .arg(window_->OnlinePreviewCachedFramesForTest()));
+  heartbeat.stop();
+  Print(QStringLiteral(
+            "online_drag_parity_ui_gap max_ms=%1 over_200=%2 cache_peak=%3 "
+            "cache_frames=%4")
+            .arg(parity_ui_gap_max_ms_)
+            .arg(heartbeat_over_200_)
+            .arg(cache_peak)
+            .arg(window_->OnlinePreviewCachedFramesForTest()));
+  Print(QStringLiteral(
+            "online_drag_parity_result mode=online checks=%1 failures=%2 "
+            "cold_first=%3 forward_fps=%4 backward_fps=%5 "
+            "forward_gap=%6 backward_gap=%7 presented_diff=%8 verdict=%9")
+            .arg(checks_)
+            .arg(failures_)
+            .arg(QString::number(cold.first_response_ms, 'f', 2))
+            .arg(QString::number(forward.active_fps, 'f', 2))
+            .arg(QString::number(backward.active_fps, 'f', 2))
+            .arg(QString::number(forward.max_gap_ms, 'f', 2))
+            .arg(QString::number(backward.max_gap_ms, 'f', 2))
+            .arg(QString::number(presented_diff, 'f', 3))
+            .arg(failures_ == 0 ? QStringLiteral("pass")
+                                : QStringLiteral("fail")));
+  QCoreApplication::exit(failures_ == 0 ? 0 : 1);
+}
+
 void OnlineDragPreviewTestRunner::Run() {
+  if (options_.local_only) {
+    RunLocalParity();
+    return;
+  }
+  if (options_.parity) {
+    RunOnlineParity();
+    return;
+  }
   Print(QStringLiteral(
             "online_drag_preview_sample tag=%1 bvid=%2 cid=%3 page=%4 "
             "drag_seconds=%5 samples=%6 cache_hit_only=%7 throttle_bps=%8")

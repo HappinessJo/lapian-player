@@ -594,6 +594,9 @@ int main(int argc, char* argv[]) {
   bool online_longpress_fresh_cache = false;
   // T8.6.1b：在线拖动预览探针（增长会话/缓存命中两轮）。
   bool online_drag_preview_test = false;
+  // 2026-10-25：在线拖动前后一致 + 丝滑验收 / 本地 1080p 基线。
+  bool online_drag_parity_test = false;
+  bool local_drag_parity_test = false;
   int online_drag_seconds = 1;
   int online_drag_samples = 60;
   qint64 online_drag_start_frame = 15;
@@ -800,6 +803,11 @@ int main(int argc, char* argv[]) {
       online_longpress_test = true;
     } else if (arguments[i] == QStringLiteral("--online-drag-preview-test")) {
       online_drag_preview_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-drag-parity-test")) {
+      online_drag_preview_test = true;
+      online_drag_parity_test = true;
+    } else if (arguments[i] == QStringLiteral("--local-drag-parity-test")) {
+      local_drag_parity_test = true;
     } else if (arguments[i] == QStringLiteral("--drag-seconds") &&
                i + 1 < arguments.size()) {
       online_drag_seconds = arguments[++i].toInt();
@@ -1004,8 +1012,9 @@ int main(int argc, char* argv[]) {
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
-      online_drag_preview_test || online_quality_test ||
-      online_quality_switch_test || online_m2_test || online_vip_test ||
+      online_drag_preview_test || online_drag_parity_test ||
+      online_quality_test || online_quality_switch_test || online_m2_test ||
+      online_vip_test ||
       (online_index_test && online_index_offline_video.isEmpty())) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
@@ -1316,7 +1325,8 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_drag_preview_test ||
-      online_quality_test || online_quality_switch_test || online_vip_test ||
+      online_drag_parity_test || online_quality_test ||
+      online_quality_switch_test || online_vip_test ||
       (online_m2_test && !online_m2_default_paths) || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
@@ -1325,6 +1335,8 @@ int main(int argc, char* argv[]) {
         cache_name = QStringLiteral("/build/t8.7-online-cache");
       } else if (online_longpress_test) {
         cache_name = QStringLiteral("/build/t8.6.1a-online-cache");
+      } else if (online_drag_parity_test) {
+        cache_name = QStringLiteral("/build/t8.18-online-parity-cache");
       } else if (online_drag_preview_test) {
         cache_name = QStringLiteral("/build/t8.6.1b-online-cache");
       } else if (online_quality_test) {
@@ -1350,6 +1362,9 @@ int main(int argc, char* argv[]) {
     if (online_drag_preview_test && !online_drag_cache_hit) {
       QDir(online_m1_cache_root).removeRecursively();
     }
+    if (online_drag_parity_test && !online_drag_cache_hit) {
+      QDir(online_m1_cache_root).removeRecursively();
+    }
     QDir().mkpath(online_m1_cache_root);
     window.SetOnlineCacheRootForTest(online_m1_cache_root);
     if (online_m1_pictures.isEmpty()) {
@@ -1358,6 +1373,8 @@ int main(int argc, char* argv[]) {
         pictures_name = QStringLiteral("/build/t8.7-online-pictures");
       } else if (online_longpress_test) {
         pictures_name = QStringLiteral("/build/t8.6.1a-online-pictures");
+      } else if (online_drag_parity_test) {
+        pictures_name = QStringLiteral("/build/t8.18-online-parity-pictures");
       } else if (online_drag_preview_test) {
         pictures_name = QStringLiteral("/build/t8.6.1b-online-pictures");
       } else if (online_quality_test) {
@@ -1407,6 +1424,8 @@ int main(int argc, char* argv[]) {
       QString records_name = QStringLiteral("/build/t8.7-online-records-m1");
       if (online_longpress_test) {
         records_name = QStringLiteral("/build/t8.6.1a-online-records");
+      } else if (online_drag_parity_test) {
+        records_name = QStringLiteral("/build/t8.18-online-parity-records");
       } else if (online_drag_preview_test) {
         records_name = QStringLiteral("/build/t8.6.1b-online-records");
       } else if (online_quality_test) {
@@ -1750,7 +1769,7 @@ int main(int argc, char* argv[]) {
   // T8.6.1b：在线增长会话拖动预览（已缓存 FPS/精确落帧/未缓存提示/缓存命中）。
   std::unique_ptr<lapian::app::OnlineDragPreviewTestRunner>
       online_drag_preview_runner;
-  if (online_drag_preview_test) {
+  if (online_drag_preview_test || local_drag_parity_test) {
     lapian::app::OnlineDragPreviewTestOptions options;
     options.bvid = online_m1_bvid;
     options.cid = online_m1_cid;
@@ -1762,6 +1781,9 @@ int main(int argc, char* argv[]) {
     options.start_frame = online_drag_start_frame;
     options.cache_hit_only = online_drag_cache_hit;
     options.throttle_bytes_per_sec = online_m1_throttle_bps;
+    options.parity = online_drag_parity_test;
+    options.local_only = local_drag_parity_test;
+    options.local_file = file_path;
     online_drag_preview_runner =
         std::make_unique<lapian::app::OnlineDragPreviewTestRunner>(&window,
                                                                    options);

@@ -98,6 +98,8 @@ struct VideoDecoder::Impl {
   ID3D11Device* external_device = nullptr;
   // DP-1：预览解码可覆盖表面池额外帧数；主播放保持默认。
   int extra_hw_frames_override = -1;
+  // 在线预览预取：限制解码线程数，避免和需求解码抢满 CPU；0 = FFmpeg 默认。
+  int thread_count_override = 0;
 
   ~Impl() { Close(); }
 
@@ -122,6 +124,7 @@ struct VideoDecoder::Impl {
     eof_sent = false;
     packet_valid = false;
     extra_hw_frames_override = -1;
+    thread_count_override = 0;
   }
 
   bool IsOpen() const { return format != nullptr && decoder != nullptr && frame != nullptr; }
@@ -199,6 +202,10 @@ struct VideoDecoder::Impl {
         return nullptr;
       }
       context->pkt_timebase = stream->time_base;
+      if (thread_count_override > 0) {
+        context->thread_count = thread_count_override;
+        context->thread_type = FF_THREAD_FRAME;
+      }
 
       if (hardware) {
         // T7.11.1：1080p 后退窗口的延后回拷最多同时持有 24 个硬解帧引用。
@@ -538,7 +545,7 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
 
 bool VideoDecoder::OpenWithFormat(AVFormatContext* format, int video_stream_index,
                                   ID3D11Device* d3d11_device, bool prefer_hardware,
-                                  std::string* error) {
+                                  std::string* error, int thread_count) {
   if (error == nullptr) {
     return false;
   }
@@ -559,6 +566,7 @@ bool VideoDecoder::OpenWithFormat(AVFormatContext* format, int video_stream_inde
   impl_->external_device = d3d11_device;
   impl_->requested_stream = video_stream_index;
   impl_->extra_hw_frames_override = -1;
+  impl_->thread_count_override = thread_count;
   if (impl_->OpenFormatInternal(format, false, video_stream_index, prefer_hardware,
                                 d3d11_device, std::string(), error)) {
     return true;
