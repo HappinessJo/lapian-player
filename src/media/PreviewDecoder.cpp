@@ -61,8 +61,9 @@ constexpr auto kEndWait = std::chrono::milliseconds(100);
 // End() 后把环缓存收窄，避免空闲播放时长期占用上百 MB；热缓存仍保留 32 帧。
 constexpr std::size_t kPreviewRingIdleBytes = 32u * 1024u * 1024u;
 constexpr std::size_t kPreviewThumbIdleBytes = 16u * 1024u * 1024u;
-// 正向只有超大跳（>300 帧）才先发粗帧；正向连续解码本身会发布中间帧。
-constexpr std::int64_t kCoarseMinForwardJump = 300;
+// 正向只有超大跳（≥300 帧）才先发粗帧；正向连续解码本身会发布中间帧。
+// DP-3：阈值与 DragStrategy 共用（kDragFarJumpStep），不在这里写第二份。
+constexpr std::int64_t kCoarseMinForwardJump = kDragFarJumpStep;
 // 反向小步拖动时把整段解码结果回拷进缓存（最多一个 GOP），后续邻近目标可命中。
 // 大步反向/正向不逐帧回拷，避免 GPU→CPU 回拷把 Present 拖慢。
 // 环缓存只保留目标附近 ±60s（30fps）的帧；超出窗口的旧帧对反向/局部拖动无价值。
@@ -226,6 +227,16 @@ struct PreviewDecoder::Impl {
   bool latest_from_cache = false;
   bool latest_hardware = false;
 
+  // DP-3：FarJump 的“先粗后精”闸门。粗帧已发布但 UI 还没取走时，精确目标
+  // 先暂存在这里；TakeLatestFrame 取走粗帧后，下一 tick 再把精确帧交给 UI。
+  // 只服务远跳策略，快拖/慢拖/反向不改变 DP-2 的发布时序。
+  AVFrame* deferred_exact = nullptr;
+  std::int64_t deferred_exact_pts_us = 0;
+  std::int64_t deferred_exact_frame_index = -1;
+  bool deferred_exact_hardware = false;
+  bool coarse_undelivered = false;
+  DragMode drag_mode = DragMode::Exact;
+
   // 拖动会话统计；Begin 清零，诊断/探针在拖动中或松手前读取。
   std::atomic<int> seeks{0};
   std::atomic<int> cache_hits{0};
@@ -311,6 +322,9 @@ struct PreviewDecoder::Impl {
     }
 
     std::lock_guard<std::mutex> lock(mutex);
+    if (deferred_exact != nullptr) {
+      av_frame_free(&deferred_exact);
+    }
     if (latest != nullptr) {
       av_frame_free(&latest);
     }
@@ -355,6 +369,11 @@ struct PreviewDecoder::Impl {
     latest_coarse = false;
     latest_from_cache = false;
     latest_hardware = false;
+    deferred_exact_pts_us = 0;
+    deferred_exact_frame_index = -1;
+    deferred_exact_hardware = false;
+    coarse_undelivered = false;
+    drag_mode = DragMode::Exact;
     last_delivered_frame = -1;
     last_delivered_coarse = false;
     last_pts_us = 0;
@@ -520,6 +539,33 @@ struct PreviewDecoder::Impl {
     UpdateCachePeakLocked();
   }
 
+  // 调用方持有 mutex。DP-3 远跳闸门用：丢弃暂存的精确帧。
+  void FreeDeferredExactLocked() {
+    if (deferred_exact != nullptr) {
+      av_frame_free(&deferred_exact);
+    }
+    deferred_exact_pts_us = 0;
+    deferred_exact_frame_index = -1;
+    deferred_exact_hardware = false;
+  }
+
+  // 调用方持有 mutex。粗帧被 UI 取走后，把暂存的精确目标提升为 latest；
+  // 下一次 TakeLatestFrame 即可交给 UI，保证“先粗后精”且不丢精确帧。
+  void PromoteDeferredExactLocked() {
+    if (deferred_exact == nullptr) {
+      return;
+    }
+    AVFrame* frame = deferred_exact;
+    const std::int64_t pts = deferred_exact_pts_us;
+    const std::int64_t index_frame = deferred_exact_frame_index;
+    const bool hardware = deferred_exact_hardware;
+    deferred_exact = nullptr;
+    deferred_exact_pts_us = 0;
+    deferred_exact_frame_index = -1;
+    deferred_exact_hardware = false;
+    ReplaceLatestLocked(frame, pts, index_frame, false, false, hardware);
+  }
+
   // 接管 frame；调用方持有 mutex。
   void ReplaceLatestLocked(AVFrame* frame, std::int64_t pts_us,
                            std::int64_t frame_index, bool coarse,
@@ -527,6 +573,10 @@ struct PreviewDecoder::Impl {
     if (stop || !active) {
       av_frame_free(&frame);
       return;
+    }
+    if (!coarse) {
+      // 新的精确帧已经就位，之前暂存的精确帧不再有意义。
+      FreeDeferredExactLocked();
     }
     if (latest != nullptr) {
       av_frame_free(&latest);
@@ -538,6 +588,7 @@ struct PreviewDecoder::Impl {
     latest_coarse = coarse;
     latest_from_cache = from_cache;
     latest_hardware = hardware;
+    coarse_undelivered = coarse;
     ++published_count;
     last_published_frame = frame_index;
     if (coarse) {
@@ -555,6 +606,17 @@ struct PreviewDecoder::Impl {
     std::lock_guard<std::mutex> lock(mutex);
     if (stop || !active || session != requested_session) {
       av_frame_free(&frame);
+      return;
+    }
+    // DP-3 FarJump：粗帧还没被 UI 取走时，精确目标先暂存；等粗帧呈现后
+    // 下一 tick 再替换。保证“先粗后精”而不是在同一 tick 内被精确帧覆盖。
+    if (!coarse && drag_mode == DragMode::FarJump && coarse_undelivered &&
+        latest != nullptr && latest_coarse) {
+      FreeDeferredExactLocked();
+      deferred_exact = frame;
+      deferred_exact_pts_us = pts_us;
+      deferred_exact_frame_index = frame_index;
+      deferred_exact_hardware = hardware;
       return;
     }
     ReplaceLatestLocked(frame, pts_us, frame_index, coarse, from_cache,
@@ -605,6 +667,11 @@ struct PreviewDecoder::Impl {
     if (!cache_enabled || !thumbnails_enabled) {
       return false;
     }
+    // DP-3：慢拖/小步（Exact）不使用粗帧替换，避免关键帧粗帧打断精确目标；
+    // 快拖/反向/远跳仍按 DP-2 的 ≥300 帧阈值先发粗帧。
+    if (drag_mode == DragMode::Exact) {
+      return false;
+    }
     const std::int64_t distance =
         target >= old_target ? target - old_target : old_target - target;
     // 只有真正的远跳才先出粗帧；-20/-60 每 15.6ms 的快反向由精确路径处理
@@ -618,6 +685,10 @@ struct PreviewDecoder::Impl {
                            bool allow_nearest, std::int64_t max_distance = -1) {
     if (!active || session != requested_session || index == nullptr ||
         !thumbnails_enabled) {
+      return false;
+    }
+    // DP-3：Exact（慢拖/小步）只用精确帧，不用粗帧占位。
+    if (drag_mode == DragMode::Exact) {
       return false;
     }
     const std::int64_t keyframe =
@@ -732,6 +803,14 @@ struct PreviewDecoder::Impl {
         !thumbnails_enabled) {
       return;
     }
+    // DP-3：Exact（慢拖/小步）不允许缩略图线程把粗帧插到精确目标前后。
+    if (drag_mode == DragMode::Exact) {
+      if (timing) {
+        std::fprintf(stderr, "DP3 coarse_skip exact_mode keyframe=%lld\n",
+                     static_cast<long long>(keyframe));
+      }
+      return;
+    }
     // 粗帧只能来自目标之前（或正好目标）的关键帧；目标已经继续后退时，
     // 刚解出的旧关键帧仍可能比上一张已显示帧更早，允许它作为粗帧继续后退。
     if (keyframe > target_frame) {
@@ -792,6 +871,8 @@ struct PreviewDecoder::Impl {
         latest_frame_index = -1;
         latest_generation = 0;
       }
+      FreeDeferredExactLocked();
+      coarse_undelivered = false;
       hardware_in_use = false;
       hw_fallback_reason = reason;
       ++decoder_reopens;
@@ -1725,6 +1806,9 @@ void PreviewDecoder::Configure(const std::string& utf8_path, int video_stream_in
     impl_->last_published_frame = -1;
     impl_->last_delivered_frame = -1;
     impl_->last_delivered_coarse = false;
+    impl_->drag_mode = DragMode::Exact;
+    impl_->coarse_undelivered = false;
+    impl_->FreeDeferredExactLocked();
     impl_->last_target_step = 0;
     impl_->has_target_update = false;
     impl_->coarse_pending = false;
@@ -1783,6 +1867,8 @@ void PreviewDecoder::Begin(std::int64_t frame) {
   if (impl_->latest != nullptr) {
     av_frame_free(&impl_->latest);
   }
+  impl_->FreeDeferredExactLocked();
+  impl_->coarse_undelivered = false;
   impl_->latest_pts_us = 0;
   impl_->latest_frame_index = -1;
   impl_->latest_generation = 0;
@@ -1819,7 +1905,7 @@ void PreviewDecoder::Begin(std::int64_t frame) {
       ++impl_->cache_misses;
     }
   }
-  if (!exact_hit) {
+  if (!exact_hit && impl_->drag_mode != DragMode::Exact) {
     ++impl_->coarse_requests;
     impl_->coarse_pending = true;
     impl_->coarse_request_time = std::chrono::steady_clock::now();
@@ -1852,6 +1938,8 @@ void PreviewDecoder::UpdateTarget(std::int64_t frame) {
     impl_->target_direction = 1;
   }
   impl_->target_frame = frame;
+  // 目标已经变化，为上一目标暂存的精确帧立即作废（远跳闸门）。
+  impl_->FreeDeferredExactLocked();
 
   // DP-2：每次目标更新先查精确缓存；命中就立即发布，不等 worker seek。
   bool exact_hit = false;
@@ -1892,15 +1980,34 @@ void PreviewDecoder::UpdateTarget(std::int64_t frame) {
     }
   }
   ++impl_->generation;
-  if (step >= 300) {
+  if (step >= kCoarseMinForwardJump) {
     impl_->RequestThumbnailsLocked(frame, impl_->session);
   }
-  if (step <= 4 && impl_->target_direction < 0) {
+  if (step <= kDragExactMaxStep && impl_->target_direction < 0) {
     impl_->RequestPrefetchLocked(frame, impl_->session);
   } else {
     impl_->ClearPrefetchLocked();
   }
   impl_->condition.notify_all();
+}
+
+void PreviewDecoder::SetDragMode(DragMode mode) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->drag_mode = mode;
+  if (mode == DragMode::Exact && impl_->latest != nullptr &&
+      impl_->latest_coarse) {
+    // 从快拖/远跳切回慢拖：尚未呈现的粗帧立即作废，避免关键帧粗帧打断
+    // 精确目标；若已有暂存的精确帧，则直接提升。
+    av_frame_free(&impl_->latest);
+    impl_->latest_pts_us = 0;
+    impl_->latest_frame_index = -1;
+    impl_->latest_generation = 0;
+    impl_->latest_coarse = false;
+    impl_->latest_from_cache = false;
+    impl_->latest_hardware = false;
+    impl_->coarse_undelivered = false;
+    impl_->PromoteDeferredExactLocked();
+  }
 }
 
 void PreviewDecoder::End() {
@@ -1915,6 +2022,8 @@ void PreviewDecoder::End() {
     if (impl_->latest != nullptr) {
       av_frame_free(&impl_->latest);
     }
+    impl_->FreeDeferredExactLocked();
+    impl_->coarse_undelivered = false;
     // DP-2：松手后保留有界缓存供下一次拖动命中，但收窄到空闲预算；
     // 热缓存仍保留 32 帧（DP-1 容量不变）。
     impl_->ring_cache.TrimToBudget(kPreviewRingIdleBytes);
@@ -1977,6 +2086,12 @@ PreviewFrame PreviewDecoder::TakeLatestFrame() {
                  impl_->latest_frame_index <= impl_->last_delivered_frame) {
         discard = true;
       }
+      // DP-3：精确目标已经呈现后，任何粗帧都不得再替换它（尤其是远跳反向
+      // 落定后缩略图线程补发的更早关键帧，会把画面拉回目标之前）。
+      if (impl_->last_delivered_frame == impl_->target_frame &&
+          !impl_->last_delivered_coarse) {
+        discard = true;
+      }
     } else {
       // 1) 目标回退后，比当前目标更靠后的旧帧通常丢弃；
       // 2) 快速反向拖动时，解码线程完成的往往是“上一目标”的帧：它比当前目标晚，
@@ -2001,8 +2116,12 @@ PreviewFrame PreviewDecoder::TakeLatestFrame() {
     impl_->latest_coarse = false;
     impl_->latest_from_cache = false;
     impl_->latest_hardware = false;
+    impl_->coarse_undelivered = false;
+    // 被丢弃的可能是过期粗帧；为当前目标暂存的精确帧仍然有效，立即提升。
+    impl_->PromoteDeferredExactLocked();
     return result;
   }
+  const bool delivered_coarse = impl_->latest_coarse;
   result.frame = impl_->latest;
   result.pts_us = impl_->latest_pts_us;
   result.frame_index = impl_->latest_frame_index;
@@ -2033,6 +2152,14 @@ PreviewFrame PreviewDecoder::TakeLatestFrame() {
   impl_->latest_coarse = false;
   impl_->latest_from_cache = false;
   impl_->latest_hardware = false;
+  impl_->coarse_undelivered = false;
+  // DP-3：粗帧已经交给 UI，下一 tick 把暂存的精确目标提升为 latest，
+  // 保证“先粗后精”而不是让精确帧在同一 tick 覆盖粗帧。
+  if (delivered_coarse) {
+    impl_->PromoteDeferredExactLocked();
+  } else {
+    impl_->FreeDeferredExactLocked();
+  }
   return result;
 }
 
@@ -2101,6 +2228,7 @@ PreviewDiagnostics PreviewDecoder::diagnostics() const {
   result.cache_enabled = impl_->cache_enabled;
   result.prefetch_enabled = impl_->prefetch_enabled;
   result.thumbnails_enabled = impl_->thumbnails_enabled;
+  result.drag_mode = impl_->drag_mode;
   result.target_frame = impl_->target_frame;
   result.last_published_frame = impl_->last_published_frame.load();
   return result;

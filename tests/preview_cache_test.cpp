@@ -16,6 +16,7 @@ extern "C" {
 #pragma warning(pop)
 #endif
 
+#include "media/DragStrategy.h"
 #include "media/PreviewRingCache.h"
 
 namespace {
@@ -29,6 +30,19 @@ void Check(bool condition, const std::string& what) {
     std::printf("[FAIL] %s\n", what.c_str());
     ++g_failures;
   }
+}
+
+lapian::media::DragDecision Classify(std::int64_t step, int direction,
+                                     std::int64_t interval_ms = 16,
+                                     int same_direction_run = 1) {
+  lapian::media::DragInput input;
+  input.target = direction >= 0 ? step : -step;
+  input.previous_target = 0;
+  input.step = step;
+  input.direction = direction;
+  input.since_previous_ms = interval_ms;
+  input.same_direction_run = same_direction_run;
+  return lapian::media::ClassifyDrag(input);
 }
 
 AVFrame* MakeNv12(int width, int height) {
@@ -50,6 +64,60 @@ AVFrame* MakeNv12(int width, int height) {
 
 int main() {
   std::printf("DP-2 预览缓存测试\n");
+  using lapian::media::DragMode;
+  // DP-3：策略阈值与判定是纯函数，先于缓存测试执行；阈值改动必须同步
+  // docs/perf/drag-preview-dp3.md 与 --drag-strategy-test 的字段。
+  Check(lapian::media::kDragExactMaxStep == 4,
+        "DP-3 慢拖阈值：每次目标更新 ≤4 帧为 Exact");
+  Check(lapian::media::kDragFarJumpStep == 300,
+        "DP-3 远跳阈值：≥300 帧为 FarJump（与粗帧阈值一致）");
+  {
+    const auto begin = Classify(0, 0, 0);
+    Check(begin.mode == DragMode::Exact && std::string(begin.reason) == "begin",
+          "拖动起点（步长 0）落入 Exact/begin");
+    Check(begin.speed_frames_per_s == 0.0, "起点不产生速度（避免除零）");
+  }
+  const std::int64_t exact_steps[] = {1, 2, 3, 4};
+  bool exact_forward = true;
+  bool exact_backward = true;
+  for (const std::int64_t step : exact_steps) {
+    exact_forward = exact_forward && Classify(step, 1).mode == DragMode::Exact;
+    exact_backward = exact_backward && Classify(step, -1).mode == DragMode::Exact;
+  }
+  Check(exact_forward && exact_backward,
+        "慢拖 +1..+4 / -1..-4 都判定为 Exact");
+  Check(Classify(5, 1).mode == DragMode::Fast &&
+            Classify(60, 1).mode == DragMode::Fast &&
+            Classify(299, 1).mode == DragMode::Fast,
+        "正向 5..299 帧/次判定为 Fast");
+  Check(Classify(5, -1).mode == DragMode::Reverse &&
+            Classify(20, -1).mode == DragMode::Reverse &&
+            Classify(60, -1).mode == DragMode::Reverse &&
+            Classify(299, -1).mode == DragMode::Reverse,
+        "反向 5..299 帧/次判定为 Reverse");
+  Check(Classify(300, 1).mode == DragMode::FarJump &&
+            Classify(300, -1).mode == DragMode::FarJump &&
+            Classify(3000, 1).mode == DragMode::FarJump &&
+            Classify(3000, -1).mode == DragMode::FarJump,
+        "前/后 ≥300 帧判定为 FarJump（与方向无关）");
+  Check(Classify(10, 0).mode == DragMode::Exact,
+        "方向未知且步长 >4 时不放粗帧，回退 Exact");
+  {
+    const auto fast = Classify(60, 1, 16);
+    Check(fast.speed_frames_per_s > 3000.0 &&
+              fast.speed_frames_per_s < 4200.0,
+          "速度字段 = step/间隔（60 帧/16ms ≈ 3750 帧/秒）");
+    Check(std::string(Classify(60, 1, 16, 3).reason) == "forward_sustained" &&
+              std::string(Classify(60, -1, 16, 3).reason) ==
+                  "reverse_sustained",
+          "连续同向 ≥3 次写入 sustained 原因，可诊断策略切换");
+    Check(Classify(60, 1, 0).speed_frames_per_s == 0.0,
+          "间隔为 0 时速度字段保持 0");
+  }
+  Check(std::string(lapian::media::DragModeName(DragMode::FarJump)) ==
+            "far_jump",
+        "诊断模式名稳定（far_jump）");
+
   Check(lapian::media::PreviewRingCache::kDefaultBudgetBytes ==
             192u * 1024u * 1024u,
         "预览环缓存默认预算 192MiB（与 32 帧热缓存合计 ≤256MiB）");

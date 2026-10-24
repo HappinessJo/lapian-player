@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+#include "media/DragStrategy.h"
+
 struct AVFrame;
 struct ID3D11Device;
 
@@ -62,6 +64,9 @@ struct PreviewDiagnostics {
   bool cache_enabled = true;
   bool prefetch_enabled = true;
   bool thumbnails_enabled = true;
+  // DP-3：调用方（MainWindow）每次目标更新写入的交互策略。Exact 模式关闭
+  // 粗帧替换；FarJump 模式保证“先粗后精”（粗帧呈现后下一 tick 再交给精确帧）。
+  DragMode drag_mode = DragMode::Exact;
   std::int64_t target_frame = 0;
   std::int64_t last_published_frame = -1;
 };
@@ -94,6 +99,10 @@ class PreviewDecoder {
                  int source_height = 0);
   void Begin(std::int64_t frame);
   void UpdateTarget(std::int64_t frame);
+  // DP-3：设置本次拖动的交互策略（Exact/Fast/Reverse/FarJump）。必须在
+  // Begin/UpdateTarget 之前调用；只影响粗帧替换与远跳“先粗后精”，不改变
+  // 缓存预算、硬件帧不缓存、松手精确等 DP-1/DP-2 边界。
+  void SetDragMode(DragMode mode);
   // 停止发布并等待预览线程退出当前解码切片（硬件路径会等，避免和松手后的
   // 主播放精确 seek 同时使用同一个 D3D11 视频上下文）；有界等待，不阻塞 UI。
   void End();

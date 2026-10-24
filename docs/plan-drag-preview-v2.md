@@ -1,11 +1,11 @@
 # 拖动预览 v2 规划（DP 计划，非门）
 
-- **版本**：v1.0（2026-10-24）
-- **状态**：**DP-0/DP-1/DP-2 已实施（1080p 硬件默认；DP-2 强制软件快反向
-  残余）；DP-3/DP-4 待做**。这是本地拖动预览的体验改造计划，不是
+- **版本**：v1.1（2026-10-24，DP-3 完成）
+- **状态**：**DP-0/DP-1/DP-2/DP-3 已实施（1080p 硬件默认；DP-2/DP-3
+  强制软件快反向残余）；DP-4 待做**。这是本地拖动预览的体验改造计划，不是
   M1/M2/P4/P7 验收变更，也不是 v2 在线任务。
-- **基线**：提交 `079f0dd`（本地快拖热修），dist 34.48MB/25 文件，
-  `ctest` 36/36、key 77/0。
+- **基线**：提交 `079f0dd`（本地快拖热修），dist 34.48MB/25 文件；
+  当前 `ctest` 37/37（DP-2 新增缓存单测）、key 77/0。
 - **关联证据**：[local-drag-fast-2026-10-24.md](perf/local-drag-fast-2026-10-24.md)、
   [handoff-2026-10-24-drag-fast.md](handoff-2026-10-24-drag-fast.md)。
 
@@ -223,6 +223,16 @@ MainWindow 拖动事件
 - 快拖不冻住，最大空档达标；
 - 远跳先粗后精；粗帧不被误当最终帧；
 - 诊断能区分“精确帧/粗帧/缓存命中/硬解”。
+
+**完成记录（2026-10-24）**：四模式 `Exact/Fast/Reverse/FarJump`
+（阈值 4/300 帧，含方向/间隔/同向次数/速度）；Exact 关闭粗帧；
+FarJump 用 `deferred_exact` 保证先粗后精，并禁止精确目标后的粗帧替换；
+`PreviewTestDiagnostics` 增加 mode/lag/cache_hit_rate/displayed_hardware；
+新增 `--drag-strategy-test`。慢拖 +1/-1 lag p95=0（15.6ms 节奏 ≤2）、
+远跳粗帧 20.8/20.6ms、精确 30.6/30.0ms、P6 p95 18.8ms；
+`ctest` 37/37、key 77/0、T8.6.1b 35/0。证据
+[perf/drag-preview-dp3.md](perf/drag-preview-dp3.md)、交接
+[handoff-2026-10-24-dp3.md](handoff-2026-10-24-dp3.md)。
 
 ### DP-4 集成/发布
 

@@ -151,6 +151,8 @@ target_link_libraries(lapian_timeline PUBLIC Qt6::Widgets)
 add_library(lapian_media STATIC
   media/FrameCache.cpp
   media/FrameCache.h
+  media/DragStrategy.cpp
+  media/DragStrategy.h
   media/FrameIndex.cpp
   media/FrameIndex.h
   media/MediaInfo.h
@@ -212,6 +214,8 @@ qt_add_executable(lapian WIN32
   app/CacheSettingsDialog.h
   app/DragTestRunner.cpp
   app/DragTestRunner.h
+  app/DragStrategyTestRunner.cpp
+  app/DragStrategyTestRunner.h
   app/GopBoundaryTestRunner.cpp
   app/GopBoundaryTestRunner.h
   app/MemoryTestRunner.cpp

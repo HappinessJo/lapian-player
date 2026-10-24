@@ -9,6 +9,7 @@
 #include <QStringList>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -19,6 +20,7 @@
 #include "core/LoopRange.h"
 #include "core/MarkStore.h"
 #include "app/OnlineSession.h"
+#include "media/DragStrategy.h"
 #include "media/OnlineIndexBuilder.h"
 #include "online/QualityMenu.h"
 
@@ -91,6 +93,21 @@ struct PreviewTestDiagnostics {
   qint64 displayed_pts_us = 0;
   bool displayed_coarse = false;
   bool displayed_from_cache = false;
+  // DP-3：逐帧来源标记。hw_active 只说明解码器在硬解；displayed_hardware
+  // 说明“这一张被呈现的帧”确实是硬件帧（粗帧/缓存帧通常为 false）。
+  bool displayed_hardware = false;
+  // DP-3：拖动策略与目标滞后。mode 由 MainWindow 按 step/方向/间隔分类，
+  // 阈值见 media/DragStrategy.h；target_lag 是最近一次 Present 时显示帧与
+  // 当前目标的绝对差（帧/毫秒），由探针直接读取，不再只看 fps。
+  QString drag_mode;
+  QString drag_mode_reason;
+  qint64 drag_step = 0;
+  qint64 drag_interval_ms = 0;
+  double drag_speed_frames_per_s = 0.0;
+  int drag_same_direction_run = 0;
+  qint64 target_lag_frames = 0;
+  double target_lag_ms = 0.0;
+  double cache_hit_rate = 0.0;
   int seeks = 0;
   int cache_hits = 0;
   int cache_misses = 0;
@@ -475,6 +492,9 @@ class MainWindow : public QMainWindow {
   void OnScrubStarted(qint64 frame);
   void OnScrubTargetChanged(qint64 frame);
   void OnScrubFinished(qint64 frame);
+  // DP-3：按本次目标步长/方向/距上次目标时间/连续同向次数分类，写入诊断；
+  // 结果同时交给 PreviewDecoder（Exact 关闭粗帧，FarJump 先粗后精）。
+  void UpdatePreviewDragStrategy(qint64 frame);
   void OnPreviewTick();
   void OnFrameReady(const AVFrame* frame, int rotation, int frame_index);
   void OnPlaybackStateChanged(bool playing);
@@ -751,6 +771,18 @@ class MainWindow : public QMainWindow {
   std::int64_t preview_displayed_pts_us_ = 0;
   bool preview_displayed_coarse_ = false;
   bool preview_displayed_from_cache_ = false;
+  bool preview_displayed_hardware_ = false;
+  // DP-3：策略判定上下文（只 GUI 线程写）与最近一次 Present 的目标滞后。
+  lapian::media::DragMode preview_drag_mode_ = lapian::media::DragMode::Exact;
+  lapian::media::DragDecision preview_drag_decision_{};
+  std::chrono::steady_clock::time_point preview_last_target_time_{};
+  bool preview_last_target_time_valid_ = false;
+  int preview_last_direction_ = 0;
+  int preview_same_direction_run_ = 0;
+  qint64 preview_last_step_ = 0;
+  qint64 preview_last_interval_ms_ = 0;
+  qint64 preview_target_lag_frames_ = 0;
+  double preview_target_lag_ms_ = 0.0;
   bool online_preview_wait_status_ = false;
   bool online_preview_error_shown_ = false;
   QElapsedTimer online_preview_wait_timer_;

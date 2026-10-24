@@ -37,6 +37,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include "app/DragStrategyTestRunner.h"
 #include "app/DragTestRunner.h"
 #include "app/GopBoundaryTestRunner.h"
 #include "app/MainWindow.h"
@@ -570,6 +571,8 @@ int main(int argc, char* argv[]) {
   int drag_fast_cycles = 1;
   // DP-2：远跳粗帧探针。
   bool drag_far = false;
+  // DP-3：慢拖/快拖/反向/远跳/松手策略矩阵探针。
+  bool drag_strategy_test = false;
   bool force_software_decode = false;
   // DP-1：只强制本地拖动预览走软件解码，用于验证自动回退路径仍能出帧。
   bool preview_force_software = false;
@@ -752,6 +755,8 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--drag-far-test")) {
       drag_test = true;
       drag_far = true;
+    } else if (arguments[i] == QStringLiteral("--drag-strategy-test")) {
+      drag_strategy_test = true;
     } else if (arguments[i] == QStringLiteral("--drag-fast-step") &&
                i + 1 < arguments.size()) {
       drag_fast_step = arguments[++i].toInt();
@@ -1491,6 +1496,14 @@ int main(int argc, char* argv[]) {
     }
     drag_runner->SetFastCycles(drag_fast_cycles);
     drag_runner->Start();
+  }
+
+  // DP-3：交互策略验收矩阵（慢拖/快拖/反向/远跳/松手）。
+  std::unique_ptr<lapian::app::DragStrategyTestRunner> drag_strategy_runner;
+  if (drag_strategy_test) {
+    drag_strategy_runner =
+        std::make_unique<lapian::app::DragStrategyTestRunner>(&window, file_path);
+    drag_strategy_runner->Start();
   }
 
   // T7.11：P7 跨 GOP 边界后退专项；与拖动/步进探针共用产品入口。

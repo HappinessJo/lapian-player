@@ -4996,6 +4996,17 @@ PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   result.displayed_pts_us = preview_displayed_pts_us_;
   result.displayed_coarse = preview_displayed_coarse_;
   result.displayed_from_cache = preview_displayed_from_cache_;
+  result.displayed_hardware = preview_displayed_hardware_;
+  result.drag_mode =
+      QString::fromLatin1(lapian::media::DragModeName(preview_drag_mode_));
+  result.drag_mode_reason =
+      QString::fromLatin1(preview_drag_decision_.reason);
+  result.drag_step = preview_last_step_;
+  result.drag_interval_ms = preview_last_interval_ms_;
+  result.drag_speed_frames_per_s = preview_drag_decision_.speed_frames_per_s;
+  result.drag_same_direction_run = preview_same_direction_run_;
+  result.target_lag_frames = preview_target_lag_frames_;
+  result.target_lag_ms = preview_target_lag_ms_;
   result.presented = preview_presented_count_;
   if (preview_ == nullptr) {
     return result;
@@ -5008,6 +5019,11 @@ PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   result.cache_hits = diagnostics.cache_hits;
   result.cache_misses = diagnostics.cache_misses;
   result.cache_requests = diagnostics.cache_requests;
+  result.cache_hit_rate =
+      diagnostics.cache_requests > 0
+          ? static_cast<double>(diagnostics.cache_hits) /
+                static_cast<double>(diagnostics.cache_requests)
+          : 0.0;
   result.coarse_hits = diagnostics.coarse_hits;
   result.coarse_requests = diagnostics.coarse_requests;
   result.coarse_published = diagnostics.coarse_published;
@@ -5073,6 +5089,16 @@ void MainWindow::ResetPreviewStatsForTest() {
   preview_displayed_pts_us_ = 0;
   preview_displayed_coarse_ = false;
   preview_displayed_from_cache_ = false;
+  preview_displayed_hardware_ = false;
+  preview_drag_mode_ = lapian::media::DragMode::Exact;
+  preview_drag_decision_ = lapian::media::DragDecision{};
+  preview_last_target_time_valid_ = false;
+  preview_last_direction_ = 0;
+  preview_same_direction_run_ = 0;
+  preview_last_step_ = 0;
+  preview_last_interval_ms_ = 0;
+  preview_target_lag_frames_ = 0;
+  preview_target_lag_ms_ = 0.0;
   online_preview_wait_status_ = false;
   online_preview_error_shown_ = false;
 }
@@ -5513,7 +5539,22 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     preview_displayed_pts_us_ = 0;
     preview_displayed_coarse_ = false;
     preview_displayed_from_cache_ = false;
+    preview_displayed_hardware_ = false;
+    // DP-3：新拖动从 Exact 起步，阈值/模式的上下文全部清零；真正切到
+    // Fast/Reverse/FarJump 要等目标更新后由 UpdatePreviewDragStrategy 判定。
+    preview_drag_mode_ = lapian::media::DragMode::Exact;
+    preview_drag_decision_ = lapian::media::DragDecision{};
+    preview_drag_decision_.reason = "begin";
+    preview_last_target_time_ = std::chrono::steady_clock::now();
+    preview_last_target_time_valid_ = true;
+    preview_last_direction_ = 0;
+    preview_same_direction_run_ = 0;
+    preview_last_step_ = 0;
+    preview_last_interval_ms_ = 0;
+    preview_target_lag_frames_ = 0;
+    preview_target_lag_ms_ = 0.0;
     EnsurePreviewDecoderDevice();
+    preview_->SetDragMode(preview_drag_mode_);
     preview_->Begin(frame);
     if (preview_timer_ != nullptr) {
       // DP-1：Windows 默认 15.6ms 定时器粒度会把 16ms 推到 ~31ms，导致
@@ -5544,12 +5585,57 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   }
 }
 
+void MainWindow::UpdatePreviewDragStrategy(qint64 frame) {
+  const qint64 previous = preview_target_frame_;
+  if (previous < 0 || frame == previous) {
+    return;
+  }
+  const qint64 step = frame > previous ? frame - previous : previous - frame;
+  const int direction = frame > previous ? 1 : -1;
+  const auto now = std::chrono::steady_clock::now();
+  qint64 interval_ms = 0;
+  if (preview_last_target_time_valid_) {
+    interval_ms = static_cast<qint64>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - preview_last_target_time_)
+            .count());
+    if (interval_ms < 0) {
+      interval_ms = 0;
+    }
+  }
+  if (direction == preview_last_direction_) {
+    ++preview_same_direction_run_;
+  } else {
+    preview_same_direction_run_ = 1;
+  }
+  lapian::media::DragInput input;
+  input.target = frame;
+  input.previous_target = previous;
+  input.step = step;
+  input.direction = direction;
+  input.since_previous_ms = interval_ms;
+  input.same_direction_run = preview_same_direction_run_;
+  preview_drag_decision_ = lapian::media::ClassifyDrag(input);
+  preview_drag_mode_ = preview_drag_decision_.mode;
+  preview_last_step_ = step;
+  preview_last_interval_ms_ = interval_ms;
+  preview_last_direction_ = direction;
+  preview_last_target_time_ = now;
+  preview_last_target_time_valid_ = true;
+  if (preview_ != nullptr) {
+    preview_->SetDragMode(preview_drag_mode_);
+  }
+}
+
 void MainWindow::OnScrubTargetChanged(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
   ShowScrubTarget(frame);
   if (preview_ != nullptr) {
+    // DP-3：先按上一个目标与本次步长/方向/间隔分类，再写目标；策略结果
+    // 交给 PreviewDecoder，决定 Exact 是否允许粗帧、FarJump 是否先粗后精。
+    UpdatePreviewDragStrategy(frame);
     preview_target_frame_ = frame;
     preview_->UpdateTarget(frame);
     return;
@@ -5776,6 +5862,9 @@ void MainWindow::EnsurePreviewDecoderDevice() {
                       session_->info().video.width,
                       session_->info().video.height);
   if (resume) {
+    // 设备重建后恢复同一次拖动的策略，避免 FarJump 退化成 Exact 而丢掉
+    // “先粗后精”，或 Exact 被误当成快拖重新允许粗帧。
+    preview_->SetDragMode(preview_drag_mode_);
     preview_->Begin(preview_target_frame_);
   }
 }
@@ -5836,6 +5925,23 @@ void MainWindow::OnPreviewTick() {
   preview_displayed_pts_us_ = preview_frame.pts_us;
   preview_displayed_coarse_ = preview_frame.coarse;
   preview_displayed_from_cache_ = preview_frame.from_cache;
+  preview_displayed_hardware_ = preview_frame.hardware;
+  // DP-3：Present 时记录“显示帧 vs 当前目标”的绝对滞后；慢拖要求 ≤2 帧，
+  // 快拖只记录 p50/p95，不能用 fps 冒充跟随。
+  if (preview_target_frame_ >= 0 && preview_displayed_frame_ >= 0) {
+    preview_target_lag_frames_ = preview_displayed_frame_ > preview_target_frame_
+                                     ? preview_displayed_frame_ -
+                                           preview_target_frame_
+                                     : preview_target_frame_ -
+                                           preview_displayed_frame_;
+  } else {
+    preview_target_lag_frames_ = 0;
+  }
+  const double preview_fps = FrameRateForTest();
+  preview_target_lag_ms_ =
+      preview_fps > 0.0
+          ? static_cast<double>(preview_target_lag_frames_) * 1000.0 / preview_fps
+          : 0.0;
   av_frame_free(&preview_frame.frame);
   if (timing && tick_timer.elapsed() > 200) {
     std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",

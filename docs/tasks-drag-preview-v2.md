@@ -1,6 +1,6 @@
 # 拖动预览 v2 任务表（DP 任务，非门）
 
-- **版本**：v1.2（2026-10-24；DP-1/DP-2 完成）
+- **版本**：v1.3（2026-10-24；DP-3 完成）
 - **计划**：[plan-drag-preview-v2.md](plan-drag-preview-v2.md)
 - **基线**：`079f0dd`（本地快拖热修）+ `bf37ccd`（DP-0）；dist 34.48MB/25、
   `ctest` 36/36、key 77/0。
@@ -17,7 +17,7 @@
 | DP-0 规划/交接 | **完成（2026-10-24）** | — |
 | DP-1 硬件预览 + 诊断 | **完成（2026-10-24，1080p；4K 硬解关闭/只记录）** | DP-0 |
 | DP-2 反向缓存/预取/远跳粗帧 | **完成（2026-10-24；1080p 硬件默认；强制软件快反向残余）** | DP-1 |
-| DP-3 交互策略 + 验收探针 | 待开始 | DP-1/DP-2 |
+| DP-3 交互策略 + 验收探针 | **完成（2026-10-24；1080p 硬件默认；强制软件快反向残余）** | DP-1/DP-2 |
 | DP-4 集成/发布 | 待开始 | DP-1/2/3 |
 
 ---
@@ -191,6 +191,28 @@
 - 代码/测试/证据 `docs/perf/drag-preview-dp3.md`；
 - 交接 `docs/handoff-2026-10-24-dp3.md`；一个提交。
 
+### 完成记录（2026-10-24）
+
+- 代码：新增 `DragStrategy` 四模式判定（Exact ≤4 帧 / Fast / Reverse /
+  FarJump ≥300 帧，含方向、间隔、连续同向次数、速度/原因）；
+  `PreviewDecoder::SetDragMode` 在 Exact 关闭粗帧、FarJump 用
+  `deferred_exact` 保证先粗后精、精确目标已呈现后禁止粗帧替换；
+  `PreviewTestDiagnostics` 增加 mode/step/interval/speed/lag/cache_hit_rate/
+  displayed_hardware；新增 `--drag-strategy-test`。
+- 1080p 硬件：慢拖 +1/-1 lag p95 **0**（15.6ms 节奏 +1 p95=1、-1 p95=2）；
+  `+60` 76.9–80.8fps/空档 34.7–37.2ms；`-60` 54.4–64.4fps/23.8–39.3ms；
+  `-20` 47.3–49.2fps；`-1` 命中 84.7–85.5%；远跳粗帧 20.8/20.6ms、
+  精确 30.6/30.0ms、粗帧先于精确；P4 94.9、P6 p95 18.8、P7 0.1/11.8、
+  P8 12.8、P9 32.2。
+- 有界：预览缓存峰值 244,684,800B（233.4MiB）；3 次拖动不变；缩略图
+  ≤432KB（本轮矩阵），预算 64MiB 未变。
+- 回归：`ctest` 37/37、key 77/0、T8.6.1b 35/0；4K 只记录
+  （`source_too_large`）；不改 P4/P6/P7 阈值、M1/M2、OB、schema。
+- 残余：强制软件 `-20` 9.5fps/空档 211ms、`-60` 31.4fps/50.6ms，
+  与 DP-2 同量级，未达 25/45，不写成通过。
+- 证据 [perf/drag-preview-dp3.md](perf/drag-preview-dp3.md)、交接
+  [handoff-2026-10-24-dp3.md](handoff-2026-10-24-dp3.md)。
+
 ## DP-4 集成/发布
 
 ### 目标
@@ -199,7 +221,7 @@
 
 ### 验收
 
-- `ctest` 36/36、key 77/0、T8.6.1b 35/0；
+- `ctest` 37/37、key 77/0、T8.6.1b 35/0；
 - 本地 `--drag-test` P4/P6/P7/P8/P9 不退化；
 - DP-1/2/3 指标复跑；
 - `dist` 重建、Medium 副本验证、工作区干净；
@@ -220,6 +242,7 @@ $exe = 'build\release\bin\lapian.exe'
 
 & $exe --file 'E:\拉片软件开发\media\测试.mp4' --drag-fast --drag-fast-step 60
 & $exe --file 'E:\拉片软件开发\media\测试.mp4' --drag-fast --drag-fast-step -60
+& $exe --file 'E:\拉片软件开发\media\测试.mp4' --drag-strategy-test
 & $exe --file 'E:\拉片软件开发\media\测试.mp4' --drag-test --drag-samples 20
 ctest --test-dir build\release -C Release --output-on-failure
 ```
