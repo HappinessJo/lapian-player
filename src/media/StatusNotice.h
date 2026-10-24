@@ -25,8 +25,9 @@ enum class StatusNoticeKind {
   kScanning = 1,
   kOutOfGuarantee = 2,
   kTenBit = 3,
-  kVfr = 4,
-  kError = 5,
+  kFrameRateDrop = 4,
+  kVfr = 5,
+  kError = 6,
 };
 
 struct StatusNotice {

@@ -350,6 +350,22 @@ class MainWindow : public QMainWindow {
   bool OnlineQualityButtonVisibleForTest() const;
   bool OnlineQualityReceivedForTest() const { return online_quality_.fetched; }
   QString OnlineQualityErrorForTest() const { return online_quality_.error; }
+  // T8.12：实际流 fps/降帧、切档状态与 DEC-4 UI。
+  double OnlineStreamFpsForTest() const { return online_actual_fps_; }
+  double OnlineSourceFpsHintForTest() const { return online_source_fps_hint_; }
+  QString OnlineStatusDetailForTest() const { return online_status_detail_; }
+  bool OnlineFrameRateDropForTest() const { return online_frame_rate_drop_; }
+  QString OnlineFpsBadgeTextForTest() const;
+  bool OnlineFrameRateBannerVisibleForTest() const;
+  bool OnlineFrameRateBannerCloseVisibleForTest() const;
+  void DismissOnlineFrameRateBannerForTest();
+  bool OnlineQualitySwitchPendingForTest() const {
+    return online_switch_pending_;
+  }
+  QString OnlineQualitySwitchStatusForTest() const {
+    return online_switch_status_;
+  }
+  bool WaitForOnlineQualitySwitchForTest(int qn, int timeout_ms);
   QString OnlineQualityMenuTextForTest() const;
   // 真实 QMenu 的 action 快照（text|enabled|checked），证明产品菜单已构建。
   QStringList OnlineQualityMenuActionsForTest() const;
@@ -463,6 +479,11 @@ class MainWindow : public QMainWindow {
   void ShowOnlineQualityMenu();
   lapian::online::QualityMenuContext CurrentQualityMenuContext() const;
   void OnOnlineQualityChosen(int qn);
+  // T8.12：切档后的位置/状态恢复（按旧流 PTS 映射到新索引）与实际 fps/降帧 UI。
+  void ClearOnlineQualitySwitch();
+  void TryApplyPendingOnlineQualitySwitch();
+  void ApplyOnlineFrameRateUi();
+  QString BuildOnlineStatusDetail() const;
   void OpenLocalMedia(const QString& path, const OnlineOpenContext* online);
   void LoadOnlineMarks(const OnlineOpenContext& online);
   void ReconcileOnlineMarks();
@@ -709,6 +730,21 @@ class MainWindow : public QMainWindow {
   qint64 online_published_bytes_ = 0;
   int online_qn_ = 0;
   int online_codecid_ = 0;
+  // T8.12：当前会话请求（含 requested_qn；sessdata 只内存，不打印/不落盘）。
+  lapian::app::OnlineRequest online_request_;
+  bool online_logged_in_ = true;
+  double online_actual_fps_ = 0.0;
+  double online_source_fps_hint_ = 0.0;
+  bool online_frame_rate_drop_ = false;
+  bool online_switch_pending_ = false;
+  int online_switch_target_qn_ = 0;
+  int online_switch_target_codecid_ = 0;
+  std::int64_t online_switch_target_pts_us_ = 0;
+  std::int64_t online_switch_old_frame_ = 0;
+  double online_switch_old_fps_ = 0.0;
+  QString online_switch_status_;
+  // 只作用于下一帧 HTTP seek 状态栏，避免“切档完成/帧号可能变化”被落地提示覆盖。
+  QString online_seek_completion_notice_;
   // T8.10 DASH 双输入：音频是独立 GrowingSource/容器；这里保存 session 与 seek
   // 重建所需的轻量引用（生命周期由 OnlineReadyInfo/AudioEngine/Waveform 持有）。
   bool online_dash_audio_ = false;

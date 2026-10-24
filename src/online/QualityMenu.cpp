@@ -62,27 +62,51 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
             ? QStringLiteral("档位未获取：还没有 DASH 目录（不会伪造档位）")
             : QStringLiteral("档位获取失败：%1").arg(context.error);
     entries.append(note);
+    if (!context.logged_in) {
+      QualityMenuEntry login_note;
+      login_note.kind = QualityMenuKind::kNote;
+      login_note.text = QStringLiteral(
+          "未登录：最高约 480P30（以实际返回为准）；登录不保证提升档位。");
+      entries.append(login_note);
+    }
     return entries;
   }
 
-  bool has_unplayable = false;
+  if (context.current_qn > 0 && context.requested_qn > 0 &&
+      context.current_qn != context.requested_qn) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text = QStringLiteral(
+                    "请求 %1（qn=%2），服务端实际返回 %3（qn=%4）；以实际为准")
+                    .arg(QualityName(context.requested_qn))
+                    .arg(context.requested_qn)
+                    .arg(QualityName(context.current_qn))
+                    .arg(context.current_qn);
+    entries.append(note);
+  }
+
   bool current_found = false;
   for (const QualityTier& tier : catalog.tiers) {
     QualityMenuEntry entry;
     entry.kind = QualityMenuKind::kTier;
     entry.qn = tier.qn;
     entry.checkable = true;
-    entry.manual_only = IsManualOnlyQuality(tier.qn);
+    entry.manual_only = IsManualOnlyTier(tier);
     const DashStream* stream = tier.PreferredStream();
     entry.codecid = stream != nullptr ? stream->codecid : 0;
     entry.text = QualityTierLabel(tier);
     entry.tooltip = TierTooltip(tier);
-    if (entry.manual_only) {
-      entry.text += QStringLiteral("（仅手动）");
+    if ((tier.qn == 116 || tier.qn == 74) && !tier.has_avc()) {
+      // HEVC/AV1-only 60fps：只进手动菜单，绝不自动、不静默降帧。
+      entry.text += QStringLiteral("（60fps / %1（手动））")
+                        .arg(stream != nullptr ? CodecName(stream->codecid)
+                                               : QStringLiteral("HEVC/AV1"));
+    } else if (tier.qn == 116 || tier.qn == 74) {
+      entry.text += QStringLiteral("（60fps / AVC · 自动优先）");
     }
     if (tier.qn >= 120) {
       // 4K/HDR/杜比/8K 是“可用档”，不是 MVP 承诺。
-      entry.text += QStringLiteral("（可用档：性能/颜色不保证）");
+      entry.text += QStringLiteral("（仅手动 · 可用档：性能/颜色不保证）");
     }
     entry.checked =
         context.current_qn == tier.qn &&
@@ -99,18 +123,14 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
       entry.enabled = false;
       entry.disabled_reason =
           entry.manual_only
-              ? QStringLiteral("60fps/4K 只允许手动；档位切换在 T8.12 接入"
-                               "（T8.10 已支持 DASH 播放，但本任务不做切档）")
-              : QStringLiteral("档位切换在 T8.12 接入"
-                               "（T8.10 已支持 DASH 播放，但本任务不做切档）");
-      entry.text += QStringLiteral("（切换需 T8.12）");
-      has_unplayable = true;
+              ? QStringLiteral("只允许手动选择；当前会话还不能重新取流")
+              : QStringLiteral("当前会话还不能重新取流（未就绪或缓存只含当前档）");
+      entry.text += QStringLiteral("（当前不可切换）");
     } else {
-      // T8.12 起才允许手动切换；即便接入，manual_only 档也绝不自动选。
       entry.enabled = true;
       entry.tooltip = entry.manual_only
-                          ? QStringLiteral("仅手动切换（不自动选）")
-                          : QStringLiteral("手动切换档位（重新取流）");
+                          ? QStringLiteral("仅手动切换（不自动选；重新取流）")
+                          : QStringLiteral("手动切换档位（重新取流/重建索引）");
     }
     entries.append(entry);
   }
@@ -122,12 +142,23 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
                     .arg(QualityName(context.current_qn));
     entries.append(note);
   }
-  if (has_unplayable) {
+  if (!context.logged_in) {
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    // 未登录时匿名目录实测只到 480P；如果服务端意外给了更高档，仍以实际为准。
+    note.text = catalog.MaxQn() <= 32
+                    ? QStringLiteral("未登录：最高约 480P30（以实际返回为准）；"
+                                     "登录不保证提升档位。")
+                    : QStringLiteral("未登录：本次实际最高 %1；"
+                                     "以实际返回为准，登录不保证提升档位。")
+                          .arg(QualityName(catalog.MaxQn()));
+    entries.append(note);
+  }
+  {
     QualityMenuEntry note;
     note.kind = QualityMenuKind::kNote;
     note.text = QStringLiteral(
-        "DASH 档位仅列示：T8.10 已支持双输入播放，T8.12 才接切档；"
-        "菜单可选不等于保证可达");
+        "菜单只列 playurl 实际返回的档位；菜单可选不等于保证可达。");
     entries.append(note);
   }
   if (!catalog.HasAudio()) {

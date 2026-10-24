@@ -451,8 +451,7 @@ void TestSelection() {
   Check(!IsManualOnlyQuality(32), "480P 可自动");
   Check(!IsManualOnlyQuality(16), "360P 可自动");
   Check(!IsManualOnlyQuality(112), "1080P+ 不是只手动");
-  Check(IsManualOnlyQuality(116), "1080P60 只手动");
-  Check(IsManualOnlyQuality(74), "720P60 只手动");
+  Check(!IsManualOnlyQuality(116), "1080P60 不能只凭 qn 判只手动（看编码）");
   Check(IsManualOnlyQuality(120), "4K 只手动");
   Check(IsManualOnlyQuality(125), "HDR 只手动");
   Check(IsManualOnlyQuality(126), "杜比视界只手动");
@@ -475,20 +474,29 @@ void TestSelection() {
     return value;
   };
 
-  // O6 顺序：1080P60 只手动 → 落到 1080P30。
+  // O6/T8.12：1080P60 有 AVC 时可自动（保帧率优先）。
   DashCatalog vip = catalog_with({stream(80, 7, 1920, 1080, 30.0),
                                   stream(116, 7, 1920, 1080, 60.0),
                                   stream(74, 7, 1280, 720, 60.0)});
-  CheckEqI64(vip.DefaultQn(), 80, "有 1080P60（AVC）也不自动选 60fps");
+  CheckEqI64(vip.DefaultQn(), 116, "1080P60 AVC 可用 → 自动选 116");
+  Check(vip.DefaultStream() != nullptr && vip.DefaultStream()->codecid == 7,
+        "自动 60fps 仍是 AVC");
+
+  // HEVC-only 60fps：只手动，不自动（DefaultQn=0）。
+  DashCatalog hevc60 = catalog_with({stream(116, 12, 1920, 1080, 60.0)});
+  CheckEqI64(hevc60.DefaultQn(), 0, "HEVC-only 60fps 不自动选");
+  Check(lapian::online::IsManualOnlyTier(hevc60.tiers.first()),
+        "HEVC-only 60fps 档是只手动");
+
+  // 720P60 AVC + 1080P30 AVC：按 O6 顺序先 720P60。
+  DashCatalog ladder60 = catalog_with({stream(80, 7, 1920, 1080, 30.0),
+                                       stream(74, 7, 1280, 720, 60.0)});
+  CheckEqI64(ladder60.DefaultQn(), 74, "720P60 AVC 优先于 1080P30");
 
   // 只有 720P30 + 1080P30：选 1080P30。
   DashCatalog ladder = catalog_with({stream(64, 7, 1280, 720, 30.0),
                                      stream(80, 7, 1920, 1080, 30.0)});
   CheckEqI64(ladder.DefaultQn(), 80, "1080P30 优先于 720P30");
-
-  // HEVC-only 60fps：不自动选（DefaultQn=0）。
-  DashCatalog hevc60 = catalog_with({stream(116, 12, 1920, 1080, 60.0)});
-  CheckEqI64(hevc60.DefaultQn(), 0, "HEVC-only 60fps 不自动选");
 
   // 只有 4K：不自动选。
   DashCatalog only4k = catalog_with({stream(120, 12, 3840, 2160, 60.0)});
@@ -537,20 +545,56 @@ void TestMenuModel() {
   Check(tier80 != nullptr && !tier80->enabled && !tier80->checked,
         "非当前档位（1080P）置灰");
   Check(tier80 != nullptr &&
-            tier80->disabled_reason.contains(QStringLiteral("T8.12")),
-        "1080P 置灰原因写明 T8.12");
+            tier80->disabled_reason.contains(QStringLiteral("不能重新取流")),
+        "1080P 置灰原因：当前会话不能重新取流");
   Check(tier80 != nullptr &&
-            tier80->text.contains(QStringLiteral("切换需 T8.12")),
-        "1080P 文案标注切档未接入 T8.12");
+            tier80->text.contains(QStringLiteral("当前不可切换")),
+        "1080P 文案标注当前不可切换");
   Check(tier64 != nullptr && tier64->checked && tier64->enabled,
         "当前 durl 720P 勾选且可点（只提示已是当前档）");
   const QString text = QualityMenuModelText(entries);
-  Check(text.contains(QStringLiteral("DASH 档位仅列示")),
-        "菜单有“仅列示”提示");
+  Check(text.contains(QStringLiteral("菜单只列 playurl 实际返回")),
+        "菜单说明只列 playurl 实际返回");
   Check(text.contains(QStringLiteral("菜单可选不等于保证可达")),
         "菜单不把可选写成保证可达");
   Check(FindEntry(entries, 116) == nullptr, "普通用户菜单没有 1080P60");
   Check(FindEntry(entries, 120) == nullptr, "普通用户菜单没有 4K");
+
+  // T8.12：会话就绪（dash_playback_available=true）后非当前档可手动切；
+  // 60fps AVC 是自动档，但当前不是它时仍可手动选择。
+  QualityMenuContext switchable = context;
+  switchable.dash_playback_available = true;
+  const QVector<QualityMenuEntry> switch_entries =
+      BuildQualityMenuModel(catalog, switchable);
+  const QualityMenuEntry* switch80 = FindEntry(switch_entries, 80);
+  Check(switch80 != nullptr && switch80->enabled && !switch80->checked,
+        "就绪后 1080P 可手动切");
+  Check(switch80 != nullptr &&
+            switch80->tooltip.contains(QStringLiteral("重新取流")),
+        "就绪后提示会重新取流");
+
+  // 未登录：明确写出最高约 480P30，不承诺 720/1080。
+  QualityMenuContext anon;
+  anon.logged_in = false;
+  anon.current_qn = 32;
+  anon.current_from_cache = true;
+  DashCatalog anon_catalog;
+  anon_catalog.videos = {[] {
+    DashStream value;
+    value.qn = 32;
+    value.codecid = 7;
+    value.width = 852;
+    value.height = 480;
+    value.fps = 30.0;
+    return value;
+  }()};
+  lapian::online::RebuildDashTiers(&anon_catalog);
+  const QString anon_text =
+      QualityMenuModelText(BuildQualityMenuModel(anon_catalog, anon));
+  Check(anon_text.contains(QStringLiteral("未登录：最高约 480P30")),
+        "未登录显示最高约 480P30");
+  Check(anon_text.contains(QStringLiteral("以实际返回为准")),
+        "未登录提示以实际返回为准");
 
   // 大会员合成目录：1080P60 / 720P60 / 4K 进菜单、只手动、置灰；默认仍 1080P30。
   DashCatalog vip_catalog;
@@ -601,18 +645,19 @@ void TestMenuModel() {
   const QualityMenuEntry* vip116 = FindEntry(vip_entries, 116);
   const QualityMenuEntry* vip74 = FindEntry(vip_entries, 74);
   const QualityMenuEntry* vip120 = FindEntry(vip_entries, 120);
-  Check(vip116 != nullptr && vip116->manual_only, "1080P60 进菜单且标只手动");
+  Check(vip116 != nullptr && vip116->manual_only,
+        "HEVC-only 1080P60 进菜单且标只手动");
   Check(vip116 != nullptr &&
-            vip116->text.contains(QStringLiteral("仅手动")) &&
-            vip116->text.contains(QStringLiteral("HEVC")),
-        "1080P60 文案含“仅手动/HEVC”");
-  Check(vip74 != nullptr && vip74->manual_only, "720P60 进菜单且标只手动");
+            vip116->text.contains(QStringLiteral("60fps / HEVC（手动）")),
+        "HEVC-only 1080P60 文案含“60fps / HEVC（手动）”");
+  Check(vip74 != nullptr && vip74->manual_only,
+        "HEVC-only 720P60 进菜单且标只手动");
   Check(vip120 != nullptr && vip120->manual_only, "4K 进菜单且标只手动");
   Check(vip120 != nullptr &&
             vip120->text.contains(QStringLiteral("可用档")) &&
             vip120->text.contains(QStringLiteral("性能/颜色不保证")),
         "4K 文案标可用档/性能/颜色不保证");
-  Check(vip120 != nullptr && !vip120->enabled, "4K 在 T8.9 置灰（不假装可达）");
+  Check(vip120 != nullptr && !vip120->enabled, "未就绪时 4K 置灰（不假装可达）");
 
   // T8.10/T8.12 接入后（dash_playback_available=true）：非当前档可手动切；
   // 只手动档仍不自动选。
@@ -623,9 +668,38 @@ void TestMenuModel() {
   const QualityMenuEntry* future116 = FindEntry(future_entries, 116);
   const QualityMenuEntry* future120 = FindEntry(future_entries, 120);
   Check(future116 != nullptr && future116->enabled && future116->manual_only,
-        "接入后可手动切 1080P60（manual_only 仍为 true）");
+        "就绪后可手动切 HEVC-only 1080P60（manual_only 仍为 true）");
   Check(future120 != nullptr && future120->enabled && future120->manual_only,
-        "接入后可手动切 4K（只在手动菜单）");
+        "就绪后可手动切 4K（只在手动菜单）");
+
+  // AVC 60fps：默认自动，不标“仅手动”；无 AVC 时才是手动档。
+  DashCatalog avc60_catalog;
+  avc60_catalog.videos = {[] {
+                            DashStream value;
+                            value.qn = 80;
+                            value.codecid = 7;
+                            value.width = 1920;
+                            value.height = 1080;
+                            value.fps = 30.0;
+                            return value;
+                          }(),
+                          [] {
+                            DashStream value;
+                            value.qn = 116;
+                            value.codecid = 7;
+                            value.width = 1920;
+                            value.height = 1080;
+                            value.fps = 60.0;
+                            return value;
+                          }()};
+  lapian::online::RebuildDashTiers(&avc60_catalog);
+  CheckEqI64(avc60_catalog.DefaultQn(), 116, "AVC 1080P60 自动选 116");
+  const QVector<QualityMenuEntry> avc60_entries =
+      lapian::online::BuildQualityMenuModel(avc60_catalog, vip_context);
+  const QualityMenuEntry* avc116 = FindEntry(avc60_entries, 116);
+  Check(avc116 != nullptr && !avc116->manual_only &&
+            avc116->text.contains(QStringLiteral("自动优先")),
+        "AVC 1080P60 不标仅手动，标自动优先");
 
   // 空目录/失败：不伪造档位。
   QualityMenuContext empty;

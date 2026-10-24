@@ -71,6 +71,8 @@ const char* StatusNoticeKindName(StatusNoticeKind kind) {
       return "out-of-range";
     case StatusNoticeKind::kTenBit:
       return "10-bit";
+    case StatusNoticeKind::kFrameRateDrop:
+      return "frame-drop";
     case StatusNoticeKind::kVfr:
       return "vfr";
     case StatusNoticeKind::kError:
@@ -89,10 +91,12 @@ int StatusNoticePriority(StatusNoticeKind kind) {
       return 2;
     case StatusNoticeKind::kTenBit:
       return 3;
-    case StatusNoticeKind::kVfr:
+    case StatusNoticeKind::kFrameRateDrop:
       return 4;
-    case StatusNoticeKind::kError:
+    case StatusNoticeKind::kVfr:
       return 5;
+    case StatusNoticeKind::kError:
+      return 6;
   }
   return -1;
 }
@@ -120,6 +124,11 @@ StatusNotice MakeStatusNotice(StatusNoticeKind kind) {
       notice.tag = "10-bit";
       notice.text = "10-bit/HDR：可尝试播放，但不承诺颜色正确";
       notice.detail = "首期不做 HDR/10-bit 色彩管理；颜色可能与源不一致。";
+      break;
+    case StatusNoticeKind::kFrameRateDrop:
+      notice.tag = "降帧";
+      notice.text = "帧率低于源片声明：帧号与源片不同步/约 1/2";
+      notice.detail = "当前流实际 fps 以 playurl/容器为准；标记与截图记录实际 fps。";
       break;
     case StatusNoticeKind::kVfr:
       notice.tag = "VFR";
@@ -153,6 +162,10 @@ bool ParseStatusNoticeKind(const std::string& name, StatusNoticeKind* kind) {
   }
   if (name == "10-bit" || name == "ten-bit") {
     *kind = StatusNoticeKind::kTenBit;
+    return true;
+  }
+  if (name == "frame-drop" || name == "fps-drop") {
+    *kind = StatusNoticeKind::kFrameRateDrop;
     return true;
   }
   if (name == "vfr") {

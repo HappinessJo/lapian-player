@@ -406,10 +406,17 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
   const QString bvid = request_.bvid;
   const qint64 cid = request_.cid;
   const QString sessdata = request_.sessdata;
+  const int requested_qn = request_.requested_qn;
+  const int requested_codecid = request_.requested_codecid;
+  const int durl_qn =
+      requested_qn > 0 ? requested_qn : lapian::online::kM1RequestQn;
+  const int dash_request_qn =
+      requested_qn > 0 ? requested_qn : lapian::online::kDashRequestQn;
   try {
     resolve_thread_ = std::thread(
         [this, generation, outcome, cancel, injected_http, injected_transport,
-         bvid, cid, sessdata]() {
+         bvid, cid, sessdata, requested_qn, requested_codecid, durl_qn,
+         dash_request_qn]() {
           lapian::online::IHttpClient* http = injected_http;
           std::unique_ptr<lapian::online::WinHttpClient> owned_http;
           if (http == nullptr) {
@@ -423,8 +430,7 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
             durl_options.sessdata = sessdata;
             durl_options.fourk = 0;
             outcome->durl_result = lapian::online::FetchPlayUrl(
-                http, bvid, cid, lapian::online::kM1RequestQn, durl_options,
-                *cancel);
+                http, bvid, cid, durl_qn, durl_options, *cancel);
             lapian::online::ClearSecret(&durl_options.sessdata);
             outcome->durl_fetched = true;
             outcome->fallback_reason = QStringLiteral("DASH 已禁用（诊断）");
@@ -436,66 +442,105 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
                 this, [this, generation]() { OnResolveDone(generation); },
                 Qt::QueuedConnection);
             return;
-          }          lapian::online::DashFetchOptions dash_options;
+          }
+          lapian::online::DashFetchOptions dash_options;
           dash_options.timeout_ms = 6000;
           dash_options.sessdata = sessdata;
-          dash_options.qn = lapian::online::kDashRequestQn;
+          dash_options.qn = dash_request_qn;
           dash_options.fourk = 1;
           lapian::online::DashFetchResult dash = lapian::online::FetchDashCatalog(
               http, bvid, cid, dash_options, *cancel);
           lapian::online::ClearSecret(&dash_options.sessdata);
 
           QString fallback_reason;
+          QString failure;
           if (!dash.error.ok()) {
             fallback_reason = QStringLiteral("DASH 目录失败：%1")
                                   .arg(dash.error.message.isEmpty()
                                            ? QStringLiteral("未知错误")
                                            : dash.error.message);
-          } else if (dash.catalog.DefaultStream() == nullptr) {
-            fallback_reason = QStringLiteral("DASH 目录没有可自动选择的视频档");
-          } else if (dash.catalog.BestAudio() == nullptr) {
-            fallback_reason = QStringLiteral("DASH 目录没有音频流");
           } else {
-            const lapian::online::DashStream video =
-                *dash.catalog.DefaultStream();
-            const lapian::online::DashAudioStream audio =
-                *dash.catalog.BestAudio();
-            // DASH 不返回总字节：先探测（Range 0-0 / Content-Length），拿不到
-            // 就不伪造，直接回退 durl。
-            std::unique_ptr<lapian::online::WinHttpDownloadTransport> owned_transport;
-            lapian::online::IDownloadTransport* transport = injected_transport;
-            if (transport == nullptr) {
-              owned_transport =
-                  std::make_unique<lapian::online::WinHttpDownloadTransport>();
-              transport = owned_transport.get();
-            }
-            const TotalProbe video_probe =
-                ProbeDashTotal(transport, video.AllUrls(), 8000, *cancel);
-            const TotalProbe audio_probe =
-                ProbeDashTotal(transport, audio.AllUrls(), 8000, *cancel);
-            if (cancel->IsCancelled()) {
-              return;
-            }
-            if (!video_probe.ok || !audio_probe.ok) {
-              fallback_reason =
-                  QStringLiteral("DASH 总字节探测失败（video=%1 audio=%2）")
-                      .arg(video_probe.error, audio_probe.error);
+            const lapian::online::DashStream* selected = nullptr;
+            if (requested_qn > 0) {
+              const lapian::online::QualityTier* tier =
+                  dash.catalog.FindTier(requested_qn);
+              if (tier == nullptr) {
+                failure = QStringLiteral(
+                              "服务端没有返回请求的档位 %1（qn=%2）；"
+                              "不自动换到其他档")
+                              .arg(lapian::online::QualityName(requested_qn))
+                              .arg(requested_qn);
+              } else if (requested_codecid > 0) {
+                selected = tier->Stream(requested_codecid);
+                if (selected == nullptr) {
+                  failure = QStringLiteral("请求的档位 %1 没有编码 %2")
+                                .arg(lapian::online::QualityName(requested_qn))
+                                .arg(lapian::online::CodecName(requested_codecid));
+                }
+              } else {
+                selected = tier->PreferredStream();
+              }
             } else {
-              outcome->dash = true;
-              outcome->video = video;
-              outcome->audio = audio;
-              outcome->video_total = video_probe.total;
-              outcome->audio_total = audio_probe.total;
+              selected = dash.catalog.DefaultStream();
+              if (selected == nullptr) {
+                fallback_reason =
+                    QStringLiteral("DASH 目录没有可自动选择的视频档");
+              }
+            }
+            if (requested_qn > 0 && dash.catalog.BestAudio() == nullptr) {
+              failure = QStringLiteral("服务端没有返回 DASH 音频流，无法切档");
+            } else if (requested_qn <= 0 &&
+                       dash.catalog.BestAudio() == nullptr) {
+              fallback_reason = QStringLiteral("DASH 目录没有音频流");
+            }
+            if (failure.isEmpty() && selected != nullptr &&
+                dash.catalog.BestAudio() != nullptr) {
+              const lapian::online::DashStream video = *selected;
+              const lapian::online::DashAudioStream audio =
+                  *dash.catalog.BestAudio();
+              // DASH 不返回总字节：先探测（Range 0-0 / Content-Length），拿不到
+              // 就不伪造，直接回退 durl。
+              std::unique_ptr<lapian::online::WinHttpDownloadTransport> owned_transport;
+              lapian::online::IDownloadTransport* transport = injected_transport;
+              if (transport == nullptr) {
+                owned_transport =
+                    std::make_unique<lapian::online::WinHttpDownloadTransport>();
+                transport = owned_transport.get();
+              }
+              const TotalProbe video_probe =
+                  ProbeDashTotal(transport, video.AllUrls(), 8000, *cancel);
+              const TotalProbe audio_probe =
+                  ProbeDashTotal(transport, audio.AllUrls(), 8000, *cancel);
+              if (cancel->IsCancelled()) {
+                return;
+              }
+              if (!video_probe.ok || !audio_probe.ok) {
+                if (requested_qn > 0) {
+                  failure =
+                      QStringLiteral("手动切档的 DASH 总字节探测失败"
+                                     "（video=%1 audio=%2）")
+                          .arg(video_probe.error, audio_probe.error);
+                } else {
+                  fallback_reason =
+                      QStringLiteral("DASH 总字节探测失败（video=%1 audio=%2）")
+                          .arg(video_probe.error, audio_probe.error);
+                }
+              } else {
+                outcome->dash = true;
+                outcome->video = video;
+                outcome->audio = audio;
+                outcome->video_total = video_probe.total;
+                outcome->audio_total = audio_probe.total;
+              }
             }
           }
-          if (!outcome->dash) {
+          if (failure.isEmpty() && !outcome->dash) {
             lapian::online::PlayUrlFetchOptions durl_options;
             durl_options.timeout_ms = 6000;
             durl_options.sessdata = sessdata;
             durl_options.fourk = 0;  // M1 路径字节不变
             outcome->durl_result = lapian::online::FetchPlayUrl(
-                http, bvid, cid, lapian::online::kM1RequestQn, durl_options,
-                *cancel);
+                http, bvid, cid, durl_qn, durl_options, *cancel);
             lapian::online::ClearSecret(&durl_options.sessdata);
             outcome->durl_fetched = true;
           }
@@ -503,6 +548,7 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
             std::lock_guard<std::mutex> lock(outcome->mutex);
             outcome->dash_result = std::move(dash);
             outcome->fallback_reason = fallback_reason;
+            outcome->failure = failure;
             outcome->done = true;
           }
           QMetaObject::invokeMethod(
@@ -563,9 +609,11 @@ void OnlineSession::StartQualityWorker(std::uint64_t generation) {
       lapian::online::DashFetchOptions options;
       options.timeout_ms = 6000;
       options.sessdata = sessdata;
-      // 档位目录请求：封顶 1080P + fourk=1（只让服务端返回账号允许的档位梯，
-      // 不自动选 4K；4K 由菜单手动/条件验收）。
-      options.qn = lapian::online::kDashRequestQn;
+      // 档位目录请求：手动切档时用请求 qn（只影响 claimed quality，目录仍为
+      // 服务端返回的完整梯）；自动时封顶 1080P + fourk=1。
+      options.qn = request_.requested_qn > 0
+                       ? request_.requested_qn
+                       : lapian::online::kDashRequestQn;
       options.fourk = 1;
       const lapian::online::DashFetchResult result =
           lapian::online::FetchDashCatalog(client, bvid, cid, options, *cancel);
@@ -655,6 +703,15 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
     if (entry.key.bvid != request.bvid || entry.key.cid != request.cid) {
       continue;
     }
+    // T8.12 手动切档：必须命中请求的 qn/codecid；否则继续联网取该档，
+    // 不能因为“同片有更高档缓存”而忽略用户选择。
+    if (request.requested_qn > 0 && entry.key.qn != request.requested_qn) {
+      continue;
+    }
+    if (request.requested_codecid > 0 &&
+        entry.key.codecid != request.requested_codecid) {
+      continue;
+    }
     if (best == nullptr || entry.last_access_at > best->last_access_at ||
         (entry.last_access_at == best->last_access_at &&
          entry.key.qn > best->key.qn)) {
@@ -666,7 +723,11 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
       if (entry.key.is_audio()) {
         continue;
       }
-      if (entry.key.bvid == request.bvid && entry.key.cid == request.cid) {
+      if (entry.key.bvid == request.bvid && entry.key.cid == request.cid &&
+          (request.requested_qn <= 0 ||
+           entry.key.qn == request.requested_qn) &&
+          (request.requested_codecid <= 0 ||
+           entry.key.codecid == request.requested_codecid)) {
         *error = QStringLiteral("缓存损坏，需要重建：%1")
                      .arg(entry.broken_reason.isEmpty()
                               ? QStringLiteral("data.mp4/meta.json 校验失败")
@@ -1076,9 +1137,11 @@ void OnlineSession::StartDurlDownload(const lapian::online::PlayUrlData& data,
     fetch_options.timeout_ms = 6000;
     fetch_options.sessdata = request_.sessdata;
     // 刷新必须与初始请求同一档位，否则可能换回更低档并改变 plan.qn。
+    const int refresh_qn = request_.requested_qn > 0
+                               ? request_.requested_qn
+                               : lapian::online::kM1RequestQn;
     lapian::online::PlayUrlFetchResult result = lapian::online::FetchPlayUrl(
-        http, request_.bvid, request_.cid, lapian::online::kM1RequestQn,
-        fetch_options, cancel);
+        http, request_.bvid, request_.cid, refresh_qn, fetch_options, cancel);
     if (!result.error.ok()) {
       *refresh_error = result.error.message.isEmpty()
                            ? QStringLiteral("刷新取流失败")
@@ -1183,7 +1246,9 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
       lapian::online::DashFetchOptions fetch_options;
       fetch_options.timeout_ms = 6000;
       fetch_options.sessdata = request_.sessdata;
-      fetch_options.qn = lapian::online::kDashRequestQn;
+      fetch_options.qn = request_.requested_qn > 0
+                             ? request_.requested_qn
+                             : lapian::online::kDashRequestQn;
       fetch_options.fourk = 1;
       const lapian::online::DashFetchResult result =
           lapian::online::FetchDashCatalog(http, request_.bvid, request_.cid,
@@ -1290,6 +1355,7 @@ void OnlineSession::OnResolveDone(std::uint64_t generation) {
   lapian::online::PlayUrlFetchResult durl_result;
   bool durl_fetched = false;
   QString fallback_reason;
+  QString failure;
   {
     std::lock_guard<std::mutex> lock(outcome->mutex);
     done = outcome->done;
@@ -1298,12 +1364,17 @@ void OnlineSession::OnResolveDone(std::uint64_t generation) {
     durl_result = outcome->durl_result;
     durl_fetched = outcome->durl_fetched;
     fallback_reason = outcome->fallback_reason;
+    failure = outcome->failure;
   }
   if (!done) {
     Fail(QStringLiteral("取流未完成"));
     return;
   }
   dash_requests_ += dash_result.http_requests;
+  if (!failure.isEmpty()) {
+    Fail(failure);
+    return;
+  }
   if (dash_result.error.ok()) {
     dash_catalog_ = dash_result.catalog;
     dash_catalog_available_ = true;

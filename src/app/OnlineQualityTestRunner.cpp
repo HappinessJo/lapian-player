@@ -6,6 +6,8 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStringList>
 #include <QTimer>
 
@@ -17,6 +19,7 @@
 #include "app/MainWindow.h"
 #include "online/BiliAuth.h"
 #include "online/BiliResolveClient.h"
+#include "online/FrameRatePolicy.h"
 #include "online/QualityMenu.h"
 #include "online/Sessdata.h"
 #include "online/WinHttpClient.h"
@@ -214,7 +217,7 @@ void RunMenuModelChecks() {
       true);
   Check("menu_vip_default_is_avc_1080p", vip.DefaultQn() == 80,
         QStringLiteral("default=%1").arg(vip.DefaultQn()));
-  Check("menu_vip_1080p60_not_auto", vip.DefaultQn() != 116);
+  Check("menu_vip_hevc_60_not_auto", vip.DefaultQn() != 116);
   QualityMenuContext ctx;
   ctx.current_qn = 80;
   ctx.current_codecid = 7;
@@ -224,22 +227,33 @@ void RunMenuModelChecks() {
   const auto* tier120 = FindEntry(vip_entries, 120);
   Check("menu_vip_tier80_checked_enabled",
         tier80 != nullptr && tier80->checked && tier80->enabled);
-  Check("menu_vip_1080p60_in_menu_manual",
+  Check("menu_vip_hevc60_in_menu_manual",
         tier116 != nullptr && tier116->manual_only && !tier116->enabled &&
-            tier116->text.contains(QStringLiteral("仅手动")) &&
-            tier116->text.contains(QStringLiteral("HEVC")));
+            tier116->text.contains(QStringLiteral("60fps / HEVC（手动）")));
   Check("menu_vip_4k_in_menu_manual_available",
         tier120 != nullptr && tier120->manual_only && !tier120->enabled &&
             tier120->text.contains(QStringLiteral("仅手动")) &&
             tier120->text.contains(QStringLiteral("可用档")));
-  Check("menu_vip_4k_reason_t8_12",
-        tier120 != nullptr &&
-            tier120->disabled_reason.contains(QStringLiteral("T8.12")));
   const QString vip_text = QualityMenuModelText(vip_entries);
   Check("menu_vip_note_no_guarantee",
         vip_text.contains(QStringLiteral("菜单可选不等于保证可达")),
         OneLine(vip_text));
+  Check("menu_vip_no_t8_12_placeholder",
+        !vip_text.contains(QStringLiteral("T8.12")), OneLine(vip_text));
   PrintKV("menu_vip_model", OneLine(vip_text));
+
+  // 1b) 真 1080P60（AVC）：自动选 116，菜单不标“仅手动”。
+  const DashCatalog avc60 =
+      MakeCatalog({MakeStream(80, 7, 1920, 1080, 30.0, 2200000),
+                   MakeStream(116, 7, 1920, 1080, 60.0, 2600000)},
+                  true);
+  Check("menu_avc60_auto", avc60.DefaultQn() == 116,
+        QStringLiteral("default=%1").arg(avc60.DefaultQn()));
+  const auto avc60_entries = BuildQualityMenuModel(avc60, ctx);
+  const auto* avc116 = FindEntry(avc60_entries, 116);
+  Check("menu_avc60_not_manual",
+        avc116 != nullptr && !avc116->manual_only &&
+            avc116->text.contains(QStringLiteral("自动优先")));
 
   // 2) HEVC-only 60fps：不自动选（DefaultQn=0），菜单标手动 + HEVC。
   const DashCatalog hevc_only =
@@ -250,11 +264,24 @@ void RunMenuModelChecks() {
   const auto* hevc116 = FindEntry(hevc_entries, 116);
   Check("menu_hevc_only_60fps_manual",
         hevc116 != nullptr && hevc116->manual_only && !hevc116->enabled &&
-            hevc116->text.contains(QStringLiteral("HEVC")) &&
-            hevc116->text.contains(QStringLiteral("1080P60")) &&
-            hevc116->text.contains(QStringLiteral("fps")));
+            hevc116->text.contains(QStringLiteral("60fps / HEVC（手动）")));
   PrintKV("menu_hevc_only_model",
           OneLine(QualityMenuModelText(hevc_entries)));
+
+  // 2b) 未登录：最高约 480P30，不承诺 720/1080。
+  const DashCatalog anon_catalog =
+      MakeCatalog({MakeStream(32, 7, 852, 480, 30.0, 480000)}, true);
+  const auto anon_entries = BuildQualityMenuModel(
+      anon_catalog, [] {
+        QualityMenuContext anon;
+        anon.logged_in = false;
+        anon.current_qn = 32;
+        return anon;
+      }());
+  const QString anon_text = QualityMenuModelText(anon_entries);
+  Check("menu_anonymous_480p_note",
+        anon_text.contains(QStringLiteral("未登录：最高约 480P30")),
+        OneLine(anon_text));
 
   // 3) 空目录/失败：不伪造档位。
   QualityMenuContext empty_ctx;
@@ -419,6 +446,48 @@ SampleOutcome RunSample(const OnlineQualityTestOptions& options,
                   : 0));
   PrintTierStreams(tag, catalog);
 
+  // T8.12：实际流 fps 只信 dash.video[]（AVC 默认），降帧提示必须有证据。
+  const DashStream* default_stream = catalog.DefaultStream();
+  const double actual_stream_fps =
+      default_stream != nullptr ? default_stream->fps : 0.0;
+  const double source_fps_hint =
+      lapian::online::InferSourceFpsHintFromText(
+          resolved.video.title + QLatin1Char(' ') +
+          (resolved.video.pages.isEmpty()
+               ? QString()
+               : resolved.video.pages.first().title));
+  lapian::online::OnlineFrameRateEvidence rate_evidence;
+  rate_evidence.stream_fps = actual_stream_fps;
+  rate_evidence.container_fps = 0.0;
+  rate_evidence.selected_qn = catalog.DefaultQn();
+  rate_evidence.source_fps_hint = source_fps_hint;
+  const lapian::online::OnlineFrameRateAssessment rate =
+      lapian::online::AssessOnlineFrameRate(rate_evidence);
+  PrintKV("dash_stream_fps",
+          lapian::online::FormatOnlineFps(actual_stream_fps));
+  PrintKV("source_fps_hint", Num(static_cast<qint64>(source_fps_hint)));
+  PrintKV("frame_rate_badge", rate.badge_text);
+  PrintKV("frame_rate_drop", Num(rate.frame_drop ? 1 : 0));
+  PrintKV("frame_rate_banner", OneLine(rate.banner_text));
+  Check("dash_stream_fps_known", actual_stream_fps > 0.0,
+        QStringLiteral("fps=%1").arg(actual_stream_fps));
+  if (source_fps_hint > 59.5) {
+    // OB-2：标题声明 60fps，普通用户实际 29.412；必须出现降帧提示。
+    Check("ob2_frame_drop_banner", rate.frame_drop,
+          QStringLiteral("actual=%1 source=%2")
+              .arg(actual_stream_fps)
+              .arg(source_fps_hint));
+    Check("ob2_frame_number_mismatch",
+          rate.banner_text.contains(QStringLiteral("帧号与源片不同步")) &&
+              rate.banner_text.contains(QStringLiteral("约 1/2")),
+          rate.banner_text);
+  } else {
+    // OB-1 30.000 / OB-3 25.000：普通帧率不显示降帧。
+    Check("ordinary_fps_no_drop_hint", !rate.frame_drop &&
+                                          rate.banner_text.isEmpty(),
+          rate.banner_text);
+  }
+
   Check("dash_has_video", catalog.HasVideo());
   Check("dash_audio_present", catalog.HasAudio(),
         QStringLiteral("audio=%1").arg(catalog.audios.size()));
@@ -489,9 +558,13 @@ SampleOutcome RunSample(const OnlineQualityTestOptions& options,
     Check("dash_4k_not_available", catalog.FindTier(120) == nullptr);
   }
 
-  // 菜单模型（真实目录）：T8.10 已能播放 DASH，但切档仍属 T8.12，档位置灰并写明。
+  // 菜单模型（真实目录）：当前只有无 GUI 探针，没有会话可切档，所以
+  // dash_playback_available=false；真实手动切档由 `--ui` 覆盖。
   QualityMenuContext menu_ctx;
-  // 当前播放是 durl 档（T8.9 仍走 durl），不是 DASH 默认档。
+  menu_ctx.logged_in = normal_user;
+  menu_ctx.actual_fps = actual_stream_fps;
+  menu_ctx.source_fps_hint = source_fps_hint;
+  // 当前播放是 durl 档（无 GUI 探针），不是 DASH 默认档。
   PlayUrlFetchOptions durl_options;
   durl_options.timeout_ms = options.timeout_ms;
   durl_options.sessdata = sessdata;
@@ -523,8 +596,16 @@ SampleOutcome RunSample(const OnlineQualityTestOptions& options,
   } else {
     Check("menu_anon_no_1080p", FindEntry(entries, 80) == nullptr);
   }
-  Check("menu_real_t8_12_note",
-        menu_text.contains(QStringLiteral("T8.12")), OneLine(menu_text));
+  Check("menu_real_no_t8_12_placeholder",
+        !menu_text.contains(QStringLiteral("T8.12")), OneLine(menu_text));
+  Check("menu_real_no_guarantee_note",
+        menu_text.contains(QStringLiteral("菜单可选不等于保证可达")),
+        OneLine(menu_text));
+  if (!normal_user) {
+    Check("menu_real_anonymous_480p",
+          menu_text.contains(QStringLiteral("未登录：最高约 480P30")),
+          OneLine(menu_text));
+  }
   if (menu_ctx.current_qn > 0) {
     const QualityMenuEntry* current = FindEntry(entries, menu_ctx.current_qn);
     // 当前 durl 档不在 DASH 目录时（匿名 720P vs DASH 480P），模型必须显式说明，
@@ -731,6 +812,15 @@ void OnlineQualityUiTestRunner::Run() {
   window_->raise();
   window_->activateWindow();
   window_->FocusVideoForTest();
+  if (!options_.cache_root.isEmpty()) {
+    window_->SetOnlineCacheRootForTest(options_.cache_root);
+  }
+  if (!options_.records_root.isEmpty()) {
+    window_->SetOnlineRecordsRootForTest(options_.records_root);
+  }
+  if (!options_.pictures_root.isEmpty()) {
+    window_->SetSnapshotPicturesRootForTest(options_.pictures_root);
+  }
 
   lapian::app::OnlineRequest request;
   request.bvid = options_.bvid;
@@ -759,8 +849,14 @@ void OnlineQualityUiTestRunner::Run() {
   }
 
   const int current_qn = window_->OnlineQualityForTest();
-  Print(QStringLiteral("online_quality_ui_state current_qn=%1 quality=%2")
+  const double initial_fps = window_->OnlineStreamFpsForTest();
+  const double source_hint = window_->OnlineSourceFpsHintForTest();
+  Print(QStringLiteral(
+            "online_quality_ui_state current_qn=%1 actual_fps=%2 "
+            "source_fps_hint=%3 quality=%4")
             .arg(current_qn)
+            .arg(initial_fps, 0, 'f', 3)
+            .arg(source_hint, 0, 'f', 0)
             .arg(window_->OnlineQualitySummaryForTest()));
   check(QStringLiteral("ui_dash_ok"),
         window_->OnlineQualitySummaryForTest().contains(QStringLiteral("ok=1")),
@@ -769,6 +865,72 @@ void OnlineQualityUiTestRunner::Run() {
         window_->OnlineQualitySummaryForTest().contains(
             QStringLiteral("80(1920x1080")),
         window_->OnlineQualitySummaryForTest());
+  check(QStringLiteral("ui_stream_fps_known"), initial_fps > 0.0,
+        QStringLiteral("fps=%1").arg(initial_fps));
+  const QString status_detail = window_->OnlineStatusDetailForTest();
+  check(QStringLiteral("ui_status_actual_fps"),
+        status_detail.contains(
+            QStringLiteral("实际 %1fps")
+                .arg(lapian::online::FormatOnlineFps(initial_fps))),
+        status_detail);
+  if (qAbs(window_->OnlineVideoFpsForTest() - initial_fps) > 0.01) {
+    check(QStringLiteral("ui_status_container_fps"),
+          status_detail.contains(
+              QStringLiteral("容器 %1fps")
+                  .arg(lapian::online::FormatOnlineFps(
+                      window_->OnlineVideoFpsForTest()))),
+          status_detail);
+  }
+  check(QStringLiteral("ui_fps_badge_visible"),
+        window_->OnlineFpsBadgeTextForTest().contains(
+            QStringLiteral("fps")),
+        window_->OnlineFpsBadgeTextForTest());
+
+  if (source_hint > 59.5 && initial_fps > 0.0 && initial_fps < 59.5) {
+    // O6-A2 / DEC-4：OB-2 标题声明 60fps、普通用户实际 29.412。
+    check(QStringLiteral("ui_ob2_frame_drop"), window_->OnlineFrameRateDropForTest(),
+          QStringLiteral("fps=%1 source=%2")
+              .arg(initial_fps)
+              .arg(source_hint));
+    check(QStringLiteral("ui_ob2_drop_badge"),
+          window_->OnlineFpsBadgeTextForTest().contains(
+              QStringLiteral("降帧")),
+          window_->OnlineFpsBadgeTextForTest());
+    check(QStringLiteral("ui_ob2_banner_visible"),
+          window_->OnlineFrameRateBannerVisibleForTest(),
+          window_->BannerStateForTest());
+    check(QStringLiteral("ui_ob2_banner_close"),
+          window_->OnlineFrameRateBannerCloseVisibleForTest(),
+          window_->BannerStateForTest());
+    const QString banner = window_->BannerStateForTest();
+    check(QStringLiteral("ui_ob2_banner_text"),
+          banner.contains(QStringLiteral("帧号与源片不同步")) &&
+              banner.contains(QStringLiteral("约 1/2")),
+          banner);
+    window_->DismissOnlineFrameRateBannerForTest();
+    check(QStringLiteral("ui_ob2_banner_dismissed"),
+          !window_->OnlineFrameRateBannerVisibleForTest(),
+          window_->BannerStateForTest());
+    check(QStringLiteral("ui_ob2_badge_persists"),
+          window_->OnlineFpsBadgeTextForTest().contains(
+              QStringLiteral("降帧")),
+          window_->OnlineFpsBadgeTextForTest());
+  } else if (initial_fps > 0.0 && initial_fps < 59.5) {
+    // OB-1 30.000 / OB-3 25.000：普通帧率不误报降帧。
+    check(QStringLiteral("ui_ordinary_no_drop"),
+          !window_->OnlineFrameRateDropForTest(),
+          QStringLiteral("fps=%1 source=%2")
+              .arg(initial_fps)
+              .arg(source_hint));
+    check(QStringLiteral("ui_ordinary_no_banner"),
+          !window_->OnlineFrameRateBannerVisibleForTest(),
+          window_->BannerStateForTest());
+  } else if (initial_fps >= 59.5) {
+    // 真 1080P60（若可达）：不显示降帧。
+    check(QStringLiteral("ui_true60_no_drop"),
+          !window_->OnlineFrameRateDropForTest(),
+          QStringLiteral("fps=%1").arg(initial_fps));
+  }
 
   const QString menu = window_->OnlineQualityMenuTextForTest();
   Print(QStringLiteral("online_quality_ui_menu %1").arg(OneLine(menu)));
@@ -783,6 +945,8 @@ void OnlineQualityUiTestRunner::Run() {
             menu.contains(QStringLiteral("checked=1")));
   check(QStringLiteral("ui_menu_actions"),
         !window_->OnlineQualityMenuActionsForTest().isEmpty());
+  check(QStringLiteral("ui_menu_no_t8_12_placeholder"),
+        !menu.contains(QStringLiteral("T8.12")), OneLine(menu));
 
   QString status;
   const bool current_triggered =
@@ -791,24 +955,166 @@ void OnlineQualityUiTestRunner::Run() {
   check(QStringLiteral("ui_current_status"),
         status.contains(QStringLiteral("已经是当前播放档位")), status);
 
-  int other_qn = 0;
-  for (int qn : {16, 32, 64, 112}) {
-    if (qn != current_qn && menu.contains(QStringLiteral("qn=%1").arg(qn))) {
-      other_qn = qn;
-      break;
+  // 1080P30 → 720P30：切档前在已索引区打一个标记，切档后按 PTS 找回。
+  int switch_qn = 0;
+  if (current_qn == 80 && menu.contains(QStringLiteral("qn=64"))) {
+    switch_qn = 64;
+  } else if (current_qn == 64 && menu.contains(QStringLiteral("qn=32"))) {
+    switch_qn = 32;
+  }
+  const bool index_ready =
+      window_->WaitForOnlineIndexFramesForTest(120, options_.timeout_ms);
+  check(QStringLiteral("ui_index_before_switch"), index_ready,
+        QStringLiteral("frames=%1").arg(window_->OnlineIndexFramesForTest()));
+  auto wait_frame_near = [this](qint64 target, int timeout_ms) {
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeout_ms) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      if (qAbs(window_->CurrentFrameForTest() - target) <= 2 &&
+          window_->OnlineSeekIdleForTest()) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    return qAbs(window_->CurrentFrameForTest() - target) <= 2 &&
+           window_->OnlineSeekIdleForTest();
+  };
+  std::int64_t old_pts = 0;
+  int old_mark_count = 0;
+  if (switch_qn > 0 && index_ready) {
+    window_->GoToFrameForTest(30);
+    const bool frame30 = wait_frame_near(30, 30000);
+    check(QStringLiteral("ui_frame30_before_switch"), frame30,
+          QStringLiteral("frame=%1").arg(window_->CurrentFrameForTest()));
+    old_pts = window_->CurrentPtsUsForTest();
+    window_->AddMarkForTest();
+    old_mark_count = window_->MarkCountForTest();
+    check(QStringLiteral("ui_mark_before_switch"), old_mark_count >= 1,
+          QStringLiteral("marks=%1").arg(old_mark_count));
+
+    QString switch_status;
+    QElapsedTimer switch_timer;
+    switch_timer.start();
+    const bool switch_triggered =
+        window_->TriggerOnlineQualityEntryForTest(switch_qn, &switch_status);
+    const qint64 switch_click_ms = switch_timer.elapsed();
+    Print(QStringLiteral("online_quality_ui_switch_click ms=%1 qn=%2")
+              .arg(switch_click_ms)
+              .arg(switch_qn));
+    check(QStringLiteral("ui_switch_click_le_200ms"), switch_click_ms <= 200,
+          QStringLiteral("ms=%1").arg(switch_click_ms));
+    check(QStringLiteral("ui_switch_triggered"), switch_triggered,
+          switch_status);
+    check(QStringLiteral("ui_switch_prompt"),
+          switch_status.contains(QStringLiteral("帧号可能变化")) ||
+              switch_status.contains(QStringLiteral("正在切换")),
+          switch_status);
+    const bool switched = window_->WaitForOnlineQualitySwitchForTest(
+        switch_qn, std::max(options_.timeout_ms, 60000));
+    check(QStringLiteral("ui_switch_landed"), switched,
+          window_->OnlineQualitySwitchStatusForTest());
+    const bool switch_quality =
+        window_->WaitForOnlineQualityForTest(options_.timeout_ms);
+    check(QStringLiteral("ui_switch_quality"), switch_quality,
+          window_->OnlineQualityErrorForTest());
+    check(QStringLiteral("ui_switch_actual_qn"),
+          window_->OnlineQualityForTest() == switch_qn,
+          QStringLiteral("actual=%1").arg(window_->OnlineQualityForTest()));
+    check(QStringLiteral("ui_switch_notice"),
+          window_->OnlineQualitySwitchStatusForTest().contains(
+              QStringLiteral("帧号可能变化")) ||
+              window_->OnlineQualitySwitchStatusForTest().contains(
+                  QStringLiteral("按 PTS 映射")),
+          window_->OnlineQualitySwitchStatusForTest());
+    check(QStringLiteral("ui_switch_index_rebuilt"),
+          window_->WaitForOnlineIndexFramesForTest(31, options_.timeout_ms),
+          QStringLiteral("frames=%1").arg(window_->OnlineIndexFramesForTest()));
+
+    const int switch_frame = static_cast<int>(window_->CurrentFrameForTest());
+    check(QStringLiteral("ui_switch_position_preserved"),
+          qAbs(switch_frame - 30) <= 2,
+          QStringLiteral("frame=%1 old_pts=%2 new_pts=%3")
+              .arg(switch_frame)
+              .arg(old_pts)
+              .arg(window_->CurrentPtsUsForTest()));
+    check(QStringLiteral("ui_switch_pts_preserved"),
+          old_pts > 0 &&
+              qAbs(window_->CurrentPtsUsForTest() - old_pts) <= 100000,
+          QStringLiteral("old=%1 new=%2")
+              .arg(old_pts)
+              .arg(window_->CurrentPtsUsForTest()));
+    check(QStringLiteral("ui_switch_marks_preserved"),
+          window_->MarkCountForTest() == old_mark_count,
+          QStringLiteral("before=%1 after=%2")
+              .arg(old_mark_count)
+              .arg(window_->MarkCountForTest()));
+    bool mark_found = false;
+    for (int i = 0; i < window_->MarkCountForTest(); ++i) {
+      if (qAbs(window_->MarkFrameAtForTest(i) - 30) <= 2) {
+        mark_found = true;
+      }
+    }
+    check(QStringLiteral("ui_switch_mark_frame"), mark_found,
+          QStringLiteral("count=%1").arg(window_->MarkCountForTest()));
+
+    // O6-A6：截图清单写实际流 qn/codecid/fps/frame/pts/路径/时间。
+    window_->CaptureSnapshotForTest();
+    const bool drained = window_->DrainSnapshotsForTest();
+    check(QStringLiteral("ui_switch_snapshot_saved"), drained,
+          window_->SnapshotLastErrorForTest());
+    const QString snapshot_path = window_->SnapshotLastPathForTest();
+    check(QStringLiteral("ui_switch_snapshot_path"),
+          !snapshot_path.isEmpty() && QFileInfo::exists(snapshot_path),
+          snapshot_path);
+    const QString index_path = window_->OnlineSnapshotIndexPathForTest();
+    QFile index(index_path);
+    bool index_ok = index.open(QIODevice::ReadOnly);
+    QByteArray last_line;
+    if (index_ok) {
+      const QList<QByteArray> lines = index.readAll().split('\n');
+      for (const QByteArray& line : lines) {
+        if (!line.trimmed().isEmpty()) {
+          last_line = line.trimmed();
+        }
+      }
+      index.close();
+    }
+    const QJsonObject snap = QJsonDocument::fromJson(last_line).object();
+    check(QStringLiteral("ui_snapshot_record_qn"),
+          snap.value(QStringLiteral("qn")).toInt() == switch_qn, last_line);
+    check(QStringLiteral("ui_snapshot_record_codecid"),
+          snap.value(QStringLiteral("codecid")).toInt() > 0, last_line);
+    check(QStringLiteral("ui_snapshot_record_fps"),
+          snap.value(QStringLiteral("fps")).toDouble() > 0.0, last_line);
+    check(QStringLiteral("ui_snapshot_record_frame_pts"),
+          qAbs(snap.value(QStringLiteral("frame")).toInt() - switch_frame) <= 2 &&
+              snap.value(QStringLiteral("pts")).toDouble() > 0.0,
+          last_line);
+    check(QStringLiteral("ui_snapshot_record_bvid_cid"),
+          snap.value(QStringLiteral("bvid")).toString() == options_.bvid &&
+              snap.value(QStringLiteral("cid")).toDouble() ==
+                  static_cast<double>(options_.cid),
+          last_line);
+    check(QStringLiteral("ui_snapshot_record_path_time"),
+          !snap.value(QStringLiteral("path")).toString().isEmpty() &&
+              !snap.value(QStringLiteral("saved_at")).toString().isEmpty(),
+          last_line);
+    Print(QStringLiteral("online_quality_ui_switch actual_qn=%1 frame=%2 "
+                         "old_pts=%3 new_pts=%4 snapshot=%5")
+              .arg(window_->OnlineQualityForTest())
+              .arg(window_->CurrentFrameForTest())
+              .arg(old_pts)
+              .arg(window_->CurrentPtsUsForTest())
+              .arg(snapshot_path));
+  } else {
+    check(QStringLiteral("ui_switch_target_available"), false,
+          QStringLiteral("current_qn=%1 menu=%2")
+              .arg(current_qn)
+              .arg(OneLine(menu)));
   }
-  if (other_qn > 0) {
-    QString other_status;
-    const bool other_triggered =
-        window_->TriggerOnlineQualityEntryForTest(other_qn, &other_status);
-    check(QStringLiteral("ui_other_tier_disabled"), !other_triggered,
-          other_status);
-    check(QStringLiteral("ui_other_tier_reason"),
-          other_status.contains(QStringLiteral("T8.12")), other_status);
-  }
-  check(QStringLiteral("ui_quality_requests_one"),
-        window_->OnlineQualityRequestsForTest() == 1,
+  check(QStringLiteral("ui_quality_requests"),
+        window_->OnlineQualityRequestsForTest() >= 1,
         QStringLiteral("requests=%1")
             .arg(window_->OnlineQualityRequestsForTest()));
   Print(QStringLiteral("online_quality_ui_requests durl=%1 quality=%2")
@@ -818,29 +1124,48 @@ void OnlineQualityUiTestRunner::Run() {
   // 结束真实会话（保留 .part；测试根由 --online-cache-root 指定）。
   window_->CancelOnlineLoadingForTest();
 
-  // 合成大会员目录：证明 1080P60/4K 进菜单、只手动、置灰（不假装可达）。
-  lapian::app::OnlineQualityCatalog vip;
-  vip.ok = true;
-  vip.fetched = true;
-  vip.catalog = MakeCatalog(
+  // 合成大会员目录：只验证 UI 规则，不是“可达”证据。
+  auto synth_actions =
+      [this](const QVector<lapian::online::DashStream>& streams) {
+        lapian::app::OnlineQualityCatalog catalog;
+        catalog.ok = true;
+        catalog.fetched = true;
+        catalog.catalog = MakeCatalog(streams, true);
+        window_->SetOnlineQualityForTest(catalog);
+        return window_->OnlineQualityMenuActionsForTest().join(
+            QStringLiteral(" || "));
+      };
+  const QString hevc_actions = synth_actions(
       {MakeStream(80, 7, 1920, 1080, 30.0, 2200000),
        MakeStream(116, 12, 1920, 1080, 60.0, 1500000),
-       MakeStream(120, 12, 3840, 2160, 60.0, 3000000)},
-      true);
-  window_->SetOnlineQualityForTest(vip);
-  const QStringList actions = window_->OnlineQualityMenuActionsForTest();
-  const QString action_text = actions.join(QStringLiteral(" || "));
-  Print(QStringLiteral("online_quality_ui_actions %1").arg(OneLine(action_text)));
-  check(QStringLiteral("ui_vip_1080p60_menu"),
-        action_text.contains(QStringLiteral("1080P60")) &&
-            action_text.contains(QStringLiteral("仅手动")) &&
-            action_text.contains(QStringLiteral("enabled=0")));
+       MakeStream(120, 12, 3840, 2160, 60.0, 3000000)});
+  Print(QStringLiteral("online_quality_ui_actions_hevc %1")
+            .arg(OneLine(hevc_actions)));
+  check(QStringLiteral("ui_vip_hevc60_menu"),
+        hevc_actions.contains(QStringLiteral("1080P60")) &&
+            hevc_actions.contains(QStringLiteral("60fps / HEVC（手动）")) &&
+            hevc_actions.contains(QStringLiteral("enabled=0")),
+        hevc_actions);
   check(QStringLiteral("ui_vip_4k_menu_manual"),
-        action_text.contains(QStringLiteral("4K")) &&
-            action_text.contains(QStringLiteral("可用档")) &&
-            action_text.contains(QStringLiteral("enabled=0")));
+        hevc_actions.contains(QStringLiteral("4K")) &&
+            hevc_actions.contains(QStringLiteral("可用档")) &&
+            hevc_actions.contains(QStringLiteral("enabled=0")),
+        hevc_actions);
+
+  const QString avc60_actions = synth_actions(
+      {MakeStream(80, 7, 1920, 1080, 30.0, 2200000),
+       MakeStream(116, 7, 1920, 1080, 60.0, 2600000)});
+  Print(QStringLiteral("online_quality_ui_actions_avc60 %1")
+            .arg(OneLine(avc60_actions)));
+  check(QStringLiteral("ui_avc60_auto_marker"),
+        avc60_actions.contains(QStringLiteral("自动优先")) &&
+            !avc60_actions.contains(QStringLiteral("60fps / HEVC")),
+        avc60_actions);
   check(QStringLiteral("ui_vip_menu_no_guarantee"),
-        action_text.contains(QStringLiteral("菜单可选不等于保证可达")));
+        avc60_actions.contains(QStringLiteral("菜单可选不等于保证可达")),
+        avc60_actions);
+  check(QStringLiteral("ui_vip_synthetic_not_available"),
+        avc60_actions.contains(QStringLiteral("enabled=0")), avc60_actions);
   finish();
 }
 

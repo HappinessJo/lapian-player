@@ -688,19 +688,25 @@ bool DashCatalog::ClaimedQualityInTiers() const {
 }
 
 int DashCatalog::DefaultQn() const {
-  // 1) O6 顺序里的第一个“实际存在 + 非手动 + 有 AVC”档。
+  // 1) O6 顺序里的第一个“实际存在 + 非只手动 + 有 AVC”档。
+  //    60fps 档（116/74）只有在 AVC 可用时才进入这里；HEVC/AV1-only 60fps
+  //    被 IsManualOnlyTier 排除，绝不静默降帧后自动选。
   for (int qn : kQualityPreference) {
     const QualityTier* tier = FindTier(qn);
-    if (tier == nullptr || IsManualOnlyQuality(qn)) {
+    if (tier == nullptr || IsManualOnlyTier(*tier)) {
       continue;
     }
     if (tier->has_avc()) {
       return qn;
     }
   }
-  // 2) 没有 AVC 可自动选时，回退最高的非手动档（HEVC-only 可播，但不选 60/4K）。
+  // 2) 没有 AVC 可自动选时，回退最高的非手动、非 60fps 档
+  //    （HEVC-only 1080P30 可播；60fps/4K 仍只手动）。
   for (const QualityTier& tier : tiers) {
-    if (!IsManualOnlyQuality(tier.qn)) {
+    if (tier.qn == 116 || tier.qn == 74) {
+      continue;
+    }
+    if (!IsManualOnlyTier(tier)) {
       return tier.qn;
     }
   }
@@ -745,8 +751,18 @@ QString DashCatalog::Summary() const {
 }
 
 bool IsManualOnlyQuality(int qn) {
-  // 60fps 档（116/74）与 4K/HDR/杜比/8K（>=120）只允许手动选择（O6/O11）。
-  return qn == 116 || qn == 74 || qn >= 120;
+  // 仅凭 qn 只能判断 4K/HDR/杜比/8K；60fps 档要看编码（AVC 可自动）。
+  return qn >= 120;
+}
+
+bool IsManualOnlyTier(const QualityTier& tier) {
+  if (tier.qn >= 120) {
+    return true;
+  }
+  if (tier.qn == 116 || tier.qn == 74) {
+    return !tier.has_avc();
+  }
+  return false;
 }
 
 QString CodecName(int codecid) {

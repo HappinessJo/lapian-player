@@ -1,14 +1,15 @@
 #pragma once
 
-// T8.9 DASH 解析与档位探针。
+// T8.9/T8.12 DASH 解析、档位策略与降帧提示探针。
 //
 // 两种模式：
 // - 无 GUI（默认）：真实 playurl(fnval=4048) + view + durl 对照 + 匿名对照 +
-//   错误 qn（116/0/9999）；只从 .secrets / LAPIAN_SESSDATA_FILE / --sessdata-file
-//   读取 SESSDATA；绝不打印凭据或签名 URL；输出稳定 key=value。
-// - `--ui`：真实窗口 + `MainWindow::StartOnlineSession`，验证“档位按钮/菜单”
-//   来自实际 playurl 返回，且 T8.9 不假装切档；另用合成大会员目录验证
-//   1080P60/4K 只进菜单且置灰（不写成保证可达）。
+//   错误 qn（116/0/9999）；同时验证实际 fps/降帧文案与权限列档；只从 .secrets /
+//   LAPIAN_SESSDATA_FILE / --sessdata-file 读取 SESSDATA；绝不打印凭据或签名
+//   URL；输出稳定 key=value。
+// - `--ui`：真实窗口 + `MainWindow::StartOnlineSession`，验证档位菜单来自实际
+//   playurl 返回、DEC-4 横幅/角标可关、手动 1080→720（PTS/标记/截图）以及
+//   合成 60/4K 的“只手动/不保证可达”规则。
 //
 // 退出码：0=pass；1=fail；2=blocked（无凭据/登录失效/非普通用户账号等）。
 

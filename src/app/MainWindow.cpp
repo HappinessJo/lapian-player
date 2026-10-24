@@ -91,6 +91,7 @@ extern "C" {
 #include "online/CacheManager.h"
 #include "online/CacheStore.h"
 #include "online/CredentialStore.h"
+#include "online/FrameRatePolicy.h"
 #include "online/IHttpClient.h"
 #include "online/PlayUrl.h"
 
@@ -1023,11 +1024,16 @@ QStringList MainWindow::LayoutProblemsForTest() const {
 
   const QList<QLabel*> info_labels =
       info_bar_ == nullptr ? QList<QLabel*>() : info_bar_->findChildren<QLabel*>();
+  // T8.12：横幅有独立行容器，子 label 的 geometry 是相对父控件的；统一映射到
+  // InfoBar 坐标系再判断裁切/重叠，避免把不同父控件的坐标混用。
+  auto rect_in_info_bar = [this](QWidget* widget) {
+    return QRect(widget->mapTo(info_bar_, QPoint(0, 0)), widget->size());
+  };
   for (QLabel* label : info_labels) {
     if (!label->isVisible()) {
       continue;
     }
-    if (!info_bar_->rect().contains(label->geometry())) {
+    if (!info_bar_->rect().contains(rect_in_info_bar(label))) {
       problems << QStringLiteral("info-label-outside");
     }
     if (!label->text().isEmpty() && label->width() < 24) {
@@ -1039,7 +1045,7 @@ QStringList MainWindow::LayoutProblemsForTest() const {
       QLabel* first = info_labels[i];
       QLabel* second = info_labels[j];
       if (first->isVisible() && second->isVisible() &&
-          first->geometry().intersects(second->geometry())) {
+          rect_in_info_bar(first).intersects(rect_in_info_bar(second))) {
         problems << QStringLiteral("info-label-overlap");
       }
     }
@@ -1798,6 +1804,7 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     statusBar()->showMessage(online_last_error_, 8000);
     return;
   }
+  ClearOnlineQualitySwitch();
   ShutdownOnlineSession(false);
   EnsureOnlineSession();
   if (online_ == nullptr) {
@@ -1818,6 +1825,12 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_cache_path_.clear();
   online_owner_.clear();
   online_fps_ = 0.0;
+  online_actual_fps_ = 0.0;
+  online_source_fps_hint_ = lapian::online::InferSourceFpsHintFromText(
+      request.title + QLatin1Char(' ') + request.page_title);
+  online_frame_rate_drop_ = false;
+  online_request_ = request;
+  online_logged_in_ = !request.sessdata.isEmpty();
   online_bvid_ = request.bvid;
   online_title_ = request.title;
   online_cid_ = request.cid;
@@ -1844,9 +1857,13 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   // T8.6.1a：新会话从干净的步进状态开始。
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
+  online_seek_completion_notice_.clear();
   online_status_detail_.clear();
   online_gate_published_ = 0;
   online_gate_readpos_ = 0;
+  if (info_bar_ != nullptr) {
+    info_bar_->ClearOnlineFrameRateStatus();
+  }
   ResetOnlineQuality();
   if (online_cancel_action_ != nullptr) {
     online_cancel_action_->setEnabled(true);
@@ -1866,6 +1883,9 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   if (!online_ || !online_->Start(request, &error)) {
     online_mode_ = false;
     online_last_error_ = error.isEmpty() ? QStringLiteral("无法开始在线会话") : error;
+    lapian::online::ClearSecret(&online_request_.sessdata);
+    online_request_ = lapian::app::OnlineRequest{};
+    online_actual_fps_ = 0.0;
     if (info_bar_ != nullptr) {
       info_bar_->SetError(online_last_error_);
     }
@@ -2048,6 +2068,8 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   online_audio_total_bytes_ = info.audio_total_bytes;
   online_dash_duration_ms_ = info.dash_duration_ms;
   online_dash_fps_ = info.dash_fps;
+  online_request_ = info.request;
+  online_logged_in_ = !info.request.sessdata.isEmpty();
   online_bvid_ = info.request.bvid;
   online_title_ = info.request.title;
   online_cid_ = info.request.cid;
@@ -2055,6 +2077,13 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   online_codecid_ = info.playurl.codecid;
   online_owner_ = info.request.owner;
   online_fps_ = session_->info().video.frame_rate.ToDouble();
+  // 实际流 fps 用 playurl dash_fps（OB-2=29.412），容器 fps 只作回退/并列。
+  online_actual_fps_ =
+      online_dash_fps_ > 0.0 ? online_dash_fps_ : online_fps_;
+  online_source_fps_hint_ = std::max(
+      online_source_fps_hint_,
+      lapian::online::InferSourceFpsHintFromText(
+          online_title_ + QLatin1Char(' ') + info.request.page_title));
   online_total_bytes_ = info.source->Size();
   online_published_bytes_ = info.source->Published();
   online_part_path_ = info.part_path;
@@ -2081,33 +2110,24 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   setWindowTitle(QStringLiteral("%1 — 拉片软件（在线 · %2）")
                      .arg(online_title_.isEmpty() ? online_bvid_ : online_title_,
                           quality));
-  const double source_fps = media.video.frame_rate.ToDouble();
-  QString online_detail = QStringLiteral(" · 在线 %1 · %2x%3")
-                              .arg(quality)
-                              .arg(media.video.width)
-                              .arg(media.video.height);
-  if (source_fps > 0.0) {
-    online_detail += QStringLiteral(" · %1fps").arg(
-        QString::number(source_fps, 'f', 1));
-  }
-  if (source_fps > 0.0 && source_fps < 50.0) {
-    // O6/DEC-4 的保守提示：不声称源片一定 60fps，只说明当前流帧率与
-    // “帧号只对当前流成立”，避免把 29.4 写成 60。
-    online_detail += QStringLiteral("（当前流帧率；若源片为 60fps，帧号不同步/约 1/2）");
-    statusBar()->showMessage(
-        QStringLiteral("当前流约 %1fps；帧号与源片可能不同步/约 1/2")
-            .arg(QString::number(source_fps, 'f', 1)),
-        12000);
-  }
-  status_label_->setText(base_info_ + online_detail);
+  ApplyOnlineFrameRateUi();
+  online_status_detail_ = BuildOnlineStatusDetail();
+  status_label_->setText(base_info_ + online_status_detail_);
   // T8.6.1a：seek 落地后用它把状态栏从“缓冲中（目标帧 N）”恢复成档位/帧率。
-  online_status_detail_ = online_detail;
   // T8.9：档位按钮在首帧后可见；目录稍后异步补齐（先显示当前播放档位）。
   if (quality_button_ != nullptr) {
     quality_button_->setVisible(true);
     quality_button_->setEnabled(true);
     quality_button_->setText(
         QStringLiteral("清晰度：%1").arg(lapian::online::QualityName(online_qn_)));
+    quality_button_->setToolTip(
+        QStringLiteral("当前实际 qn=%1 codecid=%2；请求 qn=%3；"
+                       "档位以服务端返回为准")
+            .arg(online_qn_)
+            .arg(online_codecid_)
+            .arg(online_request_.requested_qn > 0
+                     ? QString::number(online_request_.requested_qn)
+                     : QStringLiteral("自动")));
   }
   RebuildOnlineQualityMenu();
   statusBar()->showMessage(QStringLiteral("在线首帧已呈现，默认暂停"), 6000);
@@ -2145,11 +2165,20 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   mark_context.owner = info.request.owner;
   mark_context.qn = info.playurl.quality;
   mark_context.codecid = info.playurl.codecid;
-  mark_context.fps = media.video.frame_rate.ToDouble();
+  mark_context.fps = online_actual_fps_;
   mark_context.duration_ms = info.request.duration_ms;
   mark_context.total_bytes = info.source->Size();
   mark_context.cache_hit = info.cache_hit;
   LoadOnlineMarks(mark_context);
+  if (marks_ != nullptr) {
+    marks_->SetOnlineContext(online_actual_fps_, online_qn_, online_codecid_);
+    // 换档后把记录头部的当前流 qn/codecid/fps 落盘；逐条标记保留创建时
+    // 的 online_meta_（旧流实际值），不改成新流值。没有标记时不写空记录。
+    if (!marks_->marks().empty()) {
+      marks_dirty_ = true;
+      SaveMarks(false);
+    }
+  }
   ready_step("marks_loaded");
 
   // 音频跟随：AudioEngine 自己打开另一个 GrowingFormat；读到 frontier 会等待。
@@ -2250,6 +2279,12 @@ bool MainWindow::ApplyOnlineCacheHit(
     online_ready_ = false;
     return false;
   }
+  online_request_ = info.request;
+  online_logged_in_ = !info.request.sessdata.isEmpty();
+  online_dash_fps_ = info.dash_fps;
+  online_actual_fps_ = info.dash_fps > 0.0 ? info.dash_fps : info.fps;
+  online_source_fps_hint_ = lapian::online::InferSourceFpsHintFromText(
+      info.title + QLatin1Char(' ') + info.request.page_title);
   OnlineOpenContext online;
   online.bvid = info.request.bvid;
   online.cid = info.request.cid;
@@ -2257,7 +2292,7 @@ bool MainWindow::ApplyOnlineCacheHit(
   online.owner = info.owner;
   online.qn = info.qn;
   online.codecid = info.codecid;
-  online.fps = info.fps;
+  online.fps = online_actual_fps_;
   online.duration_ms = info.duration_ms;
   online.total_bytes = info.total_bytes;
   online.cache_hit = true;
@@ -2279,6 +2314,30 @@ bool MainWindow::ApplyOnlineCacheHit(
   if (online_cancel_action_ != nullptr) {
     online_cancel_action_->setEnabled(false);
   }
+  if (session_ != nullptr) {
+    online_fps_ = session_->info().video.frame_rate.ToDouble();
+  }
+  if (online_dash_fps_ <= 0.0) {
+    online_actual_fps_ = online_fps_;
+  }
+  ApplyOnlineFrameRateUi();
+  online_status_detail_ = BuildOnlineStatusDetail();
+  if (status_label_ != nullptr) {
+    status_label_->setText(base_info_ + online_status_detail_);
+  }
+  if (quality_button_ != nullptr) {
+    quality_button_->setText(
+        QStringLiteral("清晰度：%1").arg(lapian::online::QualityName(online_qn_)));
+  }
+  if (marks_ != nullptr) {
+    marks_->SetOnlineContext(online_actual_fps_, online_qn_, online_codecid_);
+    if (!marks_->marks().empty()) {
+      marks_dirty_ = true;
+      SaveMarks(false);
+    }
+  }
+  RebuildOnlineQualityMenu();
+  TryApplyPendingOnlineQualitySwitch();
   return true;
 }
 
@@ -2304,17 +2363,30 @@ void MainWindow::LoadOnlineMarks(const OnlineOpenContext& online) {
       return true;
     };
     lookup.frame_of_pts = [&index](std::int64_t pts_us, std::int64_t* frame) {
-      return index.FindExactPts(pts_us, frame);
+      // T8.12：换档后不同流不是逐帧 PTS 一一对应；在 0.5s 内按最近 PTS
+      // 映射标记，超出容差返回 false，避免部分索引把标记吸到末端。
+      const std::int64_t nearest = index.FrameOfPts(pts_us);
+      if (nearest < 0) {
+        return false;
+      }
+      const std::int64_t nearest_pts = index.PtsOfFrame(nearest);
+      const std::int64_t delta = nearest_pts - pts_us;
+      if (delta > 500000 || delta < -500000) {
+        return false;
+      }
+      *frame = nearest;
+      return true;
     };
   }
-  const double fps = session_->info().video.frame_rate.ToDouble();
+  const double fps = online.fps > 0.0
+                         ? online.fps
+                         : session_->info().video.frame_rate.ToDouble();
   const QByteArray bvid_utf8 = online.bvid.toUtf8();
   marks_ = std::make_unique<lapian::core::MarkStore>(
       lapian::core::MarkStore::OpenOnline(
           std::string(bvid_utf8.constData(),
                       static_cast<std::size_t>(bvid_utf8.size())),
-          online.cid, fps > 0.0 ? fps : online.fps, online.qn, online.codecid,
-          options, lookup));
+          online.cid, fps, online.qn, online.codecid, options, lookup));
   marks_dirty_ = false;
   if (mark_panel_ != nullptr) {
     mark_panel_->Clear();
@@ -2342,7 +2414,17 @@ void MainWindow::ReconcileOnlineMarks() {
     return true;
   };
   lookup.frame_of_pts = [&index](std::int64_t pts_us, std::int64_t* frame) {
-    return index.FindExactPts(pts_us, frame);
+    const std::int64_t nearest = index.FrameOfPts(pts_us);
+    if (nearest < 0) {
+      return false;
+    }
+    const std::int64_t nearest_pts = index.PtsOfFrame(nearest);
+    const std::int64_t delta = nearest_pts - pts_us;
+    if (delta > 500000 || delta < -500000) {
+      return false;
+    }
+    *frame = nearest;
+    return true;
   };
   bool changed = false;
   marks_->ReconcileFrames(lookup, nullptr, &changed);
@@ -2355,6 +2437,64 @@ void MainWindow::ReconcileOnlineMarks() {
   ShowMarkWarnings();
   statusBar()->showMessage(
       QStringLiteral("在线记录帧率/帧号与当前流不同，已按 PTS 映射"), 6000);
+}
+
+void MainWindow::ApplyOnlineFrameRateUi() {
+  if (!online_mode_ || session_ == nullptr) {
+    online_actual_fps_ = 0.0;
+    online_frame_rate_drop_ = false;
+    if (info_bar_ != nullptr) {
+      info_bar_->ClearOnlineFrameRateStatus();
+    }
+    return;
+  }
+  const lapian::online::OnlineFrameRateEvidence evidence{
+      online_dash_fps_, online_fps_, online_qn_, online_source_fps_hint_};
+  const lapian::online::OnlineFrameRateAssessment assessment =
+      lapian::online::AssessOnlineFrameRate(evidence);
+  online_actual_fps_ = assessment.actual_fps;
+  online_frame_rate_drop_ = assessment.frame_drop;
+  if (info_bar_ != nullptr) {
+    info_bar_->SetOnlineFrameRateStatus(assessment.badge_text,
+                                        assessment.banner_text);
+  }
+  if (assessment.frame_drop) {
+    statusBar()->showMessage(
+        QStringLiteral("%1（帧号只对当前流成立）").arg(assessment.status_text),
+        12000);
+  }
+}
+
+QString MainWindow::BuildOnlineStatusDetail() const {
+  if (session_ == nullptr) {
+    return QString();
+  }
+  const lapian::media::MediaInfo& media = session_->info();
+  QString detail = QStringLiteral(" · 在线%1 · %2 · %3x%4")
+                       .arg(online_cache_hit_ ? QStringLiteral("缓存命中")
+                                              : QString(),
+                            lapian::online::QualityName(online_qn_))
+                       .arg(media.video.width)
+                       .arg(media.video.height);
+  const double container_fps = media.video.frame_rate.ToDouble();
+  const double actual =
+      online_actual_fps_ > 0.0 ? online_actual_fps_ : container_fps;
+  if (actual > 0.0) {
+    detail += QStringLiteral(" · 实际 %1fps")
+                  .arg(lapian::online::FormatOnlineFps(actual));
+  }
+  if (actual > 0.0 && container_fps > 0.0 &&
+      std::fabs(actual - container_fps) > 0.01) {
+    // T8.12：实际流 fps 与容器 avg_frame_rate 不同时并列写证据。
+    detail += QStringLiteral("（容器 %1fps）")
+                  .arg(lapian::online::FormatOnlineFps(container_fps));
+  }
+  if (online_frame_rate_drop_) {
+    detail += online_source_fps_hint_ > 59.5
+                  ? QStringLiteral(" · 帧号与源片不同步/约 1/2")
+                  : QStringLiteral(" · 可能降帧");
+  }
+  return detail;
 }
 
 void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
@@ -2381,6 +2521,7 @@ void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
       break;
     case OnlineState::kError:
       online_last_error_ = message;
+      ClearOnlineQualitySwitch();
       if (info_bar_ != nullptr) {
         info_bar_->SetError(message);
       }
@@ -2944,6 +3085,9 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
   const bool needs_new_session = online_session_poisoned_;
   const bool exact = exact_index_covered && session_->index().IsReady() &&
                      target < static_cast<std::int64_t>(session_->index().size());
+  // T8.12：切档后的最终提示只跟这一次 seek 走，不能被后续 seek 复用。
+  const QString completion_notice = online_seek_completion_notice_;
+  online_seek_completion_notice_.clear();
   if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
     std::fprintf(stderr,
                  "T8.10 online_seek_request target=%lld exact=%d index=%zu\n",
@@ -2967,7 +3111,8 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
   try {
     online_seek_thread_ = std::thread(
         [this, generation, cancel, source, part, display, current_session,
-         needs_new_session, exact, index_copy, device, video, target, mode]() {
+         needs_new_session, exact, index_copy, device, video, target, mode,
+         completion_notice]() {
           struct Result {
             std::shared_ptr<lapian::media::MediaSession> session;
             bool new_session = false;
@@ -3084,7 +3229,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
           result->session = use;
           QMetaObject::invokeMethod(
               this,
-              [this, generation, result, target]() {
+              [this, generation, result, target, completion_notice]() {
                 if (generation != online_seek_generation_ || !online_mode_) {
                   return;
                 }
@@ -3132,8 +3277,12 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 if (status_label_ != nullptr && !online_status_detail_.isEmpty()) {
                   status_label_->setText(base_info_ + online_status_detail_);
                 }
-                statusBar()->showMessage(
-                    QStringLiteral("第 %1 帧（在线）").arg(target), 2000);
+                if (!completion_notice.isEmpty()) {
+                  statusBar()->showMessage(completion_notice, 12000);
+                } else {
+                  statusBar()->showMessage(
+                      QStringLiteral("第 %1 帧（在线）").arg(target), 2000);
+                }
                 InstallPendingOnlineIndex();
                 OnOnlineStepLanded(target);
               },
@@ -3239,6 +3388,13 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_cache_path_.clear();
   online_owner_.clear();
   online_fps_ = 0.0;
+  online_actual_fps_ = 0.0;
+  online_source_fps_hint_ = 0.0;
+  online_frame_rate_drop_ = false;
+  lapian::online::ClearSecret(&online_request_.sessdata);
+  online_request_ = lapian::app::OnlineRequest{};
+  online_logged_in_ = true;
+  online_seek_completion_notice_.clear();
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
@@ -3260,6 +3416,10 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
   online_status_detail_.clear();
+  ClearOnlineQualitySwitch();
+  if (info_bar_ != nullptr) {
+    info_bar_->ClearOnlineFrameRateStatus();
+  }
   ResetOnlineQuality();
   mark("end");
 }
@@ -3519,10 +3679,17 @@ lapian::online::QualityMenuContext MainWindow::CurrentQualityMenuContext() const
   lapian::online::QualityMenuContext context;
   context.current_qn = online_qn_;
   context.current_codecid = online_codecid_;
+  context.requested_qn = online_request_.requested_qn;
+  context.requested_codecid = online_request_.requested_codecid;
   context.current_from_cache = online_cache_hit_;
-  // T8.10 已支持 DASH 双输入播放；但切档（重新取流/索引重建）是 T8.12，
-  // 菜单仍只列示：当前档允许勾选，其它档置灰并说明 T8.12。
-  context.dash_playback_available = false;
+  // T8.12：只有真实在线会话就绪且服务端目录成功返回时才允许手动切档。
+  // 离线合成菜单/T8.9 诊断仍会置灰，避免把“列示”写成“可达”。
+  context.dash_playback_available =
+      online_mode_ && online_ready_ && online_quality_.ok &&
+      !online_switch_pending_;
+  context.logged_in = online_logged_in_;
+  context.actual_fps = online_actual_fps_;
+  context.source_fps_hint = online_source_fps_hint_;
   context.error = online_quality_.error;
   return context;
 }
@@ -3609,6 +3776,14 @@ void MainWindow::ApplyOnlineQuality(
       text += QStringLiteral("（缓存）");
     }
     quality_button_->setText(text);
+    quality_button_->setToolTip(
+        QStringLiteral("当前实际 qn=%1 codecid=%2；请求 qn=%3；"
+                       "档位以服务端返回为准")
+            .arg(online_qn_)
+            .arg(online_codecid_)
+            .arg(online_request_.requested_qn > 0
+                     ? QString::number(online_request_.requested_qn)
+                     : QStringLiteral("自动")));
   }
   RebuildOnlineQualityMenu();
   if (!info.ok && !info.error.isEmpty()) {
@@ -3634,20 +3809,171 @@ void MainWindow::OnOnlineQualityChosen(int qn) {
   if (qn <= 0) {
     return;
   }
-  if (qn == online_qn_) {
+  if (!online_mode_ || !online_ready_ || session_ == nullptr) {
+    statusBar()->showMessage(
+        QStringLiteral("在线会话尚未就绪，暂不能切换档位"), 6000);
+    return;
+  }
+  const lapian::online::QualityTier* tier =
+      online_quality_.catalog.FindTier(qn);
+  if (tier == nullptr) {
+    statusBar()->showMessage(
+        QStringLiteral("服务端没有返回该档位：%1；不自动换到其他档")
+            .arg(lapian::online::QualityName(qn)),
+        8000);
+    return;
+  }
+  const lapian::online::DashStream* stream = tier->PreferredStream();
+  if (stream == nullptr) {
+    statusBar()->showMessage(
+        QStringLiteral("档位 %1 没有可用视频流").arg(
+            lapian::online::QualityName(qn)),
+        8000);
+    return;
+  }
+  const int target_codecid = stream->codecid;
+  if (qn == online_qn_ && target_codecid == online_codecid_) {
     statusBar()->showMessage(
         QStringLiteral("已经是当前播放档位：%1")
             .arg(lapian::online::QualityName(qn)),
         6000);
     return;
   }
-  // T8.10 已能播放 DASH，但切档（重新取流/索引重建/标记 PTS 映射）是 T8.12。
-  statusBar()->showMessage(
-      QStringLiteral("DASH 档位切换尚未接入（T8.12）："
-                     "%1 只列示，当前仍播放 %2")
-          .arg(lapian::online::QualityName(qn),
-               lapian::online::QualityName(online_qn_)),
-      12000);
+
+  // 切档前把当前标记/备注落盘（失败会询问；取消则不切），并记住旧流 PTS。
+  if (!FlushMarksBeforeSwitch()) {
+    statusBar()->showMessage(QStringLiteral("标记未保存，已取消切档"), 8000);
+    return;
+  }
+  const std::int64_t old_frame = current_frame_;
+  std::int64_t old_pts = current_pts_us_;
+  if (session_->index().IsReady() && !session_->index().empty() &&
+      old_frame >= 0 &&
+      old_frame < static_cast<std::int64_t>(session_->index().size())) {
+    // 索引 PTS 是换档映射的基准；current_pts_us_ 只作无索引时回退。
+    const std::int64_t index_pts = session_->index().PtsOfFrame(old_frame);
+    if (index_pts >= 0) {
+      old_pts = index_pts;
+    }
+  }
+  const double old_fps = online_actual_fps_;
+  const int old_qn = online_qn_;
+  const int old_codecid = online_codecid_;
+
+  lapian::app::OnlineRequest request = online_request_;
+  request.requested_qn = qn;
+  request.requested_codecid = target_codecid;
+  const QString switch_text =
+      QStringLiteral("正在切换清晰度：%1 → %2；将重新取流并重建索引/波形，"
+                     "帧号可能变化。")
+          .arg(lapian::online::QualityName(old_qn),
+               lapian::online::QualityName(qn));
+  statusBar()->showMessage(switch_text, 12000);
+  status_label_->setText(base_info_ + QStringLiteral(" · 在线：正在切档…"));
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
+
+  BeginOnlineRequest(request);
+  if (online_ == nullptr || !online_mode_) {
+    ClearOnlineQualitySwitch();
+    return;
+  }
+  online_switch_pending_ = true;
+  online_switch_target_qn_ = qn;
+  online_switch_target_codecid_ = target_codecid;
+  online_switch_target_pts_us_ = old_pts;
+  online_switch_old_frame_ = old_frame;
+  online_switch_old_fps_ = old_fps;
+  online_switch_status_ = switch_text;
+  // BeginOnlineRequest 会先写“正在解析在线视频…”；切档提示要重新盖回去，
+  // 否则触发菜单后用户只看到普通解析提示。
+  statusBar()->showMessage(switch_text, 12000);
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr,
+                 "T8.12 online_quality_switch old_qn=%d new_qn=%d "
+                 "old_codecid=%d new_codecid=%d old_frame=%lld old_pts_us=%lld "
+                 "old_fps=%.3f\n",
+                 old_qn, qn, old_codecid, target_codecid,
+                 static_cast<long long>(old_frame),
+                 static_cast<long long>(old_pts), old_fps);
+    std::fflush(stderr);
+  }
+}
+
+void MainWindow::ClearOnlineQualitySwitch() {
+  online_switch_pending_ = false;
+  online_switch_target_qn_ = 0;
+  online_switch_target_codecid_ = 0;
+  online_switch_target_pts_us_ = 0;
+  online_switch_old_frame_ = 0;
+  online_switch_old_fps_ = 0.0;
+  online_switch_status_.clear();
+}
+
+void MainWindow::TryApplyPendingOnlineQualitySwitch() {
+  if (!online_switch_pending_ || !online_mode_ || !online_ready_ ||
+      session_ == nullptr || online_qn_ <= 0) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty()) {
+    return;
+  }
+  const double fps = online_actual_fps_ > 0.0
+                         ? online_actual_fps_
+                         : session_->info().video.frame_rate.ToDouble();
+  const std::int64_t last_pts =
+      index.PtsOfFrame(static_cast<std::int64_t>(index.size()) - 1);
+  const std::int64_t frame_duration_us =
+      fps > 0.0 ? static_cast<std::int64_t>(1000000.0 / fps) : 40000;
+  if (!online_index_complete_ &&
+      online_switch_target_pts_us_ >
+          last_pts + std::max<std::int64_t>(frame_duration_us * 2, 100000)) {
+    // 新索引还没覆盖旧位置：继续等下一次索引快照，不把目标吸到当前末端。
+    return;
+  }
+
+  const std::int64_t mapped_frame =
+      index.FrameOfPts(online_switch_target_pts_us_);
+  if (mapped_frame < 0 || mapped_frame >=
+                              static_cast<std::int64_t>(index.size())) {
+    return;
+  }
+  online_switch_pending_ = false;
+  online_switch_status_ =
+      QStringLiteral("已切换到 %1（qn=%2）；原 PTS 映射到第 %3 帧"
+                     "（旧第 %4 帧，帧号可能变化）")
+          .arg(lapian::online::QualityName(online_qn_))
+          .arg(online_qn_)
+          .arg(mapped_frame)
+          .arg(online_switch_old_frame_);
+  if (online_switch_old_fps_ > 0.0 && online_actual_fps_ > 0.0 &&
+      std::fabs(online_switch_old_fps_ - online_actual_fps_) > 0.01) {
+    online_switch_status_ +=
+        QStringLiteral("；fps %1 → %2，按 PTS 映射")
+            .arg(lapian::online::FormatOnlineFps(online_switch_old_fps_),
+                 lapian::online::FormatOnlineFps(online_actual_fps_));
+  }
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr,
+                 "T8.12 online_quality_switch_land qn=%d frame=%lld pts_us=%lld "
+                 "old_frame=%lld old_pts_us=%lld\n",
+                 online_qn_, static_cast<long long>(mapped_frame),
+                 static_cast<long long>(index.PtsOfFrame(mapped_frame)),
+                 static_cast<long long>(online_switch_old_frame_),
+                 static_cast<long long>(online_switch_target_pts_us_));
+    std::fflush(stderr);
+  }
+  const bool growing = !online_cache_hit_;
+  if (growing) {
+    // 让异步 seek 落地后再显示最终提示，避免被“第 N 帧（在线）”覆盖。
+    online_seek_completion_notice_ = online_switch_status_;
+  }
+  GoToFrame(mapped_frame);
+  if (!growing) {
+    statusBar()->showMessage(online_switch_status_, 12000);
+  }
 }
 
 void MainWindow::SetOnlineQualityCatalogEnabledForTest(bool enabled) {
@@ -3676,6 +4002,45 @@ bool MainWindow::OnlineQualityButtonVisibleForTest() const {
 
 int MainWindow::OnlineQualityRequestsForTest() const {
   return online_ != nullptr ? online_->QualityRequestsForTest() : 0;
+}
+
+QString MainWindow::OnlineFpsBadgeTextForTest() const {
+  return info_bar_ != nullptr ? info_bar_->OnlineFpsBadgeTextForTest()
+                              : QString();
+}
+
+bool MainWindow::OnlineFrameRateBannerVisibleForTest() const {
+  return info_bar_ != nullptr && info_bar_->BannerVisibleForTest() &&
+         info_bar_->BannerKindForTest() == QStringLiteral("frame-drop");
+}
+
+bool MainWindow::OnlineFrameRateBannerCloseVisibleForTest() const {
+  return info_bar_ != nullptr && info_bar_->BannerCloseVisibleForTest();
+}
+
+void MainWindow::DismissOnlineFrameRateBannerForTest() {
+  if (info_bar_ != nullptr) {
+    info_bar_->DismissOnlineFrameRateBannerForTest();
+  }
+}
+
+bool MainWindow::WaitForOnlineQualitySwitchForTest(int qn, int timeout_ms) {
+  QElapsedTimer timer;
+  timer.start();
+  while (timer.elapsed() < timeout_ms) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    if (online_mode_ && online_ready_ && online_qn_ == qn &&
+        !online_switch_pending_ && !online_seek_running_) {
+      return true;
+    }
+    if (!online_mode_ || online_ == nullptr ||
+        online_->state() == lapian::app::OnlineState::kError) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return online_mode_ && online_ready_ && online_qn_ == qn &&
+         !online_switch_pending_ && !online_seek_running_;
 }
 
 QString MainWindow::OnlineQualitySummaryForTest() const {
@@ -3936,20 +4301,11 @@ void MainWindow::OpenLocalMedia(const QString& path,
 
   info_bar_->SetMedia(info, session_->IsVfrSuspect());
   if (online != nullptr) {
-    const QString quality = lapian::online::QualityName(online->qn);
-    QString online_detail = QStringLiteral(" · 在线缓存命中 · %1 · %2x%3")
-                                .arg(quality)
-                                .arg(info.video.width)
-                                .arg(info.video.height);
-    if (online_fps_ > 0.0) {
-      online_detail +=
-          QStringLiteral(" · %1fps").arg(QString::number(online_fps_, 'f', 1));
-    }
-    if (online_fps_ > 0.0 && online_fps_ < 50.0) {
-      online_detail +=
-          QStringLiteral("（当前流帧率；若源片为 60fps，帧号不同步/约 1/2）");
-    }
-    status_label_->setText(base_info_ + online_detail);
+    online_actual_fps_ =
+        online->fps > 0.0 ? online->fps : info.video.frame_rate.ToDouble();
+    ApplyOnlineFrameRateUi();
+    online_status_detail_ = BuildOnlineStatusDetail();
+    status_label_->setText(base_info_ + online_status_detail_);
     statusBar()->showMessage(
         QStringLiteral("缓存命中：已打开本地 data.mp4（0 网络）"), 8000);
     // T8.9：缓存命中也显示清晰度按钮；档位来自 meta（未联网）。
@@ -4321,6 +4677,8 @@ void MainWindow::ApplyIndexState() {
   }
   RefreshMarksUi();
   ShowMarkWarnings();
+  // T8.12：换档后等新索引覆盖旧流 PTS，再映射回原位置。
+  TryApplyPendingOnlineQualitySwitch();
 }
 
 void MainWindow::LoadMarksForCurrentSession() {
@@ -5223,9 +5581,11 @@ void MainWindow::CaptureSnapshot() {
     request.online_cid = online_cid_;
     request.online_qn = online_qn_;
     request.online_codecid = online_codecid_;
-    request.online_fps = online_fps_ > 0.0
-                             ? online_fps_
-                             : session_->info().video.frame_rate.ToDouble();
+    request.online_fps = online_actual_fps_ > 0.0
+                             ? online_actual_fps_
+                             : (online_fps_ > 0.0
+                                    ? online_fps_
+                                    : session_->info().video.frame_rate.ToDouble());
     request.online_pts_us = current_pts_us_;
     request.online_appdata_root = online_records_root_for_test_;
   }

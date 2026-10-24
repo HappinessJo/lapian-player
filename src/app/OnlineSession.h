@@ -43,6 +43,11 @@ struct OnlineRequest {
   QString owner;
   qint64 duration_ms = 0;
   QString page_title;
+  // T8.12 手动切档：0=自动（DASH 按 O6 顺序选 AVC；durl 仍请求 qn=80）。
+  // >0 时 DASH 必须命中该 qn（缺失则明确失败，不回退到别的档）；durl 回退
+  // 也请求该 qn，但实际 qn 仍只信服务端返回。codecid=0 表示优先 AVC。
+  int requested_qn = 0;
+  int requested_codecid = 0;
   // 只用一次；不打印/不落盘。MainWindow 从 CredentialStore 读出后传入。
   QString sessdata;
 };
@@ -215,6 +220,8 @@ class OnlineSession : public QObject {
     lapian::online::PlayUrlFetchResult durl_result;
     bool durl_fetched = false;
     QString fallback_reason;
+    // T8.12 手动切档：请求档位在服务端目录里不存在时直接失败，不静默换档。
+    QString failure;
     std::uint64_t generation = 0;
   };
 

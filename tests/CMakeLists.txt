@@ -165,6 +165,15 @@ add_test(NAME lapian_online_dash_test COMMAND lapian_online_dash_test)
 set_tests_properties(lapian_online_dash_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.12 实际 fps/降帧提示策略：标题证据、普通 30/25 不误报、OB-2 60→29.412
+# 的“帧号与源片不同步/约 1/2”、HEVC-only 60fps 未选时的“可能降帧”、真 60 不提示。
+add_executable(lapian_online_frame_rate_test online_frame_rate_test.cpp)
+lapian_apply_common_options(lapian_online_frame_rate_test)
+target_link_libraries(lapian_online_frame_rate_test PRIVATE lapian_online)
+add_test(NAME lapian_online_frame_rate_test COMMAND lapian_online_frame_rate_test)
+set_tests_properties(lapian_online_frame_rate_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T8.11 渐进索引/波形：真实 OB-3 缓存按 256KB 受控增长（等价 1–2MB/s），
 # 验证只扫已发布前缀/stable 单调/前缀 PTS 不变/30s 覆盖/完成精确/读字节比；
 # 独立音频慢增长验证 bucket 只追加、偏移 ≤1 帧。素材缺失返回 77。

@@ -183,7 +183,8 @@ struct DashCatalog {
   const DashAudioStream* BestAudio() const;  // 最高带宽；无音频返回 nullptr
   bool ClaimedQualityInTiers() const;        // 证据：quality 字段是否撒谎
   // 默认档：AVC、非“只手动”、按 O6 顺序 1080P60→720P60→1080P30→720P30→480P30。
-  // 没有 AVC 时回退“最高非手动档”（HEVC-only 可播但不自动选 60fps/4K）。
+  // 60fps 档只有在 AVC 可用时才自动；HEVC/AV1-only 60fps 与 4K 仍只手动。
+  // 没有 AVC 时回退“最高非手动、非 60fps 档”（HEVC-only 1080P30 可播）。
   // 只有手动档/没有视频时返回 0。
   int DefaultQn() const;
   const DashStream* DefaultStream() const;  // DefaultQn 的 AVC/首选变体
@@ -191,8 +192,11 @@ struct DashCatalog {
   QString Summary() const;  // 证据单行（不含 URL）
 };
 
-// 60fps 档（116/74）与 4K/HDR/杜比/8K（>=120）只允许手动选择（O6/O11）。
+// 4K/HDR/杜比/8K（>=120）只允许手动选择（O6/O11）。
+// 注意：60fps 档是否只手动取决于编码——AVC 可用时可自动，HEVC/AV1-only
+// 才只手动；仅凭 qn 不能判断，请用 IsManualOnlyTier(tier)。
 bool IsManualOnlyQuality(int qn);
+bool IsManualOnlyTier(const QualityTier& tier);
 QString CodecName(int codecid);
 QString QualityTierLabel(const QualityTier& tier);  // "1080P · AVC · 30.0fps"
 

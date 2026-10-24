@@ -38,13 +38,22 @@ struct QualityMenuEntry {
 };
 
 struct QualityMenuContext {
-  // 当前**播放**的档位（T8.9 = durl 实际 qn/codecid）。
+  // 当前**播放**的档位（playurl 实际 qn/codecid，不是请求值）。
   int current_qn = 0;
   int current_codecid = 0;
+  // 本次请求档；>0 且与 current 不同则菜单显式说明“实际以服务端为准”。
+  int requested_qn = 0;
+  int requested_codecid = 0;
   // 缓存命中：档位来自 meta，未联网。
   bool current_from_cache = false;
-  // T8.9 固定 false。T8.10/T8.12 接入 DASH 播放后由调用方置 true。
+  // T8.12：DASH 会话已可切档时为 true；缓存 meta 只有当前档时仍只列当前档。
   bool dash_playback_available = false;
+  // 未登录时菜单明确写出“最高约 480P30（以实际返回为准）”。
+  bool logged_in = true;
+  // 实际流 fps（playurl dash_fps；缓存回退 meta）；只作展示，不参与档位判断。
+  double actual_fps = 0.0;
+  // 标题声明的源 fps（没有证据为 0）；仅用于“可能降帧”文案边界。
+  double source_fps_hint = 0.0;
   // DASH 目录获取失败时的可读原因（不含 Cookie/URL）。
   QString error;
 };

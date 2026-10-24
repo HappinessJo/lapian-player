@@ -83,6 +83,8 @@ add_library(lapian_online STATIC
   online/DownloadJob.cpp
   online/DownloadJob.h
   online/DownloadTransport.h
+  online/FrameRatePolicy.cpp
+  online/FrameRatePolicy.h
   online/GrowingSource.cpp
   online/GrowingSource.h
   online/IHttpClient.h

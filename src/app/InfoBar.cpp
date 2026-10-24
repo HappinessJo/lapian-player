@@ -4,7 +4,9 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QString>
@@ -62,19 +64,48 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
   total_label_ = new QLabel(this);
   total_label_->setObjectName(QStringLiteral("infoTotal"));
 
+  // T8.12/DEC-4：帧号右侧常驻角标。只显示实际流 fps（有证据时附“降帧”）。
+  online_fps_badge_ = new QLabel(this);
+  online_fps_badge_->setObjectName(QStringLiteral("onlineFpsBadge"));
+  online_fps_badge_->setTextFormat(Qt::PlainText);
+  online_fps_badge_->setStyleSheet(
+      QStringLiteral("background:#2a2a30; color:#ffd37a; padding:1px 5px; "
+                     "border:1px solid #5a4a1a; border-radius:3px;"));
+  online_fps_badge_->setToolTip(
+      QStringLiteral("当前在线流实际 fps（playurl/容器）；不用于重算帧号"));
+  online_fps_badge_->hide();
+
   root->addLayout(grid_);
 
   // T6.5：唯一横幅。六类提示共享这一个 QLabel，天然不会叠 banner；
   // 参与 root 纵向布局，出现时把时间轴/画面向上推，而不是覆盖它们。
-  banner_label_ = new QLabel(this);
+  // T8.12：降帧横幅额外提供关闭按钮；其它提示不显示关闭按钮。
+  banner_row_ = new QWidget(this);
+  banner_row_->setObjectName(QStringLiteral("infoBannerRow"));
+  auto* banner_layout = new QHBoxLayout(banner_row_);
+  banner_layout->setContentsMargins(0, 0, 0, 0);
+  banner_layout->setSpacing(4);
+  banner_label_ = new QLabel(banner_row_);
   banner_label_->setObjectName(QStringLiteral("infoBanner"));
   banner_label_->setTextFormat(Qt::PlainText);
   banner_label_->setWordWrap(true);
   banner_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   banner_label_->setMinimumWidth(0);
-  banner_label_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
-  banner_label_->hide();
-  root->addWidget(banner_label_);
+  banner_label_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+  banner_layout->addWidget(banner_label_, 1);
+  banner_close_ = new QPushButton(QStringLiteral("×"), banner_row_);
+  banner_close_->setObjectName(QStringLiteral("infoBannerClose"));
+  banner_close_->setFlat(true);
+  banner_close_->setFixedWidth(22);
+  banner_close_->setToolTip(QStringLiteral("关闭本次降帧提示（帧号角标仍保留）"));
+  banner_close_->hide();
+  banner_layout->addWidget(banner_close_, 0, Qt::AlignTop);
+  connect(banner_close_, &QPushButton::clicked, this, [this]() {
+    online_banner_dismissed_ = true;
+    UpdateNotices();
+  });
+  banner_row_->hide();
+  root->addWidget(banner_row_);
 
   UpdateLayoutMode();
   Clear();
@@ -98,26 +129,29 @@ void InfoBar::UpdateLayoutMode() {
   }
   narrow_ = narrow;
 
-  for (QLabel* label : {file_label_, format_label_, frame_label_, timecode_label_,
-                        total_label_}) {
+  for (QLabel* label :
+       {file_label_, format_label_, frame_label_, timecode_label_, total_label_,
+        online_fps_badge_}) {
     grid_->removeWidget(label);
   }
-  for (int column = 0; column < 5; ++column) {
+  for (int column = 0; column < 6; ++column) {
     grid_->setColumnStretch(column, 0);
   }
 
   if (narrow_) {
     grid_->addWidget(file_label_, 0, 0, 1, 2);
     grid_->addWidget(frame_label_, 0, 2);
-    grid_->addWidget(timecode_label_, 0, 3);
+    grid_->addWidget(online_fps_badge_, 0, 3);
     grid_->addWidget(format_label_, 1, 0, 1, 2);
-    grid_->addWidget(total_label_, 1, 2, 1, 2);
+    grid_->addWidget(timecode_label_, 1, 2);
+    grid_->addWidget(total_label_, 1, 3);
   } else {
     grid_->addWidget(file_label_, 0, 0);
     grid_->addWidget(format_label_, 0, 1);
     grid_->addWidget(frame_label_, 0, 2);
-    grid_->addWidget(timecode_label_, 0, 3);
-    grid_->addWidget(total_label_, 0, 4);
+    grid_->addWidget(online_fps_badge_, 0, 3);
+    grid_->addWidget(timecode_label_, 0, 4);
+    grid_->addWidget(total_label_, 0, 5);
   }
   grid_->setColumnStretch(0, 1);
   grid_->invalidate();
@@ -191,6 +225,13 @@ void InfoBar::Clear() {
   scanning_ = false;
   synthetic_ = false;
   error_text_.clear();
+  online_badge_text_.clear();
+  online_banner_text_.clear();
+  online_banner_dismissed_ = false;
+  if (online_fps_badge_ != nullptr) {
+    online_fps_badge_->clear();
+    online_fps_badge_->hide();
+  }
   info_ = lapian::media::MediaInfo{};
   total_ = lapian::core::TotalFrameCount{};
   file_name_.clear();
@@ -210,6 +251,14 @@ void InfoBar::SetMedia(const lapian::media::MediaInfo& info, bool vfr) {
   scanning_ = false;
   synthetic_ = false;
   error_text_.clear();
+  // 新会话不能继承上一个在线流的 fps 角标/降帧横幅；在线路径随后会显式设置。
+  online_badge_text_.clear();
+  online_banner_text_.clear();
+  online_banner_dismissed_ = false;
+  if (online_fps_badge_ != nullptr) {
+    online_fps_badge_->clear();
+    online_fps_badge_->hide();
+  }
   rate_ = lapian::core::FrameRate(info.video.frame_rate.num, info.video.frame_rate.den);
 
   const QString path = QString::fromUtf8(info.path_utf8.c_str());
@@ -259,6 +308,57 @@ void InfoBar::ClearError() {
   UpdateNotices();
 }
 
+void InfoBar::SetOnlineFrameRateStatus(const QString& badge_text,
+                                       const QString& banner_text) {
+  online_badge_text_ = badge_text.trimmed();
+  online_banner_text_ = banner_text.trimmed();
+  online_banner_dismissed_ = false;
+  if (online_fps_badge_ != nullptr) {
+    online_fps_badge_->setText(online_badge_text_);
+    online_fps_badge_->setVisible(!online_badge_text_.isEmpty());
+    online_fps_badge_->setStyleSheet(
+        online_banner_text_.isEmpty()
+            ? QStringLiteral(
+                  "background:#2a2a30; color:#d8d8dc; padding:1px 5px; "
+                  "border:1px solid #3a3a40; border-radius:3px;")
+            : QStringLiteral(
+                  "background:#4a2c00; color:#ffd37a; padding:1px 5px; "
+                  "border:1px solid #7a4c00; border-radius:3px;"));
+  }
+  UpdateNotices();
+}
+
+void InfoBar::ClearOnlineFrameRateStatus() {
+  online_badge_text_.clear();
+  online_banner_text_.clear();
+  online_banner_dismissed_ = false;
+  if (online_fps_badge_ != nullptr) {
+    online_fps_badge_->clear();
+    online_fps_badge_->hide();
+  }
+  UpdateNotices();
+}
+
+QString InfoBar::OnlineFpsBadgeTextForTest() const {
+  return online_fps_badge_ == nullptr ? QString() : online_fps_badge_->text();
+}
+
+bool InfoBar::OnlineFpsBadgeVisibleForTest() const {
+  return online_fps_badge_ != nullptr && online_fps_badge_->isVisible();
+}
+
+bool InfoBar::BannerCloseVisibleForTest() const {
+  return banner_close_ != nullptr && banner_close_->isVisible();
+}
+
+void InfoBar::DismissOnlineFrameRateBannerForTest() {
+  if (online_banner_text_.isEmpty()) {
+    return;
+  }
+  online_banner_dismissed_ = true;
+  UpdateNotices();
+}
+
 void InfoBar::UpdateNotices() {
   if (synthetic_) {
     ApplyNotices();
@@ -278,6 +378,16 @@ void InfoBar::UpdateNotices() {
     notice.detail = trimmed.toStdString();
     notices_.push_back(std::move(notice));
   }
+  if (!online_banner_text_.isEmpty() && !online_banner_dismissed_) {
+    lapian::media::StatusNotice notice = lapian::media::MakeStatusNotice(
+        lapian::media::StatusNoticeKind::kFrameRateDrop);
+    notice.text = online_banner_text_.toStdString();
+    notice.detail =
+        QStringLiteral("当前流实际 fps 以 playurl/容器为准；"
+                       "标记与截图记录实际 fps；帧号只对当前流成立。")
+            .toStdString();
+    notices_.push_back(std::move(notice));
+  }
   ApplyNotices();
 }
 
@@ -288,6 +398,12 @@ void InfoBar::ApplyNotices() {
     banner_label_->clear();
     banner_label_->setToolTip(QString());
     banner_label_->hide();
+    if (banner_close_ != nullptr) {
+      banner_close_->hide();
+    }
+    if (banner_row_ != nullptr) {
+      banner_row_->hide();
+    }
   } else {
     const lapian::media::StatusNotice& notice = notices_[primary_index_];
     banner_label_->setText(FromUtf8(notice.text));
@@ -295,6 +411,13 @@ void InfoBar::ApplyNotices() {
         FromUtf8(notice.detail.empty() ? notice.text : notice.detail));
     UpdateBannerStyle(notice.kind);
     banner_label_->show();
+    if (banner_row_ != nullptr) {
+      banner_row_->show();
+    }
+    if (banner_close_ != nullptr) {
+      banner_close_->setVisible(notice.kind ==
+                                lapian::media::StatusNoticeKind::kFrameRateDrop);
+    }
   }
   emit noticesChanged();
 }
@@ -319,6 +442,11 @@ void InfoBar::UpdateBannerStyle(lapian::media::StatusNoticeKind kind) {
       style = QStringLiteral(
           "background:#4a3600; color:#ffd37a; padding:3px 6px; "
           "border-top:1px solid #6a5200;");
+      break;
+    case lapian::media::StatusNoticeKind::kFrameRateDrop:
+      style = QStringLiteral(
+          "background:#4a2c00; color:#ffd37a; padding:3px 6px; "
+          "border-top:1px solid #7a4c00;");
       break;
   }
   banner_label_->setStyleSheet(style);
