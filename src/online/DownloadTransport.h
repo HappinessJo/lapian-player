@@ -49,6 +49,9 @@ class IDownloadSink {
 struct DownloadRequest {
   QString url;
   std::int64_t offset = 0;
+  // T8.10：闭区间结束偏移；-1 表示“取到文件末尾”（T8.5 行为不变）。
+  // 只用于 DASH 总字节探测（bytes=offset-end），下载仍用 -1。
+  std::int64_t range_end = -1;
   // 已知总字节（playurl size）；<=0 表示未知。>0 时 transport 会对账。
   std::int64_t expected_total = -1;
   // 单次尝试的总上限（DNS/连接/读取共享）。

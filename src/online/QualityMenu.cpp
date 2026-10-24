@@ -99,11 +99,11 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
       entry.enabled = false;
       entry.disabled_reason =
           entry.manual_only
-              ? QStringLiteral("60fps/4K 只允许手动；DASH 双输入在 T8.10 接入"
-                               "（T8.9 只解析/列档，不切档）")
-              : QStringLiteral("DASH 双输入在 T8.10 接入"
-                               "（T8.9 只解析/列档，不切档）");
-      entry.text += QStringLiteral("（需 DASH 播放，T8.10）");
+              ? QStringLiteral("60fps/4K 只允许手动；档位切换在 T8.12 接入"
+                               "（T8.10 已支持 DASH 播放，但本任务不做切档）")
+              : QStringLiteral("档位切换在 T8.12 接入"
+                               "（T8.10 已支持 DASH 播放，但本任务不做切档）");
+      entry.text += QStringLiteral("（切换需 T8.12）");
       has_unplayable = true;
     } else {
       // T8.12 起才允许手动切换；即便接入，manual_only 档也绝不自动选。
@@ -126,7 +126,7 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
     QualityMenuEntry note;
     note.kind = QualityMenuKind::kNote;
     note.text = QStringLiteral(
-        "DASH 档位仅列示：T8.9 不做 DASH 播放/切档（T8.10/T8.12）；"
+        "DASH 档位仅列示：T8.10 已支持双输入播放，T8.12 才接切档；"
         "菜单可选不等于保证可达");
     entries.append(note);
   }

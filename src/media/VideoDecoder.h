@@ -54,6 +54,10 @@ class VideoDecoder {
   bool DecodeNextFrame(DecodedFrameInfo* info, std::string* error);
   // T2.3：seek 到目标 PTS 之前最近关键帧；之后用 DecodeNextFrame 向前解码。
   bool SeekToPts(std::int64_t pts_us, std::string* error);
+  // T8.10：精确 seek 到“已知关键帧 PTS”。fMP4（DASH）用 av_seek_frame 会落到
+  // 前一个关键帧（实测每个 GOP 早一格），这里用 avformat_seek_file 的
+  // min_ts=ts=max_ts=关键帧 PTS 约束落点；失败返回 false（调用方退回 SeekToPts）。
+  bool SeekToKeyframePts(std::int64_t pts_us, std::string* error);
 
   bool IsOpen() const;
   bool HardwareActive() const;

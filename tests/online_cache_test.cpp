@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <string>
 
 #include "core/AppSettings.h"
@@ -1338,6 +1339,113 @@ void TestNoPlaintext() {
   Check(!meta.contains("\"url\""), "plaintext-no-url-key");
 }
 
+void TestAudioEntries() {
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022LL;
+  CacheKey video{bvid, cid, 80, 7};
+  CacheKey audio;
+  audio.bvid = bvid;
+  audio.cid = cid;
+  audio.kind = lapian::online::CacheStreamKind::kAudio;
+  audio.audio_id = 30280;
+  audio.qn = 0;
+  audio.codecid = 0;
+
+  Check(lapian::online::IsValidCacheKey(video), "audio-key-video-valid");
+  Check(lapian::online::IsValidCacheKey(audio), "audio-key-audio-valid");
+  Check(lapian::online::CacheKeyLabel(audio).contains(QStringLiteral("audio-30280")),
+        "audio-key-label");
+  CacheKey bad_audio = audio;
+  bad_audio.qn = 80;
+  Check(!lapian::online::IsValidCacheKey(bad_audio),
+        "audio-key-rejects-qn");
+  bad_audio = audio;
+  bad_audio.audio_id = 0;
+  Check(!lapian::online::IsValidCacheKey(bad_audio),
+        "audio-key-rejects-zero-id");
+  CacheKey bad_video = video;
+  bad_video.audio_id = 30280;
+  Check(!lapian::online::IsValidCacheKey(bad_video),
+        "audio-key-video-rejects-audio-id");
+
+  QTemporaryDir temp;
+  const QString root = temp.path() + QStringLiteral("/cache");
+  CacheStore store(root, 300 * kMb);
+  Check(store.EntryDir(audio).contains(QStringLiteral("audio-30280")),
+        "audio-entry-dir");
+  Check(CreateCompleteEntry(&store, video, 1 * kMb, QStringLiteral("视频")),
+        "audio-setup-video");
+  Check(CreateCompleteEntry(&store, audio, 128 * kKb, QStringLiteral("音频")),
+        "audio-setup-audio");
+
+  // Scan 必须同时返回视频与音频条目，且 kind/audio_id 原样保留。
+  QVector<CacheEntry> entries;
+  QVector<CacheEntry> broken;
+  QString error;
+  Check(store.Scan(&entries, &broken, &error), "audio-scan-ok");
+  Check(entries.size() == 2 && broken.isEmpty(),
+        "audio-scan-count");
+  bool video_found = false;
+  bool audio_found = false;
+  for (const CacheEntry& entry : entries) {
+    if (entry.key == video) {
+      video_found = true;
+      Check(!entry.dash, "audio-video-not-dash");
+    } else if (entry.key == audio) {
+      audio_found = true;
+      Check(entry.complete && entry.total_bytes == 128 * kKb,
+            "audio-entry-complete");
+      Check(entry.key.kind == lapian::online::CacheStreamKind::kAudio,
+            "audio-entry-kind");
+    }
+  }
+  Check(video_found && audio_found, "audio-scan-both-streams");
+
+  // meta.json 明确标 kind/audio_id；不把音频塞进 qn/codecid。
+  const QByteArray meta =
+      ReadAll(QDir(store.EntryDir(audio)).filePath(QStringLiteral("meta.json")));
+  Check(meta.contains("\"kind\":\"audio\""), "audio-meta-kind");
+  Check(meta.contains("\"audio_id\":30280"), "audio-meta-audio-id");
+  Check(meta.contains("\"qn\":0") && meta.contains("\"codecid\":0"),
+        "audio-meta-qn-codecid-zero");
+
+  // 完整音频条目可 OpenComplete；外部删除 .mp4 后必须判损坏而不是当可播。
+  QString mp4;
+  Check(store.OpenComplete(audio, &mp4, &error), "audio-open-complete");
+  Check(!mp4.isEmpty() && QFileInfo::exists(mp4), "audio-open-complete-path");
+
+  // 当前视频会话保护：清空必须同时保留视频与配套音频（DASH 双输入）。
+  CacheKey other = video;
+  other.cid = cid + 1;
+  Check(CreateCompleteEntry(&store, other, 256 * kKb, QStringLiteral("其它")),
+        "audio-setup-other");
+  qint64 removed = 0;
+  int kept = 0;
+  Check(store.ClearAll(&error, &removed, &video, &kept), "audio-clear-all");
+  Check(kept == 2, "audio-clear-keeps-video-and-audio");
+  entries.clear();
+  broken.clear();
+  Check(store.Scan(&entries, &broken, &error), "audio-scan-after-clear");
+  Check(HasKey(entries, video) && HasKey(entries, audio) &&
+            !HasKey(entries, other),
+        "audio-clear-protected-set");
+
+  // 配额淘汰也保护当前 bvid+cid 的音频；没有可淘汰候选时必须显式失败。
+  Check(store.SetQuotaBytes(1 * kMb, &error), "audio-quota-set");
+  Check(!store.EvictToQuota(video, &error), "audio-evict-protected-fails");
+  Check(QFileInfo::exists(store.Mp4Path(audio)), "audio-evict-keeps-audio");
+
+  // 音频 meta 的 kind 与目录键不一致 → 损坏，不当可播放。
+  Check(WriteRawMeta(store, audio, 128 * kKb, 128 * kKb, true,
+                     QDateTime::currentDateTimeUtc().addSecs(-60),
+                     QDateTime::currentDateTimeUtc(),
+                     QJsonObject{{QStringLiteral("kind"), QStringLiteral("video")},
+                                 {QStringLiteral("audio_id"), 30280}}),
+        "audio-write-bad-kind-meta");
+  const std::optional<CacheEntry> bad = store.Load(audio, &error);
+  Check(bad.has_value() && bad->broken, "audio-bad-kind-broken");
+}
+
 }  // namespace
 
 int main() {
@@ -1353,6 +1461,7 @@ int main() {
   TestDiskSpace();
   TestAccounting20Gb();
   TestClearAll();
+  TestAudioEntries();
   TestCleanupOrphans();
   TestCrossSession();
   TestLongPath();

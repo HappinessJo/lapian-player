@@ -311,6 +311,13 @@ bool MatchesProtectedKey(const CacheKey& entry, const CacheKey& keep) {
   if (keep.qn <= 0) {
     return true;
   }
+  // T8.10：当前会话以视频键传入；同 bvid+cid 的音频条目是同一个 DASH 播放
+  // 会话的一部分，清空/清理/配额淘汰都必须一起保护，否则会把正在播放的
+  // 音频抽走。
+  if (entry.kind != keep.kind) {
+    return keep.kind == CacheStreamKind::kVideo &&
+           entry.kind == CacheStreamKind::kAudio;
+  }
   return entry.qn == keep.qn && entry.codecid == keep.codecid;
 }
 
@@ -345,12 +352,35 @@ bool IsValidCacheBvid(const QString& bvid) {
 }
 
 bool IsValidCacheKey(const CacheKey& key) {
-  return IsValidCacheBvid(key.bvid) && key.cid >= kMinCacheCid &&
-         key.cid <= kMaxCacheCid && key.qn >= kMinQn && key.qn <= kMaxQn &&
+  if (!IsValidCacheBvid(key.bvid) || key.cid < kMinCacheCid ||
+      key.cid > kMaxCacheCid) {
+    return false;
+  }
+  if (key.kind == CacheStreamKind::kAudio) {
+    // T8.10：音频条目只按 audio_id 标识；qn/codecid 必须为 0，避免与视频键
+    // 产生同目录/同标签歧义。
+    return key.audio_id >= kMinCodecId && key.audio_id <= kMaxQn &&
+           key.qn == 0 && key.codecid == 0;
+  }
+  if (key.audio_id != 0) {
+    return false;
+  }
+  return key.qn >= kMinQn && key.qn <= kMaxQn &&
          key.codecid >= kMinCodecId && key.codecid <= kMaxCodecId;
 }
 
+QString CacheStreamKindName(CacheStreamKind kind) {
+  return kind == CacheStreamKind::kAudio ? QStringLiteral("audio")
+                                         : QStringLiteral("video");
+}
+
 QString CacheKeyLabel(const CacheKey& key) {
+  if (key.kind == CacheStreamKind::kAudio) {
+    return QStringLiteral("%1/%2/audio-%3")
+        .arg(key.bvid)
+        .arg(key.cid)
+        .arg(key.audio_id);
+  }
   return QStringLiteral("%1/%2/%3-%4")
       .arg(key.bvid)
       .arg(key.cid)
@@ -467,6 +497,10 @@ QString CacheStore::EntryDirLocked(const CacheKey& key) const {
   }
   const QString bvid_dir = JoinPath(root_, key.bvid);
   const QString cid_dir = JoinPath(bvid_dir, QString::number(key.cid));
+  if (key.kind == CacheStreamKind::kAudio) {
+    return JoinPath(cid_dir,
+                    QStringLiteral("audio-%1").arg(key.audio_id));
+  }
   return JoinPath(cid_dir,
                   QStringLiteral("%1-%2").arg(key.qn).arg(key.codecid));
 }
@@ -629,6 +663,16 @@ bool CacheStore::WriteMetaLocked(CacheEntry& entry, QString* error) {
   root.insert(QStringLiteral("duration_ms"), QJsonValue(entry.duration_ms));
   root.insert(QStringLiteral("qn"), entry.key.qn);
   root.insert(QStringLiteral("codecid"), entry.key.codecid);
+  // T8.10：音频条目显式标 kind/audio_id；旧视频条目保持原字段（不写 kind），
+  // 旧缓存读路径完全不变。
+  if (entry.key.kind == CacheStreamKind::kAudio) {
+    root.insert(QStringLiteral("kind"), QStringLiteral("audio"));
+    root.insert(QStringLiteral("audio_id"), entry.key.audio_id);
+  } else if (entry.dash) {
+    // DASH 视频单流：音频在同 bvid+cid 的 audio-<id> 条目里。
+    root.insert(QStringLiteral("container"), QStringLiteral("dash"));
+    root.insert(QStringLiteral("audio_id"), entry.audio_id);
+  }
   root.insert(QStringLiteral("width"), entry.width);
   root.insert(QStringLiteral("height"), entry.height);
   root.insert(QStringLiteral("fps"), entry.fps);
@@ -759,10 +803,57 @@ std::optional<CacheEntry> CacheStore::LoadEntryLocked(const CacheKey& key,
       !IsIntegral(codecid.toDouble())) {
     return mark_broken(QStringLiteral("meta.json 的键字段缺失或类型不对"));
   }
-  if (bvid.toString() != key.bvid || static_cast<qint64>(cid.toDouble()) != key.cid ||
-      static_cast<int>(qn.toDouble()) != key.qn ||
-      static_cast<int>(codecid.toDouble()) != key.codecid) {
+  if (bvid.toString() != key.bvid || static_cast<qint64>(cid.toDouble()) != key.cid) {
     return mark_broken(QStringLiteral("meta.json 与目录键不一致"));
+  }
+  // T8.10：kind 缺省=视频（旧 meta）；音频条目必须显式 kind=audio。
+  const QJsonValue kind_value = root.value(QStringLiteral("kind"));
+  CacheStreamKind meta_kind = CacheStreamKind::kVideo;
+  if (kind_value.isString()) {
+    const QString kind_text = kind_value.toString();
+    if (kind_text == QStringLiteral("audio")) {
+      meta_kind = CacheStreamKind::kAudio;
+    } else if (kind_text != QStringLiteral("video")) {
+      return mark_broken(QStringLiteral("meta.json 的 kind 不支持：%1")
+                             .arg(kind_text));
+    }
+  } else if (!kind_value.isUndefined()) {
+    return mark_broken(QStringLiteral("meta.json 的 kind 类型不对"));
+  }
+  if (meta_kind != key.kind) {
+    return mark_broken(QStringLiteral("meta.json 的 kind 与目录键不一致"));
+  }
+  if (meta_kind == CacheStreamKind::kAudio) {
+    const QJsonValue audio_id = root.value(QStringLiteral("audio_id"));
+    if (!audio_id.isDouble() || !IsIntegral(audio_id.toDouble()) ||
+        static_cast<int>(audio_id.toDouble()) != key.audio_id) {
+      return mark_broken(QStringLiteral("meta.json 的 audio_id 缺失或与目录键不一致"));
+    }
+    if (static_cast<int>(qn.toDouble()) != 0 ||
+        static_cast<int>(codecid.toDouble()) != 0) {
+      return mark_broken(QStringLiteral("音频条目的 qn/codecid 必须为 0"));
+    }
+  } else {
+    if (static_cast<int>(qn.toDouble()) != key.qn ||
+        static_cast<int>(codecid.toDouble()) != key.codecid) {
+      return mark_broken(QStringLiteral("meta.json 与目录键不一致"));
+    }
+    const QJsonValue container = root.value(QStringLiteral("container"));
+    if (container.isString()) {
+      if (container.toString() == QStringLiteral("dash")) {
+        entry.dash = true;
+      } else if (container.toString() != QStringLiteral("durl")) {
+        return mark_broken(QStringLiteral("meta.json 的 container 不支持：%1")
+                               .arg(container.toString()));
+      }
+    } else if (!container.isUndefined()) {
+      return mark_broken(QStringLiteral("meta.json 的 container 类型不对"));
+    }
+    const QJsonValue audio_id = root.value(QStringLiteral("audio_id"));
+    if (audio_id.isDouble() && IsIntegral(audio_id.toDouble()) &&
+        audio_id.toDouble() >= 0.0 && audio_id.toDouble() <= 100000.0) {
+      entry.audio_id = static_cast<int>(audio_id.toDouble());
+    }
   }
 
   const QJsonValue total_bytes = root.value(QStringLiteral("total_bytes"));
@@ -935,18 +1026,35 @@ void CacheStore::ScanLocked(QVector<CacheEntry>* out, QVector<CacheEntry>* broke
           cid_dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
       for (const QFileInfo& entry_info : entry_dirs) {
         const QString name = entry_info.fileName();
-        const int dash = name.indexOf(QLatin1Char('-'));
-        if (dash <= 0 || !IsValidDirSegment(name)) {
+        if (!IsValidDirSegment(name)) {
           continue;
         }
-        int qn = 0;
-        int codecid = 0;
-        if (!ParsePositiveInt(name.left(dash), kMinQn, kMaxQn, &qn) ||
-            !ParsePositiveInt(name.mid(dash + 1), kMinCodecId, kMaxCodecId,
-                              &codecid)) {
-          continue;
+        CacheKey key;
+        key.bvid = bvid;
+        key.cid = cid;
+        if (name.startsWith(QStringLiteral("audio-"))) {
+          // T8.10 DASH 音频条目：audio-<audio_id>。
+          int audio_id = 0;
+          if (!ParsePositiveInt(name.mid(6), kMinCodecId, kMaxQn, &audio_id)) {
+            continue;
+          }
+          key.kind = CacheStreamKind::kAudio;
+          key.audio_id = audio_id;
+          key.qn = 0;
+          key.codecid = 0;
+        } else {
+          const int dash = name.indexOf(QLatin1Char('-'));
+          int qn = 0;
+          int codecid = 0;
+          if (dash <= 0 ||
+              !ParsePositiveInt(name.left(dash), kMinQn, kMaxQn, &qn) ||
+              !ParsePositiveInt(name.mid(dash + 1), kMinCodecId, kMaxCodecId,
+                                &codecid)) {
+            continue;
+          }
+          key.qn = qn;
+          key.codecid = codecid;
         }
-        const CacheKey key{bvid, cid, qn, codecid};
         const std::optional<CacheEntry> entry = LoadEntryLocked(key, nullptr);
         if (!entry.has_value()) {
           continue;
@@ -972,6 +1080,13 @@ void CacheStore::ScanLocked(QVector<CacheEntry>* out, QVector<CacheEntry>* broke
       }
       if (a.key.cid != b.key.cid) {
         return a.key.cid < b.key.cid;
+      }
+      if (a.key.kind != b.key.kind) {
+        return static_cast<int>(a.key.kind) < static_cast<int>(b.key.kind);
+      }
+      if (a.key.kind == CacheStreamKind::kAudio &&
+          a.key.audio_id != b.key.audio_id) {
+        return a.key.audio_id < b.key.audio_id;
       }
       if (a.key.qn != b.key.qn) {
         return a.key.qn < b.key.qn;
@@ -1260,7 +1375,8 @@ bool CacheStore::SetMetadata(const CacheKey& key, const CacheMetadata& metadata,
     return fail(QStringLiteral("缓存键不合法：%1").arg(CacheKeyLabel(key)));
   }
   if (metadata.duration_ms < 0 || metadata.width < 0 || metadata.height < 0 ||
-      !std::isfinite(metadata.fps) || metadata.fps < 0.0) {
+      !std::isfinite(metadata.fps) || metadata.fps < 0.0 ||
+      metadata.audio_id < 0 || metadata.audio_id > 100000) {
     return fail(QStringLiteral("缓存元数据不合法"));
   }
   const std::optional<CacheEntry> entry = LoadLocked(key, error);
@@ -1278,6 +1394,8 @@ bool CacheStore::SetMetadata(const CacheKey& key, const CacheMetadata& metadata,
   updated.height = metadata.height;
   updated.fps = metadata.fps;
   updated.source_fps_hint = metadata.source_fps_hint;
+  updated.dash = metadata.dash;
+  updated.audio_id = metadata.audio_id;
   updated.last_access_at = QDateTime::currentDateTimeUtc();
   return WriteMetaLocked(updated, error);
 }

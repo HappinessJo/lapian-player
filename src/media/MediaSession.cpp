@@ -21,6 +21,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/rational.h>
 }
 #if defined(_MSC_VER)
 #pragma warning(pop)
@@ -165,6 +166,16 @@ bool MediaSession::OpenGrowing(
     std::shared_ptr<lapian::online::GrowingSource> source,
     const std::string& part_path_utf8, const std::string& display_name_utf8,
     ID3D11Device* device, std::string* error, bool prefer_hardware) {
+  return OpenGrowingWithOptions(std::move(source), part_path_utf8,
+                                display_name_utf8, device, error,
+                                GrowingOpenOptions{}, prefer_hardware);
+}
+
+bool MediaSession::OpenGrowingWithOptions(
+    std::shared_ptr<lapian::online::GrowingSource> source,
+    const std::string& part_path_utf8, const std::string& display_name_utf8,
+    ID3D11Device* device, std::string* error,
+    const GrowingOpenOptions& options, bool prefer_hardware) {
   if (error == nullptr) {
     return false;
   }
@@ -217,6 +228,29 @@ bool MediaSession::OpenGrowing(
     last_open_timings_ = timings;
     return false;
   }
+  // T8.10：DASH 目录/缓存 meta 的展示元数据。容器能给出 duration 时以容器为准
+  // （fMP4 的 sidx 实测可靠）；拿不到才用目录值，绝不伪造。
+  if (options.duration_ms > 0 && last_attempt_.info.duration_us <= 0) {
+    last_attempt_.info.duration_us = options.duration_ms * 1000;
+    last_attempt_.info.duration_reliable = true;
+  }
+  if (options.fps > 0.0 &&
+      !last_attempt_.info.video.frame_rate.valid()) {
+    // 容器能给出帧率时以容器为准（DASH fMP4 的 avg_frame_rate 与索引帧数
+    // 一致）；API 的 frameRate 可能和实际流不一致（OB-2 API 29.412 / 实际
+    // 30fps），只用于展示/证据，不能拿来做帧号数学。
+    const AVRational fps = av_d2q(options.fps, 100000);
+    if (fps.num > 0 && fps.den > 0) {
+      last_attempt_.info.video.frame_rate = Rational{fps.num, fps.den};
+    }
+  }
+  if (options.audio.has_audio) {
+    last_attempt_.info.has_audio = true;
+    last_attempt_.info.audio.stream_index = options.audio.stream_index;
+    last_attempt_.info.audio.codec = options.audio.codec;
+    last_attempt_.info.audio.sample_rate = options.audio.sample_rate;
+    last_attempt_.info.audio.channels = options.audio.channels;
+  }
 
   const auto decoder_started = Clock::now();
   auto decoder = std::make_unique<VideoDecoder>();
@@ -245,6 +279,13 @@ bool MediaSession::OpenGrowing(
 
   // 成功后才替换旧会话。先替换 decoder（旧 decoder 析构），再替换它依赖的 format。
   probe_ = last_attempt_;
+  // T8.10：独立音频容器（DASH）的时间轴与视频共享同一媒体原点；以视频首个
+  // 显示帧的 PTS 作为音频偏移（音频首包实测 PTS=0）。OB-3 视频首帧 21ms，
+  // 这里得到 -21ms，AudioEngine/Waveform 才能对齐。
+  if (options.dash && probe_.info.has_audio) {
+    probe_.info.av_offset_us = -first_frame.pts_us;
+    probe_.info.av_offset_estimated = true;
+  }
   decoder_ = std::move(decoder);
   growing_format_ = std::move(format);
   growing_source_ = std::move(source);
@@ -613,6 +654,18 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
         }
       }
       if (index == frame) {
+        // T8.10：fMP4（DASH）的 av_seek_frame 会落到前一个关键帧；这里对落点
+        // 做 PTS 校验，宁可失败走“从头解码”也不能把错误帧当目标帧。
+        if (index_.IsReliable()) {
+          const std::int64_t expected_pts = index_.PtsOfFrame(frame);
+          if (std::llabs(info.pts_us - expected_pts) > 1'000'000) {
+            if (previous_candidate != nullptr) {
+              av_frame_free(&previous_candidate);
+            }
+            *error = "seek 落点与索引 PTS 不一致";
+            return false;
+          }
+        }
         *out = info;
         decoder_stale_ = false;
         sequential_frame_ = frame + 1;
@@ -645,7 +698,11 @@ bool MediaSession::SeekToFrame(std::int64_t frame, DecodedFrameInfo* out,
       keyframe = 0;
     }
     const auto seek_start = Clock::now();
-    const bool seek_ok = decoder_->SeekToPts(index_.PtsOfFrame(keyframe), error);
+    bool seek_ok = decoder_->SeekToKeyframePts(index_.PtsOfFrame(keyframe), error);
+    if (!seek_ok) {
+      // 非 fMP4/索引不支持的容器退回宽松 seek（落点由 decode_range 的 PTS 校验兜底）。
+      seek_ok = decoder_->SeekToPts(index_.PtsOfFrame(keyframe), error);
+    }
     seek_ms += ElapsedMs(seek_start);
     if (seek_ok && decode_range(keyframe)) {
       ok = true;

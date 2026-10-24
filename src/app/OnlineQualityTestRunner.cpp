@@ -232,9 +232,9 @@ void RunMenuModelChecks() {
         tier120 != nullptr && tier120->manual_only && !tier120->enabled &&
             tier120->text.contains(QStringLiteral("仅手动")) &&
             tier120->text.contains(QStringLiteral("可用档")));
-  Check("menu_vip_4k_reason_t8_10",
+  Check("menu_vip_4k_reason_t8_12",
         tier120 != nullptr &&
-            tier120->disabled_reason.contains(QStringLiteral("T8.10")));
+            tier120->disabled_reason.contains(QStringLiteral("T8.12")));
   const QString vip_text = QualityMenuModelText(vip_entries);
   Check("menu_vip_note_no_guarantee",
         vip_text.contains(QStringLiteral("菜单可选不等于保证可达")),
@@ -489,7 +489,7 @@ SampleOutcome RunSample(const OnlineQualityTestOptions& options,
     Check("dash_4k_not_available", catalog.FindTier(120) == nullptr);
   }
 
-  // 菜单模型（真实目录）：T8.9 只列示，DASH 档位置灰并写明 T8.10。
+  // 菜单模型（真实目录）：T8.10 已能播放 DASH，但切档仍属 T8.12，档位置灰并写明。
   QualityMenuContext menu_ctx;
   // 当前播放是 durl 档（T8.9 仍走 durl），不是 DASH 默认档。
   PlayUrlFetchOptions durl_options;
@@ -523,8 +523,8 @@ SampleOutcome RunSample(const OnlineQualityTestOptions& options,
   } else {
     Check("menu_anon_no_1080p", FindEntry(entries, 80) == nullptr);
   }
-  Check("menu_real_t8_10_note",
-        menu_text.contains(QStringLiteral("T8.10")), OneLine(menu_text));
+  Check("menu_real_t8_12_note",
+        menu_text.contains(QStringLiteral("T8.12")), OneLine(menu_text));
   if (menu_ctx.current_qn > 0) {
     const QualityMenuEntry* current = FindEntry(entries, menu_ctx.current_qn);
     // 当前 durl 档不在 DASH 目录时（匿名 720P vs DASH 480P），模型必须显式说明，
@@ -805,7 +805,7 @@ void OnlineQualityUiTestRunner::Run() {
     check(QStringLiteral("ui_other_tier_disabled"), !other_triggered,
           other_status);
     check(QStringLiteral("ui_other_tier_reason"),
-          other_status.contains(QStringLiteral("T8.10")), other_status);
+          other_status.contains(QStringLiteral("T8.12")), other_status);
   }
   check(QStringLiteral("ui_quality_requests_one"),
         window_->OnlineQualityRequestsForTest() == 1,

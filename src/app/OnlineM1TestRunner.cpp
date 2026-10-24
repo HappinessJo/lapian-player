@@ -315,8 +315,26 @@ void OnlineM1TestRunner::Run() {
         cache_hit ? window_->IndexFrameCountForTest()
                   : window_->OnlineStableFramesForTest();
     const qint64 range = std::min<qint64>(200, available_frames - 2);
-    for (int i = 0; i < 20 && range > 1; ++i) {
-      const qint64 target = 5 + (static_cast<qint64>(i) * 37) % (range - 4);
+    // T8.10：DASH 1080P 的 GOP 是 5s，随机 seek 可能超出 P9 的“距前关键帧
+    // ≤2s”口径。与 M2/OP3 一致，只选落在 2s 窗口内的目标，否则 p95 会把
+    // 长 GOP 的物理成本算进 200ms 门槛。
+    const double fps = window_->FrameRateForTest() > 0.0
+                           ? window_->FrameRateForTest()
+                           : 30.0;
+    const qint64 max_keyframe_distance =
+        std::max<qint64>(1, static_cast<qint64>(std::llround(fps * 2.0)));
+    std::vector<qint64> seek_targets;
+    for (int attempt = 0; attempt < 400 &&
+                          seek_targets.size() < 20; ++attempt) {
+      const qint64 candidate =
+          5 + (static_cast<qint64>(attempt) * 37) % std::max<qint64>(1, range - 4);
+      const qint64 distance =
+          window_->FrameDistanceFromKeyframeForTest(candidate);
+      if (distance >= 0 && distance <= max_keyframe_distance) {
+        seek_targets.push_back(candidate);
+      }
+    }
+    for (const qint64 target : seek_targets) {
       QElapsedTimer timer;
       timer.start();
       window_->GoToFrameForTest(target);
@@ -348,7 +366,8 @@ void OnlineM1TestRunner::Run() {
   // 未缓存 seek：立即显示“缓冲中（目标帧 N）”；改 seek 时旧等待被取消。
   // 完整缓存命中是全本地文件，没有“未缓存区”，跳过该专项。
   const qint64 container_frames = window_->OnlineContainerFramesForTest();
-  if (!cache_hit && container_frames > 120) {
+  if (!cache_hit && container_frames > 120 &&
+      !window_->OnlineCacheCompleteForTest()) {
     const qint64 uncached_target = container_frames - 120;
     QElapsedTimer wait_ui_timer;
     wait_ui_timer.start();
@@ -405,6 +424,13 @@ void OnlineM1TestRunner::Run() {
                 .arg(uncached_target)
                 .arg(window_->CurrentFrameForTest()));
     }
+  } else if (!cache_hit && container_frames > 120) {
+    // T8.10：DASH 1080P 下载在测试跑到这里前已经完整（31MB/2.7s），没有
+    // “未缓存区”可测。记录跳过而不是把“已缓存”误判成未缓存提示。
+    check("uncached_skipped_complete_cache", true,
+          QStringLiteral("download complete before uncached test"));
+    Print(QStringLiteral("online_m1_uncached skipped=complete_cache frames=%1")
+              .arg(container_frames));
   }
 
   // 波形状态：有音频时至少 running/ready；不阻塞步进（上面已测）。

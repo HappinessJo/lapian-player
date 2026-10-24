@@ -107,6 +107,26 @@ class MainWindow : public QMainWindow {
   int OnlineQualityForTest() const { return online_qn_; }
   QString OnlinePartPathForTest() const { return online_part_path_; }
   qint64 OnlineContainerFramesForTest() const;
+  // T8.10 DASH 双输入/音画/seek/内存验收 hooks。
+  bool OnlineDashForTest() const { return online_dash_audio_; }
+  int OnlineAudioIdForTest() const { return online_audio_id_; }
+  qint64 OnlineAudioTotalBytesForTest() const { return online_audio_total_bytes_; }
+  qint64 OnlineTotalBytesForTest() const { return online_total_bytes_; }
+  double OnlineDashFpsForTest() const { return online_dash_fps_; }
+  bool OnlinePlayingForTest() const;
+  double OnlinePlaybackSecondsForTest() const;
+  bool OnlineAudioClockForTest(double* seconds) const;
+  double OnlineAudioPositionForTest() const;
+  int OnlineAudioStateForTest() const;
+  bool OnlineIndexReadyForTest() const;
+  int OnlineIndexFramesForTest() const;
+  bool OnlineIndexCompleteForTest() const { return online_index_complete_; }
+  bool WaitForOnlineIndexFramesForTest(int min_frames, int timeout_ms);
+  bool WaitForOnlineCacheCompleteForTest(int timeout_ms);
+  void SetOnlineDashEnabledForTest(bool enabled);
+  void ShutdownOnlineForTest() { ShutdownOnlineSession(true); }
+  qint64 CurrentPtsUsForTest() const { return current_pts_us_; }
+  void PausePlaybackForTest();
   QString StatusMessageForTest() const;
   void CancelOnlineLoadingForTest() { CancelOnlineLoading(); }
   void CancelOnlineForTest() { CancelOnlineLoading(); }
@@ -301,7 +321,9 @@ class MainWindow : public QMainWindow {
   QString OnlineSnapshotIndexPathForTest() const;
   bool OnlineCacheHitForTest() const { return online_cache_hit_; }
   QString OnlineCachePathForTest() const { return online_cache_path_; }
+  bool OnlineCacheCompleteForTest() const;
   int OnlinePlayUrlRequestsForTest() const;
+  int OnlineDashRequestsForTest() const;
   // T8.7 断网验证：注入不会成功的 HTTP 客户端；命中缓存时它不应被调用。
   void SetOnlineHttpClientForTest(
       std::unique_ptr<lapian::online::IHttpClient> client);
@@ -333,6 +355,7 @@ class MainWindow : public QMainWindow {
   // T8.6.1a 在线长按步进：可见状态与落地轨迹，供 --online-longpress-test 断言。
   std::int64_t OnlineLastFrameForTest() const;
   bool OnlineFrameCachedForTest(qint64 frame) const;
+  qint64 OnlineFramePtsForTest(qint64 frame) const;
   bool OnlineStepIdleForTest() const;
   QString OnlineStepStateForTest() const;
   std::vector<qint64> OnlineStepTraceForTest() const;
@@ -647,6 +670,7 @@ class MainWindow : public QMainWindow {
   bool online_ready_ = false;
   bool online_finalized_ = false;
   bool online_cache_hit_ = false;
+  bool online_dash_enabled_ = true;
   QString online_cache_path_;
   QString online_owner_;
   double online_fps_ = 0.0;
@@ -669,6 +693,15 @@ class MainWindow : public QMainWindow {
   qint64 online_published_bytes_ = 0;
   int online_qn_ = 0;
   int online_codecid_ = 0;
+  // T8.10 DASH 双输入：音频是独立 GrowingSource/容器；这里保存 session 与 seek
+  // 重建所需的轻量引用（生命周期由 OnlineReadyInfo/AudioEngine/Waveform 持有）。
+  bool online_dash_audio_ = false;
+  std::shared_ptr<lapian::online::GrowingSource> online_audio_source_;
+  QString online_audio_part_path_;
+  int online_audio_id_ = 0;
+  qint64 online_audio_total_bytes_ = 0;
+  qint64 online_dash_duration_ms_ = 0;
+  double online_dash_fps_ = 0.0;
   int online_stable_frames_ = 0;
   bool online_index_complete_ = false;
   std::vector<lapian::media::OnlineFrameSpan> online_spans_;

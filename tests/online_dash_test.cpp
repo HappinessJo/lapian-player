@@ -7,7 +7,7 @@
 // - 默认 AVC；档位顺序 1080P60→720P60→1080P30→720P30→480P30；
 // - 60fps/4K 只手动（不自动选；HEVC-only 60fps 不自动）；
 // - 错误 qn/坏字段不崩（跳过单条，不整体失败）；无音轨可解析；
-// - 档位菜单模型：只列示/置灰说明 T8.10、4K 标“可用档”、不把可选写成保证可达。
+// - 档位菜单模型：只列示/置灰说明 T8.12、4K 标“可用档”、不把可选写成保证可达。
 //
 // 退出码：0 = 全部通过；1 = 失败。
 
@@ -509,7 +509,7 @@ void TestSelection() {
 
   // AV1-only 720P：可自动（AV1 不是手动档）。
   DashCatalog av1 = catalog_with({stream(64, 13, 1280, 720, 30.0)});
-  CheckEqI64(av1.DefaultQn(), 64, "AV1-only 720P 可自动（由 T8.10 决定可播）");
+  CheckEqI64(av1.DefaultQn(), 64, "AV1-only 720P 可自动（T8.10 决定可播）");
 
   // 112 排在 80 之后：有 80 时不默认更高码率。
   DashCatalog high = catalog_with({stream(80, 7, 1920, 1080, 30.0),
@@ -537,11 +537,11 @@ void TestMenuModel() {
   Check(tier80 != nullptr && !tier80->enabled && !tier80->checked,
         "非当前档位（1080P）置灰");
   Check(tier80 != nullptr &&
-            tier80->disabled_reason.contains(QStringLiteral("T8.10")),
-        "1080P 置灰原因写明 T8.10");
+            tier80->disabled_reason.contains(QStringLiteral("T8.12")),
+        "1080P 置灰原因写明 T8.12");
   Check(tier80 != nullptr &&
-            tier80->text.contains(QStringLiteral("需 DASH 播放")),
-        "1080P 文案标注未接入 DASH 播放");
+            tier80->text.contains(QStringLiteral("切换需 T8.12")),
+        "1080P 文案标注切档未接入 T8.12");
   Check(tier64 != nullptr && tier64->checked && tier64->enabled,
         "当前 durl 720P 勾选且可点（只提示已是当前档）");
   const QString text = QualityMenuModelText(entries);

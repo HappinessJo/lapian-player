@@ -22,6 +22,24 @@ class GrowingSource;
 
 namespace lapian::media {
 
+// T8.10：DASH 双输入的附加信息。视频容器是单流 fMP4（没有音轨），音频是
+// 独立容器；这里只携带 UI/时间轴需要的展示元数据，不持有音频容器。
+struct OnlineAudioOverlay {
+  bool has_audio = false;
+  int stream_index = 0;
+  std::string codec;
+  int sample_rate = 0;
+  int channels = 0;
+};
+
+struct GrowingOpenOptions {
+  bool dash = false;
+  std::int64_t duration_ms = 0;
+  // DASH 目录给出的实际 fps（OB-2=29.412）；容器 avg_frame_rate 可能报 30。
+  double fps = 0.0;
+  OnlineAudioOverlay audio;
+};
+
 // T7.1：一次打开的分段耗时（毫秒），只用于冷启动测量，不参与逻辑。
 struct MediaOpenTimings {
   double probe_ms = 0.0;
@@ -57,6 +75,13 @@ class MediaSession {
                    const std::string& display_name_utf8,
                    ID3D11Device* device, std::string* error,
                    bool prefer_hardware = true);
+  // T8.10：DASH 双输入（视频单流 + 独立音频容器）。音频容器不入本会话；
+  // overlay 只用于 MediaInfo/时间轴/波形对齐。其余语义与 OpenGrowing 一致。
+  bool OpenGrowingWithOptions(
+      std::shared_ptr<lapian::online::GrowingSource> source,
+      const std::string& part_path_utf8, const std::string& display_name_utf8,
+      ID3D11Device* device, std::string* error,
+      const GrowingOpenOptions& options, bool prefer_hardware = true);
   void Close();
 
   bool IsGrowing() const { return growing_; }

@@ -1824,6 +1824,13 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_codecid_ = 0;
   online_published_bytes_ = 0;
   online_total_bytes_ = 0;
+  online_dash_audio_ = false;
+  online_audio_source_.reset();
+  online_audio_part_path_.clear();
+  online_audio_id_ = 0;
+  online_audio_total_bytes_ = 0;
+  online_dash_duration_ms_ = 0;
+  online_dash_fps_ = 0.0;
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
@@ -1849,6 +1856,9 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   statusBar()->showMessage(QStringLiteral("正在解析在线视频…"));
 
   QString error;
+  if (online_ != nullptr) {
+    online_->SetDashEnabledForTest(online_dash_enabled_);
+  }
   if (!online_ || !online_->Start(request, &error)) {
     online_mode_ = false;
     online_last_error_ = error.isEmpty() ? QStringLiteral("无法开始在线会话") : error;
@@ -1879,7 +1889,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
       std::fflush(stderr);
     }
   };
-  if (info.cache_hit) {
+  if (info.cache_hit && !info.dash) {
     return ApplyOnlineCacheHit(info);
   }
   if (!info.source || info.part_path.isEmpty() || gfx_ == nullptr ||
@@ -1913,8 +1923,19 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   std::string error;
   QElapsedTimer open_timer;
   open_timer.start();
-  const bool opened = candidate->OpenGrowing(
-      info.source, part_path, display_path_utf8, gfx_->d3d_device(), &error, true);
+  lapian::media::GrowingOpenOptions open_options;
+  open_options.dash = info.dash;
+  open_options.duration_ms = info.dash_duration_ms > 0 ? info.dash_duration_ms
+                                                       : info.duration_ms;
+  open_options.fps = info.dash_fps;
+  if (info.dash) {
+    open_options.audio.has_audio = true;
+    open_options.audio.stream_index = 0;
+    open_options.audio.codec = "aac";
+  }
+  const bool opened = candidate->OpenGrowingWithOptions(
+      info.source, part_path, display_path_utf8, gfx_->d3d_device(), &error,
+      open_options, true);
   const double open_ms = static_cast<double>(open_timer.nsecsElapsed()) / 1.0e6;
   if (!opened) {
     online_last_error_ =
@@ -2010,8 +2031,19 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   }
   current_frame_ = 0;
   online_ready_ = true;
-  online_cache_hit_ = false;
-  online_cache_path_.clear();
+  online_cache_hit_ = info.cache_hit;
+  if (info.cache_hit) {
+    online_cache_path_ = info.cache_mp4_path;
+  } else {
+    online_cache_path_.clear();
+  }
+  online_dash_audio_ = info.dash;
+  online_audio_source_ = info.audio_source;
+  online_audio_part_path_ = info.audio_part_path;
+  online_audio_id_ = info.audio_id;
+  online_audio_total_bytes_ = info.audio_total_bytes;
+  online_dash_duration_ms_ = info.dash_duration_ms;
+  online_dash_fps_ = info.dash_fps;
   online_bvid_ = info.request.bvid;
   online_title_ = info.request.title;
   online_cid_ = info.request.cid;
@@ -2109,25 +2141,39 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   mark_context.fps = media.video.frame_rate.ToDouble();
   mark_context.duration_ms = info.request.duration_ms;
   mark_context.total_bytes = info.source->Size();
-  mark_context.cache_hit = false;
+  mark_context.cache_hit = info.cache_hit;
   LoadOnlineMarks(mark_context);
   ready_step("marks_loaded");
 
   // 音频跟随：AudioEngine 自己打开另一个 GrowingFormat；读到 frontier 会等待。
-  if (media.has_audio) {
+  // T8.10：DASH 的音频是独立容器（stream_index=0），与视频容器分开打开。
+  const bool has_dash_audio = info.dash && info.audio_source;
+  const bool has_audio = media.has_audio || has_dash_audio;
+  const double audio_offset_seconds =
+      static_cast<double>(media.av_offset_us) / 1.0e6;
+  if (has_audio) {
     auto audio = std::make_unique<lapian::audio::AudioEngine>();
     audio->SetVolume(volume_);
     audio->SetMute(muted_);
     audio->SetRate(rate_);
-    if (audio->OpenGrowing(info.source, part_path, media.audio.stream_index,
-                           static_cast<double>(media.av_offset_us) / 1.0e6)) {
+    const bool audio_opened =
+        info.dash
+            ? audio->OpenGrowing(info.audio_source, info.audio_part_path.toUtf8().constData(),
+                                 0, audio_offset_seconds)
+            : audio->OpenGrowing(info.source, part_path, media.audio.stream_index,
+                                 audio_offset_seconds);
+    if (audio_opened) {
       audio_ = std::move(audio);
-      audio_base_label_ =
-          QStringLiteral("音频：%1 %2 kHz %3")
-              .arg(QString::fromStdString(media.audio.codec).toUpper())
-              .arg(QString::number(static_cast<double>(media.audio.sample_rate) / 1000.0,
-                                   'g', 3))
-              .arg(DescribeAudioChannels(media.audio.channels));
+      if (media.audio.sample_rate > 0) {
+        audio_base_label_ =
+            QStringLiteral("音频：%1 %2 kHz %3")
+                .arg(QString::fromStdString(media.audio.codec).toUpper())
+                .arg(QString::number(
+                         static_cast<double>(media.audio.sample_rate) / 1000.0, 'g', 3))
+                .arg(DescribeAudioChannels(media.audio.channels));
+      } else {
+        audio_base_label_ = QStringLiteral("音频：AAC（DASH 独立音轨）");
+      }
       audio_label_->setText(audio_base_label_);
       volume_slider_->setEnabled(true);
       mute_action_->setEnabled(true);
@@ -2144,11 +2190,16 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   }
 
   // 波形：独立 GrowingFormat，渐进填充；不因未下载完而阻塞 UI。
-  if (media.has_audio) {
+  if (has_audio) {
     waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
-    if (waveform_->StartGrowing(info.source, part_path,
-                                media.audio.stream_index,
-                                static_cast<double>(media.av_offset_us) / 1.0e6)) {
+    const bool waveform_started =
+        info.dash
+            ? waveform_->StartGrowing(info.audio_source, info.audio_part_path.toUtf8().constData(),
+                                      0, audio_offset_seconds)
+            : waveform_->StartGrowing(info.source, part_path,
+                                      media.audio.stream_index,
+                                      audio_offset_seconds);
+    if (waveform_started) {
       if (const auto waveform_data = waveform_->data()) {
         const double fps = media.video.frame_rate.ToDouble();
         timeline_->SetWaveformSource(
@@ -2157,7 +2208,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
               const auto range = waveform_data->MinMaxRange(begin, end);
               return TimelineWidget::WaveformBucketView{range.min, range.max};
             },
-            static_cast<double>(media.av_offset_us) / 1.0e6,
+            audio_offset_seconds,
             fps > 0.0 ? 1.0 / fps : 1.0 / 30.0,
             [this](std::int64_t frame) -> std::int64_t {
               if (!online_ready_ || session_ == nullptr ||
@@ -2786,6 +2837,13 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
   const bool needs_new_session = online_session_poisoned_;
   const bool exact = exact_index_covered && session_->index().IsReady() &&
                      target < static_cast<std::int64_t>(session_->index().size());
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr,
+                 "T8.10 online_seek_request target=%lld exact=%d index=%zu\n",
+                 static_cast<long long>(target), exact ? 1 : 0,
+                 session_->index().IsReady() ? session_->index().size() : 0);
+    std::fflush(stderr);
+  }
   // T8.6.1a：重建会话时总是带上当前部分索引（不只 exact 目标）。否则中断一个
   // 未缓存等待后，新会话没有索引，CanStepFrames/OnlineFrameCached 会短暂失效，
   // 在线长按会停在重建窗口里。
@@ -2818,8 +2876,18 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
             auto candidate =
                 std::make_shared<lapian::media::MediaSession>();
             std::string open_error;
-            if (!candidate->OpenGrowing(source, part, display, device,
-                                        &open_error, true)) {
+            lapian::media::GrowingOpenOptions reopen_options;
+            reopen_options.dash = online_dash_audio_;
+            reopen_options.duration_ms = online_dash_duration_ms_;
+            reopen_options.fps = online_dash_fps_;
+            if (online_dash_audio_) {
+              reopen_options.audio.has_audio = true;
+              reopen_options.audio.stream_index = 0;
+              reopen_options.audio.codec = "aac";
+            }
+            if (!candidate->OpenGrowingWithOptions(source, part, display, device,
+                                                   &open_error, reopen_options,
+                                                   true)) {
               result->error = QStringLiteral("重建在线会话失败：%1")
                                   .arg(QString::fromStdString(open_error));
               QMetaObject::invokeMethod(
@@ -2928,6 +2996,15 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 }
                 if (!session_ || !result->frame) {
                   return;
+                }
+                if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+                  std::fprintf(stderr,
+                               "T8.10 online_seek_land target=%lld pts_us=%lld "
+                               "actual_frame=%lld\n",
+                               static_cast<long long>(target),
+                               static_cast<long long>(result->info.pts_us),
+                               static_cast<long long>(CurrentFrameForTest()));
+                  std::fflush(stderr);
                 }
                 online_session_poisoned_ = false;
                 const int rotation =
@@ -3058,6 +3135,13 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_display_path_.clear();
   online_published_bytes_ = 0;
   online_total_bytes_ = 0;
+  online_dash_audio_ = false;
+  online_audio_source_.reset();
+  online_audio_part_path_.clear();
+  online_audio_id_ = 0;
+  online_audio_total_bytes_ = 0;
+  online_dash_duration_ms_ = 0;
+  online_dash_fps_ = 0.0;
   // T8.6.1a：会话结束时丢弃步进请求/在途标记；seek worker 已在上面 join。
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
@@ -3097,6 +3181,89 @@ QString MainWindow::OnlineLastErrorForTest() const { return online_last_error_; 
 
 qint64 MainWindow::OnlineStableFramesForTest() const {
   return online_stable_frames_;
+}
+
+bool MainWindow::OnlinePlayingForTest() const {
+  return playback_ != nullptr && playback_->IsPlaying();
+}
+
+double MainWindow::OnlinePlaybackSecondsForTest() const {
+  return playback_ != nullptr ? playback_->CurrentMediaSeconds() : 0.0;
+}
+
+bool MainWindow::OnlineAudioClockForTest(double* seconds) const {
+  if (seconds == nullptr || audio_ == nullptr) {
+    return false;
+  }
+  return audio_->ClockSeconds(seconds);
+}
+
+double MainWindow::OnlineAudioPositionForTest() const {
+  return audio_ != nullptr ? audio_->status().position_seconds : 0.0;
+}
+
+int MainWindow::OnlineAudioStateForTest() const {
+  return audio_ != nullptr ? static_cast<int>(audio_->status().state) : -1;
+}
+
+bool MainWindow::OnlineIndexReadyForTest() const {
+  return session_ != nullptr && session_->index().IsReady() &&
+         !session_->index().empty();
+}
+
+int MainWindow::OnlineIndexFramesForTest() const {
+  return OnlineIndexReadyForTest()
+             ? static_cast<int>(session_->index().size())
+             : 0;
+}
+
+bool MainWindow::WaitForOnlineIndexFramesForTest(int min_frames,
+                                                 int timeout_ms) {
+  QElapsedTimer timer;
+  timer.start();
+  while (timer.elapsed() < timeout_ms) {
+    if (online_index_complete_ ||
+        (OnlineIndexReadyForTest() &&
+         OnlineIndexFramesForTest() >= min_frames)) {
+      return true;
+    }
+    if (!online_mode_ || online_ == nullptr ||
+        online_->state() == lapian::app::OnlineState::kError) {
+      return false;
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+  }
+  return OnlineIndexReadyForTest() &&
+         (online_index_complete_ || OnlineIndexFramesForTest() >= min_frames);
+}
+
+bool MainWindow::WaitForOnlineCacheCompleteForTest(int timeout_ms) {
+  QElapsedTimer timer;
+  timer.start();
+  while (timer.elapsed() < timeout_ms) {
+    if (online_ != nullptr && online_->progress().complete) {
+      return true;
+    }
+    if (!online_mode_ || online_ == nullptr ||
+        online_->state() == lapian::app::OnlineState::kError) {
+      return false;
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+  }
+  return online_ != nullptr && online_->progress().complete;
+}
+
+void MainWindow::SetOnlineDashEnabledForTest(bool enabled) {
+  online_dash_enabled_ = enabled;
+  if (online_ != nullptr) {
+    online_->SetDashEnabledForTest(enabled);
+  }
+}
+
+void MainWindow::PausePlaybackForTest() {
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
 }
 
 qint64 MainWindow::OnlineContainerFramesForTest() const {
@@ -3143,7 +3310,8 @@ lapian::online::QualityMenuContext MainWindow::CurrentQualityMenuContext() const
   context.current_qn = online_qn_;
   context.current_codecid = online_codecid_;
   context.current_from_cache = online_cache_hit_;
-  // T8.9 只解析/列档：DASH 双输入（T8.10）未接入，菜单项不得假装可切。
+  // T8.10 已支持 DASH 双输入播放；但切档（重新取流/索引重建）是 T8.12，
+  // 菜单仍只列示：当前档允许勾选，其它档置灰并说明 T8.12。
   context.dash_playback_available = false;
   context.error = online_quality_.error;
   return context;
@@ -3263,9 +3431,9 @@ void MainWindow::OnOnlineQualityChosen(int qn) {
         6000);
     return;
   }
-  // T8.9 只列档：不重取流、不改变播放；T8.10 双输入 / T8.12 策略才接切档。
+  // T8.10 已能播放 DASH，但切档（重新取流/索引重建/标记 PTS 映射）是 T8.12。
   statusBar()->showMessage(
-      QStringLiteral("DASH 档位切换尚未接入（T8.10 双输入 / T8.12 策略）："
+      QStringLiteral("DASH 档位切换尚未接入（T8.12）："
                      "%1 只列示，当前仍播放 %2")
           .arg(lapian::online::QualityName(qn),
                lapian::online::QualityName(online_qn_)),
@@ -4120,6 +4288,14 @@ int MainWindow::OnlinePlayUrlRequestsForTest() const {
   return online_ == nullptr ? 0 : online_->PlayUrlRequestsForTest();
 }
 
+int MainWindow::OnlineDashRequestsForTest() const {
+  return online_ == nullptr ? 0 : online_->DashRequestsForTest();
+}
+
+bool MainWindow::OnlineCacheCompleteForTest() const {
+  return online_ != nullptr && online_->progress().complete;
+}
+
 void MainWindow::SetOnlineHttpClientForTest(
     std::unique_ptr<lapian::online::IHttpClient> client) {
   if (online_ != nullptr) {
@@ -4169,6 +4345,14 @@ std::int64_t MainWindow::OnlineLastFrameForTest() const {
 
 bool MainWindow::OnlineFrameCachedForTest(qint64 frame) const {
   return OnlineFrameCached(frame);
+}
+
+qint64 MainWindow::OnlineFramePtsForTest(qint64 frame) const {
+  if (session_ == nullptr || !session_->index().IsReady() || frame < 0 ||
+      frame >= static_cast<qint64>(session_->index().size())) {
+    return -1;
+  }
+  return session_->index().PtsOfFrame(frame);
 }
 
 bool MainWindow::OnlineStepIdleForTest() const {

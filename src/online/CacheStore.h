@@ -30,20 +30,31 @@
 
 namespace lapian::online {
 
+// T8.10：DASH 双输入后，一个 bvid+cid 会同时缓存视频流与音频流两个条目。
+// 默认 kVideo，保持旧目录/meta 完全可读；音频条目目录为 `audio-<audio_id>`。
+enum class CacheStreamKind { kVideo = 0, kAudio = 1 };
+
+QString CacheStreamKindName(CacheStreamKind kind);
+
 // 缓存键：bvid + cid + qn + codecid（delta §1.4）。
+// T8.10：音频条目用 kind=kAudio + audio_id；qn/codecid 固定 0，不与视频档位混用。
 struct CacheKey {
   QString bvid;
   qint64 cid = 0;
   int qn = 0;
   int codecid = 0;
+  CacheStreamKind kind = CacheStreamKind::kVideo;
+  int audio_id = 0;
 
   bool operator==(const CacheKey& other) const = default;
+  bool is_audio() const { return kind == CacheStreamKind::kAudio; }
 };
 
 // 只接受 "BV" + 10 位字母数字；用于目录名，必须先校验再拼路径（防穿越）。
 bool IsValidCacheBvid(const QString& bvid);
 bool IsValidCacheKey(const CacheKey& key);
-// 日志/证据用标签：BV1BMnv6jE5S/12345/64-7（不拼进文件名）。
+// 日志/证据用标签：BV1BMnv6jE5S/12345/64-7（不拼进文件名）；音频为
+// BV.../12345/audio-30280。
 QString CacheKeyLabel(const CacheKey& key);
 
 // playurl 成功后由 T8.5 写入的展示元数据；其余字段由存储层维护。
@@ -55,6 +66,10 @@ struct CacheMetadata {
   int height = 0;
   double fps = 0.0;
   QString source_fps_hint;
+  // T8.10：视频条目来自 DASH 双输入时记录 true 与配套音频 id；旧 meta 缺省
+  // false（durl 单文件，音频在 data.mp4 内）。
+  bool dash = false;
+  int audio_id = 0;
 };
 
 // 一条缓存记录（meta + 数据文件的实际状态）。
@@ -67,6 +82,8 @@ struct CacheEntry {
   int height = 0;
   double fps = 0.0;
   QString source_fps_hint;
+  bool dash = false;      // 视频条目：DASH 单流（音频在独立条目里）
+  int audio_id = 0;       // DASH 视频条目配套的音频 id；0=无
   qint64 total_bytes = 0;
   qint64 downloaded_bytes = 0;  // 已下载连续前缀（以数据文件实际长度为准）
   bool complete = false;

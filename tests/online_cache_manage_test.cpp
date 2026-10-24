@@ -218,10 +218,18 @@ void TestClearAndRecords(const QString& temp) {
         error);
 
   const CacheKey current{UniqueKey(QStringLiteral("b"), 2), 2, 64, 7};
+  // T8.10：当前会话的 DASH 音频条目也必须被清空保留。
+  CacheKey current_audio;
+  current_audio.bvid = current.bvid;
+  current_audio.cid = current.cid;
+  current_audio.kind = lapian::online::CacheStreamKind::kAudio;
+  current_audio.audio_id = 30280;
   const CacheKey other{UniqueKey(QStringLiteral("c"), 3), 3, 80, 12};
   const CacheKey broken{UniqueKey(QStringLiteral("d"), 4), 4, 64, 7};
   const CacheKey orphan{UniqueKey(QStringLiteral("e"), 5), 5, 64, 7};
   Check(SeedIncomplete(&store, current, 4 * kMb, 1 * kMb), "clear-seed-current");
+  Check(SeedComplete(&store, current_audio, 128 * kKb),
+        "clear-seed-audio");
   Check(SeedComplete(&store, other, 1 * kMb), "clear-seed-other");
   Check(SeedComplete(&store, broken, 1 * kMb), "clear-seed-broken");
   Check(CreateSizedFile(store.PartPath(orphan), 16 * kKb), "clear-seed-orphan");
@@ -242,8 +250,9 @@ void TestClearAndRecords(const QString& temp) {
   int kept = 0;
   Check(manager.ClearAll(&partial, &error, &removed, &kept),
         "clear-with-current-ok", error);
-  Check(kept == 1, "clear-kept-count");
+  Check(kept == 2, "clear-kept-count");
   Check(store.Load(current).has_value(), "clear-current-kept");
+  Check(store.Load(current_audio).has_value(), "clear-current-audio-kept");
   Check(!store.Load(other).has_value(), "clear-other-gone");
   Check(!store.Load(broken).has_value(), "clear-broken-gone");
   Check(!QFileInfo::exists(store.EntryDir(orphan)), "clear-orphan-gone");

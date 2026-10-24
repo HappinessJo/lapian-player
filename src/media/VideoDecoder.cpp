@@ -448,6 +448,29 @@ struct VideoDecoder::Impl {
     packet_valid = false;
     return true;
   }
+
+  bool SeekToKeyframePts(std::int64_t pts_us, std::string* error) {
+    if (!IsOpen()) {
+      *error = "解码器未打开";
+      return false;
+    }
+    const AVRational time_base = format->streams[video_stream]->time_base;
+    const std::int64_t target = av_rescale_q(pts_us, AV_TIME_BASE_Q, time_base);
+    // fMP4 的 av_seek_frame 会把“正好是关键帧”的时间戳落到前一个关键帧
+    // （DASH 5s GOP 实测早 5s）。把 min/ts/max 都钉在目标时间戳，demuxer
+    // 只能落在该关键帧；失败时退回宽松 seek，由调用方按 PTS 校验。
+    int ret = avformat_seek_file(format, video_stream, target, target, target,
+                                 AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) {
+      *error = "关键帧 seek 失败: " + AvErrorText(ret);
+      return false;
+    }
+    avcodec_flush_buffers(decoder);
+    av_frame_unref(frame);
+    eof_sent = false;
+    packet_valid = false;
+    return true;
+  }
 };
 
 VideoDecoder::VideoDecoder() : impl_(std::make_unique<Impl>()) {}
@@ -599,6 +622,19 @@ bool VideoDecoder::SeekToPts(std::int64_t pts_us, std::string* error) {
   }
   error->clear();
   return impl_->SeekToPts(pts_us, error);
+}
+
+bool VideoDecoder::SeekToKeyframePts(std::int64_t pts_us, std::string* error) {
+  if (error == nullptr) {
+    return false;
+  }
+  std::unique_lock<std::recursive_mutex> device_lock(
+      lapian::gfx::D3D11ContextMutex(), std::defer_lock);
+  if (impl_->hardware_active) {
+    device_lock.lock();
+  }
+  error->clear();
+  return impl_->SeekToKeyframePts(pts_us, error);
 }
 
 bool VideoDecoder::IsOpen() const { return impl_->IsOpen(); }

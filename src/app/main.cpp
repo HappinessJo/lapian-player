@@ -50,6 +50,7 @@
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineLongPressTestRunner.h"
 #include "app/OnlineM1TestRunner.h"
+#include "app/OnlineM2TestRunner.h"
 #include "app/OnlineQualityTestRunner.h"
 #include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
@@ -538,6 +539,13 @@ int main(int argc, char* argv[]) {
   bool online_quality_odd_qn = false;
   bool online_quality_no_catalog = false;
   QString online_quality_sessdata_file;
+  // T8.10：DASH 双输入验收（真实窗口）。
+  bool online_m2_test = false;
+  bool online_m2_force_durl = false;
+  bool online_m2_cache_hit_only = false;
+  bool online_m2_skip_cache_hit = false;
+  int online_m2_play_seconds = 60;
+  int online_m2_seeks = 20;
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -670,6 +678,20 @@ int main(int argc, char* argv[]) {
       online_buffer_test = true;
     } else if (arguments[i] == QStringLiteral("--online-quality-test")) {
       online_quality_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-m2-test")) {
+      online_m2_test = true;
+    } else if (arguments[i] == QStringLiteral("--force-durl")) {
+      online_m2_force_durl = true;
+    } else if (arguments[i] == QStringLiteral("--m2-cache-hit-only")) {
+      online_m2_cache_hit_only = true;
+    } else if (arguments[i] == QStringLiteral("--m2-skip-cache-hit")) {
+      online_m2_skip_cache_hit = true;
+    } else if (arguments[i] == QStringLiteral("--m2-play-seconds") &&
+               i + 1 < arguments.size()) {
+      online_m2_play_seconds = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--m2-seeks") &&
+               i + 1 < arguments.size()) {
+      online_m2_seeks = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--ui")) {
       online_quality_ui = true;
     } else if (arguments[i] == QStringLiteral("--anonymous")) {
@@ -763,7 +785,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
-      online_quality_test) {
+      online_quality_test || online_m2_test) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
       std::fprintf(stderr, "online_quality_fail reason=ui_flag_required\n");
@@ -983,6 +1005,12 @@ int main(int argc, char* argv[]) {
     }
   }
   MainWindow window(nullptr, settings_root, !running_test_mode);
+  if (online_m2_force_durl &&
+      (online_m1_test || online_longpress_test || online_quality_test)) {
+    // T8.10 回归：--force-durl 让既有 M1/长按/档位 UI 探针走 M1 单文件路径，
+    // 用来证明 DASH 双输入没有改变 M1 语义。
+    window.SetOnlineDashEnabledForTest(false);
+  }
   log_startup("window_created");
   if (online_quality_no_catalog) {
     window.SetOnlineQualityCatalogEnabledForTest(false);
@@ -1000,6 +1028,7 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_quality_test ||
+      online_m2_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
       online_m1_cache_root =
@@ -1010,7 +1039,9 @@ int main(int argc, char* argv[]) {
                       ? QStringLiteral("/build/t8.6.1a-online-cache")
                       : (online_quality_test
                              ? QStringLiteral("/build/t8.9-online-cache")
-                             : QStringLiteral("/build/t8.6-online-cache"))));
+                             : (online_m2_test
+                                    ? QStringLiteral("/build/t8.10-online-cache")
+                                    : QStringLiteral("/build/t8.6-online-cache")))));
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
     // T8.6.1a 可选：长按探针要求增长中的会话（缓存命中会走本地同步步进）。
@@ -1028,7 +1059,9 @@ int main(int argc, char* argv[]) {
                       ? QStringLiteral("/build/t8.6.1a-online-pictures")
                       : (online_quality_test
                              ? QStringLiteral("/build/t8.9-online-pictures")
-                             : QStringLiteral("/build/t8.6-online-pictures"))));
+                             : (online_m2_test
+                                    ? QStringLiteral("/build/t8.10-online-pictures")
+                                    : QStringLiteral("/build/t8.6-online-pictures")))));
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
@@ -1054,7 +1087,8 @@ int main(int argc, char* argv[]) {
       QDir().mkpath(online_records_root);
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
-  } else if (online_m1_test || online_longpress_test || online_quality_test) {
+  } else if (online_m1_test || online_longpress_test || online_quality_test ||
+             online_m2_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
@@ -1232,6 +1266,29 @@ int main(int argc, char* argv[]) {
     online_quality_runner =
         std::make_unique<lapian::app::OnlineQualityUiTestRunner>(&window, options);
     online_quality_runner->Start();
+  }
+
+  // T8.10：DASH 双输入真实窗口验收（音画/seek/缓存命中/内存）。
+  std::unique_ptr<lapian::app::OnlineM2TestRunner> online_m2_runner;
+  if (online_m2_test) {
+    lapian::app::OnlineM2TestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid_text = online_m1_cid_text;
+    options.cid = online_m1_cid;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.play_seconds = online_m2_play_seconds;
+    options.seeks = online_m2_seeks;
+    options.force_durl = online_m2_force_durl;
+    options.cache_hit_only = online_m2_cache_hit_only;
+    options.skip_cache_hit = online_m2_skip_cache_hit;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    options.sessdata_file = online_quality_sessdata_file;
+    online_m2_runner =
+        std::make_unique<lapian::app::OnlineM2TestRunner>(&window, options);
+    online_m2_runner->Start();
   }
 
   // T8.6.1a：在线长按 PgUp/PgDn（异步步进队列/边界/未缓存提示）。

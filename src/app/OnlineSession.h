@@ -91,6 +91,16 @@ struct OnlineReadyInfo {
   int qn = 0;
   int codecid = 0;
   double fps = 0.0;
+
+  // T8.10：DASH 双输入。视频走 source/part_path；音频是独立容器/读层/下载。
+  bool dash = false;
+  std::shared_ptr<lapian::online::GrowingSource> audio_source;
+  QString audio_part_path;
+  int audio_id = 0;
+  qint64 audio_total_bytes = 0;
+  // DASH 目录给出的**实际** fps（OB-2 = 29.412）；容器 avg_frame_rate 可能报 30。
+  double dash_fps = 0.0;
+  qint64 dash_duration_ms = 0;
 };
 
 // T8.9 档位目录结果：DASH playurl(fnval=4048) 的解析结果 + 获取状态。
@@ -139,6 +149,8 @@ class OnlineSession : public QObject {
   }
   void SetQualityCatalogForTest(const OnlineQualityCatalog& info);
   OnlineQualityCatalog quality_catalog() const;
+  // T8.10 诊断/回归：false 时跳过 DASH，直接走 M1 durl 单文件路径。
+  void SetDashEnabledForTest(bool enabled) { dash_enabled_.store(enabled); }
 
   void SetCallbacks(StateCallback state, ProgressCallback progress,
                     ReadyCallback ready, ErrorCallback error,
@@ -157,28 +169,43 @@ class OnlineSession : public QObject {
   OnlineProgress progress() const;
   lapian::online::DownloadState job_state() const;
   QString part_path() const;
+  QString audio_part_path() const;
   qint64 total_bytes() const { return total_; }
+  qint64 audio_total_bytes() const { return audio_total_; }
   int qn() const { return qn_; }
   int codecid() const { return codecid_; }
+  int audio_id() const { return audio_id_; }
+  bool dash_mode() const { return dash_mode_; }
   bool ready_emitted() const { return ready_emitted_; }
   bool cache_hit() const { return cache_hit_; }
   QString cache_mp4_path() const;
+  QString cache_audio_mp4_path() const;
   bool HasPendingFinalize() const;
   // reader 全部关闭后调用；内部仍走 CacheStore::MarkComplete。
   bool FinalizeAfterReadersStopped(QString* error);
 
   QString LastErrorForTest() const { return last_error_; }
   int PlayUrlRequestsForTest() const { return playurl_requests_; }
+  int DashRequestsForTest() const { return dash_requests_; }
   int QualityRequestsForTest() const { return quality_requests_; }
+  QString DashFallbackReasonForTest() const { return dash_fallback_reason_; }
 
  private slots:
   void Poll();
 
  private:
-  struct PlayUrlOutcome {
+  struct ResolveOutcome {
     std::mutex mutex;
     bool done = false;
-    lapian::online::PlayUrlFetchResult result;
+    bool dash = false;
+    lapian::online::DashFetchResult dash_result;
+    qint64 video_total = 0;
+    qint64 audio_total = 0;
+    lapian::online::DashStream video;
+    lapian::online::DashAudioStream audio;
+    lapian::online::PlayUrlFetchResult durl_result;
+    bool durl_fetched = false;
+    QString fallback_reason;
     std::uint64_t generation = 0;
   };
 
@@ -194,15 +221,33 @@ class OnlineSession : public QObject {
   // 返回 kHit 时已安排 ready 回调；kError 时 *error 可读（不联网）；kMiss 继续取流。
   enum class CacheLookupResult { kMiss, kHit, kError };
   CacheLookupResult TryCacheHit(const OnlineRequest& request, QString* error);
+  CacheLookupResult TryDashCacheHit(const OnlineRequest& request,
+                                    const lapian::online::CacheEntry& video,
+                                    QString* error);
   void EmitCacheHitReady();
-  void StartPlayUrlWorker(std::uint64_t generation);
-  void JoinPlayUrlWorker();
+  void EmitDashCacheHitReady();
+  void StartResolveWorker(std::uint64_t generation);
+  void JoinResolveWorker();
   bool BuildPlan(const lapian::online::PlayUrlData& data,
                  lapian::online::DownloadPlan* plan,
                  lapian::online::CacheKey* key, QString* error) const;
+  bool BuildDashPlans(const ResolveOutcome& outcome,
+                      lapian::online::DownloadPlan* video_plan,
+                      lapian::online::DownloadPlan* audio_plan,
+                      lapian::online::CacheKey* video_key,
+                      lapian::online::CacheKey* audio_key, QString* error) const;
+  void StartDurlDownload(const lapian::online::PlayUrlData& data,
+                         std::uint64_t generation);
+  void StartDashDownload(const ResolveOutcome& outcome,
+                         std::uint64_t generation);
+  bool StartJobs(const lapian::online::DownloadPlan& video_plan,
+                 const lapian::online::CacheKey& video_key,
+                 const lapian::online::DownloadPlan& audio_plan,
+                 const lapian::online::CacheKey& audio_key, QString* error);
   void Fail(const QString& message);
-  void OnPlayUrlDone(std::uint64_t generation);
+  void OnResolveDone(std::uint64_t generation);
   void CancelJobAndSource();
+  void EmitReady();
 
   // T8.9 档位目录：首帧后起一个独立线程；失败不影响播放/会话状态。
   void StartQualityWorker(std::uint64_t generation);
@@ -222,17 +267,30 @@ class OnlineSession : public QObject {
   OnlineRequest request_;
   lapian::online::PlayUrlData playurl_data_;
   std::shared_ptr<lapian::online::GrowingSource> source_;
+  std::shared_ptr<lapian::online::GrowingSource> audio_source_;
   std::unique_ptr<lapian::online::DownloadJob> job_;
+  std::unique_ptr<lapian::online::DownloadJob> audio_job_;
   std::unique_ptr<QTimer> poll_timer_;
-  std::thread playurl_thread_;
-  std::shared_ptr<PlayUrlOutcome> playurl_outcome_;
-  std::shared_ptr<lapian::online::HttpCancelToken> playurl_cancel_;
+  std::thread resolve_thread_;
+  std::shared_ptr<ResolveOutcome> resolve_outcome_;
+  std::shared_ptr<lapian::online::HttpCancelToken> resolve_cancel_;
   std::uint64_t generation_ = 0;
+
+  // T8.10：DASH 目录（resolve 阶段已拿到；首帧后直接发 quality，不重复请求）。
+  bool dash_mode_ = false;
+  lapian::online::DashCatalog dash_catalog_;
+  bool dash_catalog_available_ = false;
+  int dash_requests_ = 0;
+  QString dash_fallback_reason_;
+  int audio_id_ = 0;
+  qint64 audio_total_ = 0;
+  qint64 audio_ready_threshold_ = 0;
 
   std::thread quality_thread_;
   std::shared_ptr<QualityOutcome> quality_outcome_;
   std::shared_ptr<lapian::online::HttpCancelToken> quality_cancel_;
   std::atomic<bool> quality_enabled_{true};
+  std::atomic<bool> dash_enabled_{true};
   bool has_injected_quality_ = false;
   OnlineQualityCatalog injected_quality_;
   bool quality_started_ = false;
@@ -244,6 +302,7 @@ class OnlineSession : public QObject {
   OnlineState state_ = OnlineState::kIdle;
   OnlineProgress progress_;
   QString part_path_;
+  QString audio_part_path_;
   QString last_error_;
   qint64 total_ = 0;
   qint64 ready_threshold_ = 0;
@@ -256,7 +315,11 @@ class OnlineSession : public QObject {
   bool finalize_pending_ = false;
   bool cache_hit_ = false;
   QString cache_mp4_path_;
+  QString cache_audio_mp4_path_;
   lapian::online::CacheEntry cache_entry_;
+  lapian::online::CacheEntry cache_entry_audio_;
+  double dash_fps_ = 0.0;
+  qint64 dash_duration_ms_ = 0;
 
   StateCallback state_callback_;
   ProgressCallback progress_callback_;

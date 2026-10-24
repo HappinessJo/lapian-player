@@ -582,8 +582,13 @@ DownloadTransportResult WinHttpDownloadTransport::GetRange(
                  &disable_cookies, sizeof(disable_cookies));
 
   // CDN 请求绝不带 Cookie：这里只加 Range/UA/Referer/Accept-Encoding。
-  const std::wstring range =
-      L"Range: bytes=" + std::to_wstring(request.offset) + L"-";
+  std::wstring range = L"Range: bytes=" + std::to_wstring(request.offset);
+  if (request.range_end >= request.offset) {
+    // T8.10：DASH 总字节探测用 bytes=offset-end（通常 0-0）。
+    range += L"-" + std::to_wstring(request.range_end);
+  } else {
+    range += L"-";
+  }
   api.add_request_headers(state->request, range.c_str(),
                           static_cast<DWORD>(-1),
                           WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);

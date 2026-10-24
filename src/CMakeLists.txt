@@ -226,6 +226,8 @@ qt_add_executable(lapian WIN32
   app/OnlineLongPressTestRunner.h
   app/OnlineM1TestRunner.cpp
   app/OnlineM1TestRunner.h
+  app/OnlineM2TestRunner.cpp
+  app/OnlineM2TestRunner.h
   app/OnlineOfflineTestRunner.cpp
   app/OnlineOfflineTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp
@@ -307,3 +309,12 @@ lapian_apply_common_options(lapian_waveform_probe)
 target_link_libraries(lapian_waveform_probe PRIVATE lapian_audio)
 lapian_copy_ffmpeg_dlls(lapian_waveform_probe)
 lapian_set_output_dir(lapian_waveform_probe)
+
+# T8.10 DASH 双输入 spike（开发工具；不入分发）：总字节/init-index/双容器/
+# 首帧/首包/seek fan-out 的真实样本验证。
+add_executable(lapian_dash_spike
+  tools/dash_spike/main.cpp)
+lapian_apply_common_options(lapian_dash_spike)
+target_link_libraries(lapian_dash_spike PRIVATE lapian_media lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_dash_spike)
+lapian_set_output_dir(lapian_dash_spike)
