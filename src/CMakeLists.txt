@@ -218,6 +218,8 @@ qt_add_executable(lapian WIN32
   app/OnlineCacheTestRunner.h
   app/OnlineCacheManageTestRunner.cpp
   app/OnlineCacheManageTestRunner.h
+  app/OnlineFaultTestRunner.cpp
+  app/OnlineFaultTestRunner.h
   app/OnlineFetchTestRunner.cpp
   app/OnlineFetchTestRunner.h
   app/OnlineGrowingTestRunner.cpp
@@ -261,6 +263,12 @@ target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
                                      lapian_soak lapian_online
                                      lapian::ffmpeg
                                      Qt6::Widgets windowscodecs ole32 psapi)
+
+# T8.13 诊断（只在本地构建产物里生成 .map，用于把崩溃 RVA 映射到符号；不参与分发）
+if(MSVC)
+  target_link_options(lapian PRIVATE "/MAP:${CMAKE_BINARY_DIR}/lapian.map")
+endif()
+
 lapian_copy_ffmpeg_dlls(lapian)
 lapian_set_output_dir(lapian)
 

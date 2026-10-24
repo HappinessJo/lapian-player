@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // T8.6 在线会话状态机：确认 → playurl → CacheStore + GrowingSource + DownloadJob
 // → 等 0.3MB → 通知 UI 打开可增长媒体 → 关闭/完成前 finalize。
@@ -236,10 +236,16 @@ class OnlineSession : public QObject {
   void PublishProgress();
   // 返回 kHit 时已安排 ready 回调；kError 时 *error 可读（不联网）；kMiss 继续取流。
   enum class CacheLookupResult { kMiss, kHit, kError };
-  CacheLookupResult TryCacheHit(const OnlineRequest& request, QString* error);
+  // T8.13：kError 时把“可重建的损坏条目键”写进 rebuild_keys；调用方 Rebuild 后
+  // 按 kMiss 继续联网重下（O5-A7/O7-A5“检测/重建/重试成功”）。重建失败仍报错。
+  CacheLookupResult TryCacheHit(const OnlineRequest& request, QString* error,
+                                QVector<lapian::online::CacheKey>* rebuild_keys);
   CacheLookupResult TryDashCacheHit(const OnlineRequest& request,
                                     const lapian::online::CacheEntry& video,
-                                    QString* error);
+                                    QString* error,
+                                    QVector<lapian::online::CacheKey>* rebuild_keys);
+  bool RebuildCorruptEntries(const QVector<lapian::online::CacheKey>& keys,
+                             QString* error);
   void EmitCacheHitReady();
   void EmitDashCacheHitReady();
   void StartResolveWorker(std::uint64_t generation);
@@ -263,6 +269,12 @@ class OnlineSession : public QObject {
   void Fail(const QString& message);
   void OnResolveDone(std::uint64_t generation);
   void CancelJobAndSource();
+  // T8.13：下载不可恢复失败时，已发布前缀必须仍可读（O7-A1/A2“已缓存区仍可播放”）。
+  // keep_cached_readable=true 时只 Fail 读层（读前沿返回 EIO，不伪装 EOF/取消），
+  // 不 Cancel；只有关窗/取消/首帧前失败才 Cancel。
+  void FailJobsAndSources(bool keep_cached_readable);
+  // T8.13：Poll 内检查下载是否“连续 N 秒没有写盘”，命中则中止当前尝试。
+  void CheckDownloadStall();
   void EmitReady();
 
   // T8.9 档位目录：首帧后起一个独立线程；失败不影响播放/会话状态。

@@ -1,4 +1,4 @@
-#include "app/OnlineSession.h"
+﻿#include "app/OnlineSession.h"
 
 #include <QMetaObject>
 #include <QTimer>
@@ -11,6 +11,10 @@
 #include "online/Sessdata.h"
 #include "online/WinHttpClient.h"
 
+extern "C" {
+#include <libavutil/error.h>
+}
+
 namespace lapian::app {
 namespace {
 
@@ -18,6 +22,13 @@ constexpr qint64 kReadyThresholdBytes = 300 * 1024;
 // T8.10：DASH 音频容器首包/probe 只需很少数据；96KB ≈ 7–8s AAC，足够
 // avformat_find_stream_info 与首块解码，同时避免“等整个音频下完”。
 constexpr qint64 kAudioReadyThresholdBytes = 96 * 1024;
+
+// T8.13：与 DownloadJob/ProcessMemory 一致的 steady_clock 毫秒。
+std::int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 // T8.9 诊断：只对可能压住 UI 线程的同步段计时；>100ms 才打印（LAPIAN_ONLINE_LOG）。
 class ScopedSlowLog {
@@ -426,7 +437,7 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
           if (!dash_enabled_.load()) {
             // T8.10 诊断/回归：强制 M1 durl 路径，用于验证回退不退化。
             lapian::online::PlayUrlFetchOptions durl_options;
-            durl_options.timeout_ms = 6000;
+            durl_options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
             durl_options.sessdata = sessdata;
             durl_options.fourk = 0;
             outcome->durl_result = lapian::online::FetchPlayUrl(
@@ -444,7 +455,7 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
             return;
           }
           lapian::online::DashFetchOptions dash_options;
-          dash_options.timeout_ms = 6000;
+          dash_options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
           dash_options.sessdata = sessdata;
           dash_options.qn = dash_request_qn;
           dash_options.fourk = 1;
@@ -507,10 +518,12 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
                     std::make_unique<lapian::online::WinHttpDownloadTransport>();
                 transport = owned_transport.get();
               }
-              const TotalProbe video_probe =
-                  ProbeDashTotal(transport, video.AllUrls(), 8000, *cancel);
-              const TotalProbe audio_probe =
-                  ProbeDashTotal(transport, audio.AllUrls(), 8000, *cancel);
+              const TotalProbe video_probe = ProbeDashTotal(
+                  transport, video.AllUrls(),
+                  lapian::online::kOnlineApiTimeoutMs, *cancel);
+              const TotalProbe audio_probe = ProbeDashTotal(
+                  transport, audio.AllUrls(),
+                  lapian::online::kOnlineApiTimeoutMs, *cancel);
               if (cancel->IsCancelled()) {
                 return;
               }
@@ -536,7 +549,7 @@ void OnlineSession::StartResolveWorker(std::uint64_t generation) {
           }
           if (failure.isEmpty() && !outcome->dash) {
             lapian::online::PlayUrlFetchOptions durl_options;
-            durl_options.timeout_ms = 6000;
+            durl_options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
             durl_options.sessdata = sessdata;
             durl_options.fourk = 0;  // M1 路径字节不变
             outcome->durl_result = lapian::online::FetchPlayUrl(
@@ -607,7 +620,7 @@ void OnlineSession::StartQualityWorker(std::uint64_t generation) {
         client = owned.get();
       }
       lapian::online::DashFetchOptions options;
-      options.timeout_ms = 6000;
+      options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
       options.sessdata = sessdata;
       // 档位目录请求：手动切档时用请求 qn（只影响 claimed quality，目录仍为
       // 服务端返回的完整梯）；自动时封顶 1080P + fourk=1。
@@ -682,7 +695,11 @@ void OnlineSession::OnQualityDone(std::uint64_t generation) {
 }
 
 OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
-    const OnlineRequest& request, QString* error) {
+    const OnlineRequest& request, QString* error,
+    QVector<lapian::online::CacheKey>* rebuild_keys) {
+  if (rebuild_keys != nullptr) {
+    rebuild_keys->clear();
+  }
   if (cache_ == nullptr || error == nullptr) {
     return CacheLookupResult::kMiss;
   }
@@ -732,6 +749,9 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
                      .arg(entry.broken_reason.isEmpty()
                               ? QStringLiteral("data.mp4/meta.json 校验失败")
                               : entry.broken_reason);
+        if (rebuild_keys != nullptr) {
+          rebuild_keys->push_back(entry.key);
+        }
         return CacheLookupResult::kError;
       }
     }
@@ -740,13 +760,16 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
   if (best->dash) {
     // T8.10：DASH 视频单流必须和配套音频条目同时完整才能命中；缺一个就
     // 明确报“需要重建”，不静默降级成无声播放、也不偷偷联网。
-    return TryDashCacheHit(request, *best, error);
+    return TryDashCacheHit(request, *best, error, rebuild_keys);
   }
 
   QString mp4_path;
   QString open_error;
   if (!cache_->OpenComplete(best->key, &mp4_path, &open_error)) {
     *error = QStringLiteral("缓存条目存在但无法打开：%1").arg(open_error);
+    if (rebuild_keys != nullptr) {
+      rebuild_keys->push_back(best->key);
+    }
     return CacheLookupResult::kError;
   }
 
@@ -783,10 +806,13 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
 
 OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
     const OnlineRequest& request, const lapian::online::CacheEntry& video,
-    QString* error) {
+    QString* error, QVector<lapian::online::CacheKey>* rebuild_keys) {
   using namespace lapian::online;
   if (video.audio_id <= 0) {
     *error = QStringLiteral("DASH 缓存缺少音频 id（meta 不完整），需要清理后重下");
+    if (rebuild_keys != nullptr) {
+      rebuild_keys->push_back(video.key);
+    }
     return CacheLookupResult::kError;
   }
   QVector<CacheEntry> entries;
@@ -812,6 +838,10 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
                    .arg(entry.broken_reason.isEmpty()
                             ? QStringLiteral("data.mp4/meta.json 校验失败")
                             : entry.broken_reason);
+      if (rebuild_keys != nullptr) {
+        rebuild_keys->push_back(video.key);
+        rebuild_keys->push_back(audio_key);
+      }
       return CacheLookupResult::kError;
     }
   }
@@ -819,6 +849,9 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
     *error = QStringLiteral("DASH 缓存不完整：视频条目存在但缺少音频条目"
                             "（audio-%1），请清空该视频缓存后重新打开")
                  .arg(video.audio_id);
+    if (rebuild_keys != nullptr) {
+      rebuild_keys->push_back(video.key);
+    }
     return CacheLookupResult::kError;
   }
 
@@ -827,10 +860,18 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
   QString open_error;
   if (!cache_->OpenComplete(video.key, &video_path, &open_error)) {
     *error = QStringLiteral("DASH 视频缓存无法打开：%1").arg(open_error);
+    if (rebuild_keys != nullptr) {
+      rebuild_keys->push_back(video.key);
+      rebuild_keys->push_back(audio_key);
+    }
     return CacheLookupResult::kError;
   }
   if (!cache_->OpenComplete(audio_key, &audio_path, &open_error)) {
     *error = QStringLiteral("DASH 音频缓存无法打开：%1").arg(open_error);
+    if (rebuild_keys != nullptr) {
+      rebuild_keys->push_back(video.key);
+      rebuild_keys->push_back(audio_key);
+    }
     return CacheLookupResult::kError;
   }
 
@@ -983,6 +1024,29 @@ void OnlineSession::EmitQuality(const OnlineQualityCatalog& info) {
   }
 }
 
+bool OnlineSession::RebuildCorruptEntries(
+    const QVector<lapian::online::CacheKey>& keys, QString* error) {
+  if (cache_ == nullptr) {
+    if (error != nullptr) {
+      *error = QStringLiteral("在线缓存未初始化");
+    }
+    return false;
+  }
+  for (const lapian::online::CacheKey& key : keys) {
+    QString one_error;
+    if (!cache_->Rebuild(key, &one_error)) {
+      if (error != nullptr) {
+        *error = one_error.isEmpty()
+                     ? QStringLiteral("删除损坏缓存失败（%1）")
+                           .arg(lapian::online::CacheKeyLabel(key))
+                     : one_error;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
 bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   if (error == nullptr) {
     return false;
@@ -1045,14 +1109,28 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   }
 
   // T8.7：完整缓存命中优先于 playurl/DownloadJob。命中时 0 网络；损坏条目
-  // 直接报“需要重建”，不联网重下、不覆盖坏数据。
-  const CacheLookupResult cache_result = TryCacheHit(request, error);
+  // T8.13：检测到损坏/不完整时先 Rebuild（只删该条目数据，不动在线记录/截图），
+  // 然后按未命中重新取流 —— O7-A5/O5-A7“检测/重建；重试成功；不显示错误帧”。
+  QVector<lapian::online::CacheKey> rebuild_keys;
+  const CacheLookupResult cache_result =
+      TryCacheHit(request, error, &rebuild_keys);
   if (cache_result == CacheLookupResult::kError) {
-    active_.store(false);
-    SetState(OnlineState::kError, *error);
-    return false;
-  }
-  if (cache_result == CacheLookupResult::kHit) {
+    const QString original_error = *error;
+    QString rebuild_error;
+    if (!rebuild_keys.isEmpty() &&
+        RebuildCorruptEntries(rebuild_keys, &rebuild_error)) {
+      SetState(OnlineState::kRecovering,
+               QStringLiteral("缓存损坏，已重建，正在重新下载…"));
+    } else {
+      active_.store(false);
+      if (!rebuild_error.isEmpty()) {
+        *error = QStringLiteral("%1；重建失败：%2")
+                     .arg(original_error, rebuild_error);
+      }
+      SetState(OnlineState::kError, *error);
+      return false;
+    }
+  } else if (cache_result == CacheLookupResult::kHit) {
     return true;
   }
 
@@ -1122,6 +1200,7 @@ void OnlineSession::StartDurlDownload(const lapian::online::PlayUrlData& data,
   lapian::online::DownloadOptions options;
   options.defer_finalize = true;
   options.throttle_bytes_per_sec = download_throttle_bps_;
+  options.stall_timeout_ms = lapian::online::kDownloadStallTimeoutMs;
 
   // 刷新回调运行在下载线程：只做一次 playurl，不碰 UI/日志中的签名 URL。
   auto refresh = [this](lapian::online::DownloadPlan* fresh,
@@ -1134,7 +1213,7 @@ void OnlineSession::StartDurlDownload(const lapian::online::PlayUrlData& data,
       return false;
     }
     lapian::online::PlayUrlFetchOptions fetch_options;
-    fetch_options.timeout_ms = 6000;
+    fetch_options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
     fetch_options.sessdata = request_.sessdata;
     // 刷新必须与初始请求同一档位，否则可能换回更低档并改变 plan.qn。
     const int refresh_qn = request_.requested_qn > 0
@@ -1227,6 +1306,7 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
   lapian::online::DownloadOptions options;
   options.defer_finalize = true;
   options.throttle_bytes_per_sec = download_throttle_bps_;
+  options.stall_timeout_ms = lapian::online::kDownloadStallTimeoutMs;
 
   const int video_qn = outcome.video.qn;
   const int video_codecid = outcome.video.codecid;
@@ -1244,7 +1324,7 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
         http = owned.get();
       }
       lapian::online::DashFetchOptions fetch_options;
-      fetch_options.timeout_ms = 6000;
+      fetch_options.timeout_ms = lapian::online::kOnlineApiTimeoutMs;
       fetch_options.sessdata = request_.sessdata;
       fetch_options.qn = request_.requested_qn > 0
                              ? request_.requested_qn
@@ -1547,6 +1627,10 @@ void OnlineSession::Poll() {
     EmitReady();
   }
 
+  // T8.13：网络无响应看门狗。放在状态映射之后，避免同一轮被
+  // “kDownloading → 恢复 kReady”覆盖；下一轮看到 kFailed 即给出可读错误。
+  CheckDownloadStall();
+
   if (job_state == DownloadState::kAwaitingFinalize) {
     if (!finalize_pending_) {
       finalize_pending_ = true;
@@ -1571,7 +1655,69 @@ void OnlineSession::Fail(const QString& message) {
   if (error_callback_) {
     error_callback_(message);
   }
-  CancelJobAndSource();
+  // T8.13：首帧后失败不能让已缓存区不可播。下载线程自己已经 source_->Fail()
+  // （读已发布区正常，读前沿 EIO）；这里再 Cancel 会把所有读变成 AVERROR_EXIT，
+  // 违反 O7-A1/A2“已缓存区仍可播放”。只有还没进入播放（无 reader）时保持旧行为。
+  const bool has_readers =
+      (source_ && source_->Stats().live_cursors > 0) ||
+      (audio_source_ && audio_source_->Stats().live_cursors > 0);
+  FailJobsAndSources(ready_emitted_ || has_readers);
+}
+
+void OnlineSession::FailJobsAndSources(bool keep_cached_readable) {
+  if (job_) {
+    job_->Cancel();
+  }
+  if (audio_job_) {
+    audio_job_->Cancel();
+  }
+  if (keep_cached_readable) {
+    // 读层进入“下载不可恢复失败”状态：已发布前缀仍可读，前沿读返回 EIO。
+    if (source_ && !source_->IsCancelled()) {
+      source_->Fail(AVERROR(EIO));
+    }
+    if (audio_source_ && !audio_source_->IsCancelled()) {
+      audio_source_->Fail(AVERROR(EIO));
+    }
+    return;
+  }
+  if (source_) {
+    source_->Cancel();
+  }
+  if (audio_source_) {
+    audio_source_->Cancel();
+  }
+}
+
+void OnlineSession::CheckDownloadStall() {
+  if (!job_) {
+    return;
+  }
+  const std::int64_t now = NowMs();
+  auto stalled = [&](lapian::online::DownloadJob* job) {
+    if (job == nullptr) {
+      return false;
+    }
+    if (job->state() != lapian::online::DownloadState::kDownloading) {
+      return false;
+    }
+    const lapian::online::DownloadStats stats = job->stats();
+    return stats.last_progress_ms > 0 &&
+           now - stats.last_progress_ms >=
+               lapian::online::kDownloadStallTimeoutMs;
+  };
+  const bool video_stalled = stalled(job_.get());
+  const bool audio_stalled = stalled(audio_job_.get());
+  if (!video_stalled && !audio_stalled) {
+    return;
+  }
+  if (video_stalled) {
+    job_->AbortStalledAttempt();
+  }
+  if (audio_stalled) {
+    audio_job_->AbortStalledAttempt();
+  }
+  SetState(OnlineState::kRecovering, QStringLiteral("网络无响应，重试中…"));
 }
 
 void OnlineSession::CancelJobAndSource() {

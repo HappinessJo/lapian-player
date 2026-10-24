@@ -32,6 +32,10 @@
 
 namespace lapian::online {
 
+// T8.13：连续无写盘多久判定“网络无响应”。OnlineSession::Poll 每 250ms 检查一次，
+// 中止后下载线程立即给可读错误（约 4.3s，满足 O7 的 5s 上界）。
+inline constexpr int kDownloadStallTimeoutMs = 4000;
+
 // 调用方从 playurl 构造：urls[0] 主 URL，其余为 backup_url；total 必须 >0。
 struct DownloadPlan {
   QStringList urls;
@@ -65,6 +69,10 @@ struct DownloadStats {
   std::int64_t written_bytes = 0;     // 当前连续前缀（.part 目标长度）
   std::int64_t elapsed_ms = 0;
   std::int64_t first_byte_ms = -1;
+  // T8.13 网络无响应看门狗：最后一次写盘时刻（steady_clock 毫秒）。
+  // 每次尝试开始、暂停恢复、写盘后都会刷新；OnlineSession::Poll 据此判断
+  // “连续 N 秒没有数据”并中止当前尝试（可读错误，不无限缓冲）。
+  std::int64_t last_progress_ms = 0;
   double bps = 0.0;
 
   int range_requests = 0;
@@ -100,6 +108,9 @@ struct DownloadOptions {
   // T8.11 测试钩子：>0 时按字节/秒节流写入（1–2MB/s 复现“边下边索引”）；
   // 默认 0 不改变产品下载速度/发布语义。
   std::int64_t throttle_bytes_per_sec = 0;
+  // T8.13：连续无进展多久后由 OnlineSession::Poll 调 AbortStalledAttempt()。
+  // 只用于可读错误文案；判断在调用方（UI 轮询），不在下载线程。
+  int stall_timeout_ms = kDownloadStallTimeoutMs;
 };
 
 class DownloadJob {
@@ -126,6 +137,14 @@ class DownloadJob {
   // 取消：立即置位并中断 HTTP；工作线程退出后 source->Cancel()。
   // Cancel() 本身不 join，不阻塞 UI；需要等待线程结束时用 Wait()。
   void Cancel();
+
+  // T8.13 网络无响应：由 OnlineSession::Poll 在“连续 stall_timeout_ms 没有写盘”
+  // 时调用。只中断当前 HTTP 尝试并把工作线程导向 kFailed + 可读错误（ETIMEDOUT），
+  // 不重试、不切换备份（避免一个死连接把 UI 卡在缓冲中）；`.part` 保留可续传。
+  void AbortStalledAttempt();
+
+  // 测试/诊断：是否已因无响应被中止。
+  bool StalledAborted() const;
 
   // 等待工作线程结束（-1 = 无限）。返回 true 表示已进入终态。
   bool Wait(int timeout_ms = -1);
@@ -177,6 +196,7 @@ class DownloadJob {
   bool finished_ = false;
   bool cancelled_ = false;
   bool paused_ = false;
+  bool stalled_ = false;  // T8.13：AbortStalledAttempt 置位，工作线程读一次即清
   std::shared_ptr<HttpCancelToken> attempt_cancel_;
   std::shared_ptr<HttpCancelToken> refresh_cancel_;
   std::thread worker_;

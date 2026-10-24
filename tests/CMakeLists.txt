@@ -174,6 +174,21 @@ add_test(NAME lapian_online_frame_rate_test COMMAND lapian_online_frame_rate_tes
 set_tests_properties(lapian_online_frame_rate_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.13 网络异常/并发加固：断网续传/全线路失败/未缓存 seek 断网/主 CDN 403/
+# URL 过期刷新/刷新失败/API 错误矩阵/真实 WinHTTP 4.5s 超时/网络无响应看门狗/
+# 缓存损坏自动重建/磁盘不足/DASH 单流失败/关闭阻塞/日志脱敏/4 读者并发。
+# 全部注入（fake HTTP/transport + 本机 127.0.0.1 静默服务器），不联网、无 GUI。
+add_executable(lapian_online_fault_test
+  online_fault_test.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.h)
+lapian_apply_common_options(lapian_online_fault_test)
+target_link_libraries(lapian_online_fault_test PRIVATE lapian_online lapian::ffmpeg ws2_32)
+lapian_copy_ffmpeg_dlls(lapian_online_fault_test)
+add_test(NAME lapian_online_fault_test COMMAND lapian_online_fault_test)
+set_tests_properties(lapian_online_fault_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T8.11 渐进索引/波形：真实 OB-3 缓存按 256KB 受控增长（等价 1–2MB/s），
 # 验证只扫已发布前缀/stable 单调/前缀 PTS 不变/30s 覆盖/完成精确/读字节比；
 # 独立音频慢增长验证 bucket 只追加、偏移 ≤1 帧。素材缺失返回 77。

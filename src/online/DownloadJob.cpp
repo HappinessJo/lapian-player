@@ -308,6 +308,10 @@ bool DownloadJob::Start(QString* error) {
 void DownloadJob::Run() {
   run_start_ms_ = NowMs();
   last_progress_ms_ = run_start_ms_;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_.last_progress_ms = run_start_ms_;
+  }
 
   if (written_ > 0) {
     // 续传前缀在 Start 中已确认写盘长度；发布给 reader。
@@ -398,11 +402,33 @@ void DownloadJob::Run() {
     request.user_agent = options_.user_agent;
     request.referer = options_.referer;
     SetStats([](DownloadStats* stats) { ++stats->range_requests; });
+    // T8.13：每次尝试都重新计“无响应”窗口；连接/首字节等待也算在这个窗口内。
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stats_.last_progress_ms = NowMs();
+      stalled_ = false;
+    }
     const DownloadTransportResult result =
         transport_->GetRange(request, &sink, *token);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       attempt_cancel_.reset();
+    }
+    // T8.13：Poll 判定“连续 N 秒没有写盘”后中止本次尝试；不再重试/切备份，
+    // 直接给可读错误（.part 保留，缓存区仍可播放，重新打开可续传）。
+    bool stall_aborted = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stall_aborted = stalled_;
+      stalled_ = false;
+    }
+    if (stall_aborted) {
+      FinishFailed(
+          AVERROR(ETIMEDOUT),
+          QStringLiteral("网络无响应：连续 %1 秒没有收到下载数据，已暂停下载"
+                         "（已缓存区仍可播放；重新打开同一视频可续传）")
+              .arg(std::max(1, options_.stall_timeout_ms / 1000)));
+      return;
     }
 
     const std::int64_t after = [this]() {
@@ -653,6 +679,8 @@ bool DownloadJob::WritePart(const std::uint8_t* data, std::size_t size,
     session_bytes_ += static_cast<std::int64_t>(written);
     stats_.written_bytes = written_;
     stats_.downloaded_bytes = session_bytes_;
+    // T8.13：任何一次成功写盘都刷新“无响应”窗口（不受 1s 进度写盘节流影响）。
+    stats_.last_progress_ms = NowMs();
   }
   // T8.11：测试慢增长在写盘后、发布前节流；产品默认 0 不进入。
   if (options_.throttle_bytes_per_sec > 0) {
@@ -736,6 +764,8 @@ bool DownloadJob::WaitWhilePaused() {
     return false;
   }
   state_ = DownloadState::kDownloading;
+  // T8.13：暂停可能持续很久，恢复后重新计“无响应”窗口，避免一恢复就被看门狗中止。
+  stats_.last_progress_ms = NowMs();
   return true;
 }
 
@@ -936,6 +966,7 @@ void DownloadJob::Resume() {
       return;
     }
     paused_ = false;
+    stats_.last_progress_ms = NowMs();
   }
   cv_.notify_all();
 }
@@ -957,6 +988,27 @@ void DownloadJob::Cancel() {
     refresh->Cancel();
   }
   cv_.notify_all();
+}
+
+void DownloadJob::AbortStalledAttempt() {
+  std::shared_ptr<HttpCancelToken> attempt;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!started_ || finished_ || cancelled_ || stalled_) {
+      return;
+    }
+    stalled_ = true;
+    attempt = attempt_cancel_;
+  }
+  if (attempt != nullptr) {
+    attempt->Cancel();
+  }
+  cv_.notify_all();
+}
+
+bool DownloadJob::StalledAborted() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return stalled_;
 }
 
 bool DownloadJob::Wait(int timeout_ms) {

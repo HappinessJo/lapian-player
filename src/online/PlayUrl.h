@@ -70,6 +70,10 @@ bool IsM1Quality(int qn);
 // 服务端仍可能降档（OB-1/OB-3 给 64）；实际档位只信 PlayUrlData::quality。
 inline constexpr int kM1RequestQn = 80;
 
+// T8.13 网络加固（O7-A7）：单次 playurl/DASH API 请求上限。
+// 4.5s 给“超时 ≤5s 可读”留解析/回调余量；实测正常请求 100–300ms，不影响起播。
+inline constexpr int kOnlineApiTimeoutMs = 4500;
+
 // ---------------------------------------------------------------- T8.9 DASH
 //
 // playurl(fnval=4048) 的 DASH 段解析与档位目录。这一层只解析/排序/选档，

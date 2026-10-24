@@ -1,4 +1,4 @@
-#include <QAbstractButton>
+﻿#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
@@ -49,6 +49,7 @@
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
 #include "app/OnlineIndexTestRunner.h"
+#include "app/OnlineFaultTestRunner.h"
 #include "app/OnlineLongPressTestRunner.h"
 #include "app/OnlineM1TestRunner.h"
 #include "app/OnlineM2TestRunner.h"
@@ -553,6 +554,11 @@ int main(int argc, char* argv[]) {
   int online_index_seeks = 20;
   QString online_index_offline_video;
   QString online_index_offline_audio;
+  // T8.13：网络异常/并发加固（真实窗口，全部注入，不联网）。
+  bool online_fault_test = false;
+  QString online_fault_media;
+  QString online_fault_only;
+  QString online_fault_set = QStringLiteral("t8.13-core");
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -701,6 +707,17 @@ int main(int argc, char* argv[]) {
       online_m2_seeks = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--online-index-test")) {
       online_index_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-fault-test")) {
+      online_fault_test = true;
+    } else if (arguments[i] == QStringLiteral("--fault-media") &&
+               i + 1 < arguments.size()) {
+      online_fault_media = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--fault-only") &&
+               i + 1 < arguments.size()) {
+      online_fault_only = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--fault-set") &&
+               i + 1 < arguments.size()) {
+      online_fault_set = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--index-throttle-bps") &&
                i + 1 < arguments.size()) {
       online_index_throttle_bps = arguments[++i].toLongLong();
@@ -880,7 +897,7 @@ int main(int argc, char* argv[]) {
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
        online_longpress_test || online_buffer_test || online_offline_test ||
-       online_quality_test) &&
+       online_quality_test || online_fault_test) &&
       settings_root.isEmpty()) {
     settings_root =
         QDir::currentPath() +
@@ -889,14 +906,19 @@ int main(int argc, char* argv[]) {
                                                   ? QStringLiteral("/build/t6.5-settings")
                                                   : (online_quality_test
                                                          ? QStringLiteral("/build/t8.9-settings")
-                                                         : (online_offline_test
-                                                                ? QStringLiteral("/build/t8.7-settings")
-                                                                : (online_longpress_test
-                                                                       ? QStringLiteral("/build/t8.6.1a-settings")
-                                                                       : QStringLiteral("/build/t8.6-settings"))))));
+                                                         : (online_fault_test
+                                                                ? QStringLiteral("/build/t8.13-fault/settings")
+                                                                : (online_offline_test
+                                                                       ? QStringLiteral("/build/t8.7-settings")
+                                                                       : (online_longpress_test
+                                                                              ? QStringLiteral("/build/t8.6.1a-settings")
+                                                                              : QStringLiteral("/build/t8.6-settings")))))));
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
+  }
+  if (online_fault_test && !settings_root.isEmpty()) {
+    QDir().mkpath(settings_root);
   }
   if (settings_test || (banner_test && settings_path_arg.isEmpty())) {
     QDir().mkpath(settings_root);
@@ -1144,6 +1166,38 @@ int main(int argc, char* argv[]) {
     QDir().mkpath(online_records_root);
     window.SetOnlineRecordsRootForTest(online_records_root);
   }
+  // T8.13：故障探针全部注入，不需要真实 BV/凭据，但必须用独立根（不碰 AppData）。
+  if (online_fault_test) {
+    const QString fault_root =
+        QDir::currentPath() + QStringLiteral("/build/t8.13-fault");
+    if (online_m1_cache_root.isEmpty()) {
+      online_m1_cache_root = fault_root + QStringLiteral("/cache");
+    }
+    online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
+    QDir().mkpath(online_m1_cache_root);
+    window.SetOnlineCacheRootForTest(online_m1_cache_root);
+    if (online_m1_pictures.isEmpty()) {
+      online_m1_pictures = fault_root + QStringLiteral("/pics");
+    }
+    online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
+    QDir().mkpath(online_m1_pictures);
+    window.SetSnapshotPicturesRootForTest(online_m1_pictures);
+    if (online_records_root.isEmpty()) {
+      online_records_root = fault_root + QStringLiteral("/records");
+    }
+    online_records_root = QFileInfo(online_records_root).absoluteFilePath();
+    QDir().mkpath(online_records_root);
+    window.SetOnlineRecordsRootForTest(online_records_root);
+    if (online_fault_media.isEmpty()) {
+      const QString fast =
+          QDir::currentPath() +
+          QStringLiteral("/build/test-media/faststart-720p.mp4");
+      const QString proxy =
+          QDir::currentPath() + QStringLiteral("/media/proxy/proxy-V1.mp4");
+      online_fault_media = QFileInfo::exists(fast) ? fast : proxy;
+    }
+    online_fault_media = QFileInfo(online_fault_media).absoluteFilePath();
+  }
   if (!snapshot_pictures_root.isEmpty()) {
     // 通过构造函数后的 setter 传 Unicode 路径，避免 qputenv 的 ANSI 限制。
     window.SetSnapshotPicturesRootForTest(snapshot_pictures_root);
@@ -1382,6 +1436,25 @@ int main(int argc, char* argv[]) {
     online_offline_runner =
         std::make_unique<lapian::app::OnlineOfflineTestRunner>(&window, options);
     online_offline_runner->Start();
+  }
+
+  // T8.13：网络异常/并发加固（真实窗口 + 注入假 CDN；不断言 M2）。
+  std::unique_ptr<lapian::app::OnlineFaultTestRunner> online_fault_runner;
+  if (online_fault_test) {
+    lapian::app::OnlineFaultTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid > 0 ? online_m1_cid : 42915922022LL;
+    options.page = online_m1_page;
+    options.tag = online_m1_tag.isEmpty() ? online_fault_set : online_m1_tag;
+    options.media_path = online_fault_media;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    options.only = online_fault_only;
+    options.timeout_ms = online_m1_timeout_ms;
+    online_fault_runner =
+        std::make_unique<lapian::app::OnlineFaultTestRunner>(&window, options);
+    online_fault_runner->Start();
   }
 
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
