@@ -336,3 +336,15 @@ add_test(NAME lapian_preview_decoder_test COMMAND lapian_preview_decoder_test)
 set_tests_properties(lapian_preview_decoder_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T8.6.1b 在线拖动预览解码器：GrowingSource 独立读层、降采样、最新目标合并、
+# 反向缓存、过期帧丢弃、未缓存 waiting、End 有界。素材缺失返回 77。
+add_executable(lapian_online_preview_test online_preview_decoder_test.cpp)
+lapian_apply_common_options(lapian_online_preview_test)
+target_link_libraries(lapian_online_preview_test PRIVATE lapian_media lapian_online lapian::ffmpeg)
+lapian_copy_ffmpeg_dlls(lapian_online_preview_test)
+
+add_test(NAME lapian_online_preview_test COMMAND lapian_online_preview_test)
+set_tests_properties(lapian_online_preview_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)

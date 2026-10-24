@@ -86,6 +86,7 @@ extern "C" {
 #include "core/MediaClock.h"
 #include "media/MediaProbe.h"
 #include "media/MediaSession.h"
+#include "media/OnlinePreviewDecoder.h"
 #include "media/PathProbe.h"
 #include "media/PreviewDecoder.h"
 #include "online/CacheManager.h"
@@ -3326,11 +3327,14 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (playback_) {
     playback_->Pause();
   }
-  // 先取消下载并唤醒所有阻塞读，再 join 音频/波形/索引/seek；关窗 ≤1s 的关键。
+  // 先取消下载并唤醒所有阻塞读（含预览的独立 cursor），再停预览/seek/索引；
+  // 预览 reader 必须在 finalize 的 `.part`→`.mp4` 改名之前 close。
   if (online_) {
     online_->Cancel();
   }
   mark("cancelled");
+  StopPreview();
+  mark("preview_stopped");
   StopOnlineSeekWorker();
   mark("seek_stopped");
   StopOnlineIndexBuild();
@@ -4976,6 +4980,53 @@ int MainWindow::OnlineStepRetargetCountForTest() const {
   return online_step_.retargets;
 }
 
+bool MainWindow::PreviewActiveForTest() const {
+  return preview_timer_ != nullptr && preview_timer_->isActive();
+}
+
+bool MainWindow::OnlinePreviewWaitingForTest() const {
+  return online_preview_ != nullptr && online_preview_->IsWaiting();
+}
+
+bool MainWindow::OnlinePreviewThreadRunningForTest() const {
+  return online_preview_ != nullptr && online_preview_->IsThreadRunning();
+}
+
+QString MainWindow::OnlinePreviewStateForTest() const {
+  const bool active = online_preview_ != nullptr;
+  const QString error =
+      active ? QString::fromStdString(online_preview_->last_error())
+             : QString();
+  return QStringLiteral(
+             "active=%1 waiting=%2 thread=%3 target=%4 presented=%5 "
+             "dropped=%6 last_frame=%7 last_pts=%8 index_frames=%9 "
+             "cache_frames=%10 seeks=%11 error=%12")
+      .arg(active ? 1 : 0)
+      .arg(OnlinePreviewWaitingForTest() ? 1 : 0)
+      .arg(OnlinePreviewThreadRunningForTest() ? 1 : 0)
+      .arg(online_preview_target_)
+      .arg(online_preview_presented_)
+      .arg(online_preview_dropped_)
+      .arg(online_preview_last_frame_)
+      .arg(online_preview_last_pts_)
+      .arg(static_cast<qint64>(online_preview_index_frames_))
+      .arg(active ? online_preview_->cached_frames() : 0)
+      .arg(active ? static_cast<qint64>(online_preview_->seek_count()) : 0)
+      .arg(error.isEmpty() ? QStringLiteral("none") : error);
+}
+
+void MainWindow::ResetPreviewStatsForTest() {
+  online_preview_target_ = -1;
+  online_preview_last_frame_ = -1;
+  online_preview_last_pts_ = 0;
+  online_preview_presented_ = 0;
+  online_preview_dropped_ = 0;
+  online_preview_errors_ = 0;
+  preview_presented_count_ = 0;
+  online_preview_wait_status_ = false;
+  online_preview_error_shown_ = false;
+}
+
 QString MainWindow::WaveformStateForTest() const {
   if (!waveform_) {
     return QStringLiteral("none");
@@ -5090,10 +5141,7 @@ void MainWindow::TogglePlayback() {
   CancelPendingMarkJump();
   // 拖动中按 Space：先放弃预览，避免预览帧在播放开始后覆盖画面。
   if (preview_timer_ != nullptr && preview_timer_->isActive()) {
-    preview_timer_->stop();
-    if (preview_ != nullptr) {
-      preview_->End();
-    }
+    EndScrubPreview();
   }
   playback_->Toggle();
 }
@@ -5415,10 +5463,22 @@ void MainWindow::OnScrubStarted(qint64 frame) {
       preview_timer_->start();
     }
     statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
-  } else if (OnlineStepEligible()) {
-    // T8.6.1b 之前，增长会话没有本地 PreviewDecoder；不要谎称“拖动预览”。
-    statusBar()->showMessage(
-        QStringLiteral("在线增长会话暂无拖动预览；松开后跳转到目标帧"), 3000);
+    return;
+  }
+  if (OnlineStepEligible()) {
+    // T8.6.1b：增长会话走独立的 GrowingSource 预览读层；未缓存区只提示等待。
+    EnsureOnlinePreviewStarted(frame);
+    if (online_preview_ != nullptr) {
+      if (!OnlineFrameCached(frame)) {
+        ApplyOnlinePreviewWaitPrompt(frame, true);
+      } else {
+        statusBar()->showMessage(
+            QStringLiteral("拖动预览：松开后精确到帧"), 1000);
+      }
+    } else {
+      ApplyOnlinePreviewWaitPrompt(frame, true);
+    }
+    return;
   }
 }
 
@@ -5429,18 +5489,36 @@ void MainWindow::OnScrubTargetChanged(qint64 frame) {
   ShowScrubTarget(frame);
   if (preview_ != nullptr) {
     preview_->UpdateTarget(frame);
+    return;
+  }
+  if (!OnlineStepEligible()) {
+    return;
+  }
+  if (online_preview_ == nullptr) {
+    EnsureOnlinePreviewStarted(frame);
+  }
+  if (online_preview_ == nullptr) {
+    ApplyOnlinePreviewWaitPrompt(frame, true);
+    return;
+  }
+  online_preview_target_ = frame;
+  MaybeRefreshOnlinePreviewIndex();
+  const bool cached = OnlineFrameCached(frame);
+  online_preview_->UpdateTarget(frame, cached);
+  if (!cached) {
+    ApplyOnlinePreviewWaitPrompt(frame, false);
   }
 }
 
 void MainWindow::OnScrubFinished(qint64 frame) {
-  if (session_ == nullptr || !session_->IsOpen() || session_->index().empty()) {
+  if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
-  if (preview_timer_ != nullptr) {
-    preview_timer_->stop();
-  }
-  if (preview_ != nullptr) {
-    preview_->End();
+  // 先停预览/join 预览线程，再走精确 seek；预览线程的 reader 不能和松手后的
+  // 精确 seek/finalize 抢同一个 `.part` 句柄。
+  EndScrubPreview();
+  if (session_->index().empty() && !OnlineStepEligible()) {
+    return;
   }
   const std::int64_t last_frame =
       OnlineStepEligible() ? OnlineLastFrame()
@@ -5465,6 +5543,155 @@ void MainWindow::OnScrubFinished(qint64 frame) {
   }
 }
 
+void MainWindow::EndScrubPreview() {
+  if (preview_timer_ != nullptr) {
+    preview_timer_->stop();
+  }
+  if (preview_ != nullptr) {
+    preview_->End();
+  }
+  if (online_preview_ != nullptr) {
+    online_preview_dropped_ =
+        static_cast<int>(online_preview_->stale_dropped());
+    if (!online_preview_error_shown_ &&
+        !online_preview_->last_error().empty()) {
+      ++online_preview_errors_;
+    }
+    online_preview_->End();
+    online_preview_.reset();
+  }
+  online_preview_index_frames_ = 0;
+  online_preview_error_shown_ = false;
+  ClearOnlinePreviewWaitPrompt();
+}
+
+void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame) {
+  if (online_preview_ != nullptr || !OnlineStepEligible() || session_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty() || online_stable_frames_ <= 0 ||
+      online_part_path_.isEmpty()) {
+    return;
+  }
+  auto source = session_->growing_source_for_index();
+  if (!source) {
+    return;
+  }
+  auto snapshot = std::make_shared<lapian::media::FrameIndex>(index);
+  const QByteArray part_utf8 = online_part_path_.toUtf8();
+  const std::string part_path(part_utf8.constData(),
+                              static_cast<std::size_t>(part_utf8.size()));
+  online_preview_ = std::make_unique<lapian::media::OnlinePreviewDecoder>();
+  online_preview_index_frames_ = snapshot->size();
+  online_preview_target_ = frame;
+  online_preview_error_shown_ = false;
+  const bool initial_cached = OnlineFrameCached(frame);
+  online_preview_->Begin(std::move(source), part_path,
+                         session_->video_stream_index(), std::move(snapshot),
+                         frame, initial_cached);
+  if (preview_timer_ != nullptr && !preview_timer_->isActive()) {
+    preview_timer_->start();
+  }
+}
+
+void MainWindow::MaybeRefreshOnlinePreviewIndex() {
+  if (online_preview_ == nullptr || session_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty() ||
+      index.size() <= online_preview_index_frames_) {
+    return;
+  }
+  // 目标已经超出快照时必须立刻换；否则按每增长 30 帧节流，避免拖动中频繁
+  // 在 UI 线程拷贝大索引。
+  const bool target_beyond_snapshot =
+      online_preview_target_ >=
+      static_cast<std::int64_t>(online_preview_index_frames_);
+  if (!target_beyond_snapshot &&
+      index.size() <= online_preview_index_frames_ + 30) {
+    return;
+  }
+  auto snapshot = std::make_shared<lapian::media::FrameIndex>(index);
+  online_preview_index_frames_ = snapshot->size();
+  online_preview_->UpdateIndex(std::move(snapshot));
+}
+
+void MainWindow::ApplyOnlinePreviewWaitPrompt(std::int64_t target, bool force) {
+  if (status_label_ == nullptr) {
+    return;
+  }
+  if (online_preview_wait_status_ && !force &&
+      online_preview_wait_timer_.isValid() &&
+      online_preview_wait_timer_.elapsed() < 100) {
+    return;
+  }
+  statusBar()->showMessage(
+      QStringLiteral("缓冲中（预览）：目标帧 %1").arg(target), 8000);
+  status_label_->setText(
+      base_info_ +
+      QStringLiteral(" · 拖动预览：缓冲中（目标帧 %1）").arg(target));
+  online_preview_wait_status_ = true;
+  online_preview_wait_timer_.restart();
+}
+
+void MainWindow::ClearOnlinePreviewWaitPrompt() {
+  if (!online_preview_wait_status_) {
+    return;
+  }
+  online_preview_wait_status_ = false;
+  online_preview_wait_timer_.invalidate();
+  if (status_label_ != nullptr) {
+    status_label_->setText(base_info_ + online_status_detail_);
+  }
+}
+
+void MainWindow::TickOnlinePreview() {
+  if (online_preview_ == nullptr || session_ == nullptr || gfx_ == nullptr) {
+    return;
+  }
+  MaybeRefreshOnlinePreviewIndex();
+  const std::int64_t target = online_preview_target_;
+  // 下载追上后，同一个未缓存目标可能变可预览；每个 tick 重新问一次。
+  if (target >= 0 && online_preview_->IsWaiting() &&
+      OnlineFrameCached(target)) {
+    online_preview_->UpdateTarget(target, true);
+  }
+  lapian::media::PreviewFrame preview_frame =
+      online_preview_->TakeLatestFrame();
+  if (preview_frame.frame != nullptr) {
+    gfx_->SetVideoFrame(
+        preview_frame.frame,
+        session_->info().rotation.counterclockwise_degrees);
+    ++preview_presented_count_;
+    ++online_preview_presented_;
+    online_preview_last_frame_ = preview_frame.frame_index;
+    online_preview_last_pts_ = preview_frame.pts_us;
+    av_frame_free(&preview_frame.frame);
+  }
+  online_preview_dropped_ =
+      static_cast<int>(online_preview_->stale_dropped());
+  const std::string error = online_preview_->last_error();
+  if (!error.empty()) {
+    if (!online_preview_error_shown_) {
+      online_preview_error_shown_ = true;
+      ++online_preview_errors_;
+      statusBar()->showMessage(
+          QStringLiteral("拖动预览不可用：%1")
+              .arg(QString::fromStdString(error)),
+          6000);
+      ClearOnlinePreviewWaitPrompt();
+    }
+    return;
+  }
+  if (online_preview_->IsWaiting()) {
+    ApplyOnlinePreviewWaitPrompt(target, false);
+  } else {
+    ClearOnlinePreviewWaitPrompt();
+  }
+}
+
 void MainWindow::StopPreview() {
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
@@ -5472,11 +5699,26 @@ void MainWindow::StopPreview() {
   if (preview_ != nullptr) {
     preview_->Close();
   }
+  if (online_preview_ != nullptr) {
+    online_preview_dropped_ =
+        static_cast<int>(online_preview_->stale_dropped());
+    online_preview_->Close();
+    online_preview_.reset();
+  }
+  online_preview_index_frames_ = 0;
+  online_preview_error_shown_ = false;
+  ClearOnlinePreviewWaitPrompt();
 }
 
 void MainWindow::OnPreviewTick() {
-  if (preview_ == nullptr || session_ == nullptr || !session_->IsOpen() ||
-      gfx_ == nullptr) {
+  if (session_ == nullptr || !session_->IsOpen() || gfx_ == nullptr) {
+    return;
+  }
+  if (online_preview_ != nullptr && OnlineStepEligible()) {
+    TickOnlinePreview();
+    return;
+  }
+  if (preview_ == nullptr) {
     return;
   }
   const bool timing = qEnvironmentVariableIsSet("LAPIAN_TIMING_LOG");
@@ -5490,6 +5732,7 @@ void MainWindow::OnPreviewTick() {
   }
   gfx_->SetVideoFrame(preview_frame.frame,
                       session_->info().rotation.counterclockwise_degrees);
+  ++preview_presented_count_;
   av_frame_free(&preview_frame.frame);
   if (timing && tick_timer.elapsed() > 200) {
     std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",
@@ -6653,10 +6896,7 @@ void MainWindow::ActivateMark(const QString& id, std::int64_t frame) {
   timer.start();
 
   if (preview_timer_ != nullptr && preview_timer_->isActive()) {
-    preview_timer_->stop();
-    if (preview_ != nullptr) {
-      preview_->End();
-    }
+    EndScrubPreview();
   }
   if (playback_ != nullptr) {
     playback_->Pause();

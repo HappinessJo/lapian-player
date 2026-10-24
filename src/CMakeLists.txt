@@ -160,6 +160,8 @@ add_library(lapian_media STATIC
   media/MediaSession.h
   media/OnlineIndexBuilder.cpp
   media/OnlineIndexBuilder.h
+  media/OnlinePreviewDecoder.cpp
+  media/OnlinePreviewDecoder.h
   media/PathProbe.cpp
   media/PathProbe.h
   media/PreviewDecoder.cpp
@@ -218,6 +220,8 @@ qt_add_executable(lapian WIN32
   app/OnlineCacheTestRunner.h
   app/OnlineCacheManageTestRunner.cpp
   app/OnlineCacheManageTestRunner.h
+  app/OnlineDragPreviewTestRunner.cpp
+  app/OnlineDragPreviewTestRunner.h
   app/OnlineFaultTestRunner.cpp
   app/OnlineFaultTestRunner.h
   app/OnlineFetchTestRunner.cpp

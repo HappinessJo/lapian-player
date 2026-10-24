@@ -54,6 +54,7 @@ class SettingsStore;
 namespace lapian::media {
 enum class FrameCacheMode;
 class MediaSession;
+class OnlinePreviewDecoder;
 class PreviewDecoder;
 }
 
@@ -389,6 +390,24 @@ class MainWindow : public QMainWindow {
   void ResetOnlineStepTraceForTest();
   int OnlineStepBoundaryStopsForTest() const;
   int OnlineStepRetargetCountForTest() const;
+  // T8.6.1b 在线拖动预览：已缓存区预览呈现/等待/过期帧统计，供探针断言。
+  bool PreviewActiveForTest() const;
+  bool OnlinePreviewActiveForTest() const { return online_preview_ != nullptr; }
+  bool OnlinePreviewWaitingForTest() const;
+  bool OnlinePreviewThreadRunningForTest() const;
+  qint64 OnlinePreviewTargetForTest() const { return online_preview_target_; }
+  qint64 OnlinePreviewLastFrameForTest() const {
+    return online_preview_last_frame_;
+  }
+  qint64 OnlinePreviewLastPtsForTest() const { return online_preview_last_pts_; }
+  int PreviewPresentedForTest() const { return preview_presented_count_; }
+  int OnlinePreviewPresentedForTest() const {
+    return online_preview_presented_;
+  }
+  int OnlinePreviewDroppedForTest() const { return online_preview_dropped_; }
+  int OnlinePreviewErrorsForTest() const { return online_preview_errors_; }
+  QString OnlinePreviewStateForTest() const;
+  void ResetPreviewStatsForTest();
   // 自动化模拟“物理键仍按住时收到伪 KeyRelease”；-1 走真实 GetAsyncKeyState。
   void SetStepKeyPhysicalDownForTest(int state) {
     step_key_physical_down_for_test_ = state;
@@ -523,6 +542,14 @@ class MainWindow : public QMainWindow {
   void OnOnlineStepFailed(std::int64_t target);
   void ResetOnlineStepState();
   void ShowOnlineWaitPrompt(std::int64_t target);
+  // T8.6.1b：在线增长会话的独立拖动预览读层。目标只保留最新值；未缓存目标
+  // 只显示等待，不在 UI 线程解码/等待。松手先 End 预览，再走精确 seek。
+  void EnsureOnlinePreviewStarted(std::int64_t frame);
+  void MaybeRefreshOnlinePreviewIndex();
+  void ApplyOnlinePreviewWaitPrompt(std::int64_t target, bool force);
+  void ClearOnlinePreviewWaitPrompt();
+  void TickOnlinePreview();
+  void EndScrubPreview();
   void RequestOnlineSeek(std::int64_t target, lapian::media::FrameCacheMode mode,
                          bool exact_index_covered);
   bool OnlineFrameCached(std::int64_t frame) const;
@@ -656,6 +683,7 @@ class MainWindow : public QMainWindow {
   double cache_last_maintenance_ms_ = 0.0;
   std::unique_ptr<PlaybackController> playback_;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
+  std::unique_ptr<lapian::media::OnlinePreviewDecoder> online_preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;
   std::unique_ptr<lapian::audio::WaveformGenerator> waveform_;
   std::unique_ptr<lapian::core::MarkStore> marks_;
@@ -667,6 +695,18 @@ class MainWindow : public QMainWindow {
   QTimer* settings_save_timer_ = nullptr;
   // T7.11.1：后退跨 GOP 第一步的硬解窗口延后回拷（呈现后再填缓存）。
   QTimer* cache_fill_timer_ = nullptr;
+  // T8.6.1b 在线拖动预览状态/统计（只 GUI 线程写）。
+  std::int64_t online_preview_target_ = -1;
+  std::int64_t online_preview_last_frame_ = -1;
+  std::int64_t online_preview_last_pts_ = 0;
+  std::size_t online_preview_index_frames_ = 0;
+  int online_preview_presented_ = 0;
+  int online_preview_dropped_ = 0;
+  int online_preview_errors_ = 0;
+  int preview_presented_count_ = 0;
+  bool online_preview_wait_status_ = false;
+  bool online_preview_error_shown_ = false;
+  QElapsedTimer online_preview_wait_timer_;
   int step_direction_ = 0;
   int step_key_physical_down_for_test_ = -1;
   QString step_stop_reason_;

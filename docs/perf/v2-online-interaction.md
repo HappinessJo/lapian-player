@@ -1,10 +1,10 @@
 # T8.6.1a 在线长按步进证据（2026-10-24）
 
-- **版本**：v1.2（2026-10-24 用户实机确认 C 盘安装版长按正常，T8.6.1a 验收闭环；v1.1 为 hotfix）
-- **范围**：只做 **T8.6.1a 在线长按 PgUp/PgDn**（非门任务，M1 后）。把在线步进从
-  “同步 `current_frame_` 检查”改为异步步进状态机；seek 合并/取消；边界停止；
-  未缓存区“缓冲中（目标帧 N）”且可取消，不阻塞 UI。**不做** T8.3.1、T8.6.1b、
-  M2/DASH、T8.9、扫码、4K/1080P60。**未改 M1/M2 门、验收数字与 OB 样本定义。**
+- **版本**：v1.3（2026-10-24 追加 **T8.6.1b 在线拖动预览**；v1.2 为 T8.6.1a 用户实机确认）
+- **范围**：T8.6.1a 在线长按 PgUp/PgDn（非门）与 **T8.6.1b 在线拖动预览（非门）**。
+  T8.6.1b 只做增长会话拖动：已缓存区连续降质预览、松手精确落帧、未缓存区提示/
+  取消；缓存命中/本地/durl 不退化。**不做** T8.15、T8.16、4K/1080P60、M1/M2 门。
+  **未改 M1/M2 门、验收数字与 OB 样本定义。**
 - **提交**：初始实现 commit `3859822`；实机回归 hotfix 一个 commit（hash 见 `git log -1`）；基线 HEAD `5c5dddc`。
 - **依据**：[tasks-v2.md](../tasks-v2.md) T8.6.1a、[delta v0.4](../spec-v1.0-delta.md)
   OP2/OP3/OP5/O10、[T8.6 证据](v2-online-session.md) §5、[T8.6.1a 交接](../handoff-2026-10-24-t8.6.1a.md)。
@@ -326,3 +326,155 @@ $exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
 关键日志行：`online_longpress_result checks=54 failures=0 verdict=pass`、
 `online_longpress_cached dir=...`、`online_longpress_uncached ...`、
 `online_longpress_ui_gap max_ms=...`、`online_longpress_close ms=...`。
+
+---
+
+## 8. T8.6.1b 在线拖动预览（2026-10-24，非门）
+
+### 8.1 结论
+
+增长会话（`online_ready_ && !online_cache_hit_`）拖动时，已缓存区不再只变帧号：
+独立 `OnlinePreviewDecoder` 用第二个 `GrowingCursor` 读取 `.part`，按稳定前缀索引
+解码、降采样到最长边约 1280 的 NV12 并连续发布；松手先停预览，再走既有精确
+seek。DASH 1080P30 样本 1s/60 样本慢拖 **55 presented、fps_total 54.95、
+fps_active 61.18**，UI gap **69ms/0 次 >200ms**，stale 0，松手 **frame 75 /
+PTS 2,500,000 精确**；未缓存目标 3312 提示 **0ms**、`waiting=1`、拖回恢复、
+松手/新目标取消 0ms；缓存命中、durl、本地拖动均未退化；拖动中 `S` 被拦截；
+拖动中关窗 56ms（DASH）/9ms（缓存命中）/76ms（durl）。`ctest` **36/36**。
+
+**判定：pass（非门任务）**。没有改 M1/M2 门、验收数字、OB 样本或
+`lapian-cache-1`；没有把“预览可用”写成清晰度保证；T8.15 未执行。
+
+### 8.2 实现边界
+
+| 项 | 做法 |
+|---|---|
+| 读层 | 新增 `src/media/OnlinePreviewDecoder.*`：独立 `GrowingSource::GrowingCursor`/`GrowingFormat` + 独立 `VideoDecoder::OpenWithFormat`（软件解码），只读视频 `.part`，不碰 `MediaSession` 解码器、`online_seek_*`、`online_step_*` |
+| 帧映射 | GUI 在拖动开始时拷贝当前稳定 `FrameIndex` 快照；索引增长时按“目标超出快照或 +30 帧”节流重发快照；worker 只持 `shared_ptr<const FrameIndex>` |
+| 目标合并 | `latest target + generation`；新目标只覆盖最新值，旧 generation 在解码切片点退出；正向连续发布中间帧，反向只发布目标帧 |
+| 缓存/内存 | 最新帧 1 张 + 最近 24 张降采样帧（约 33MB @720p NV12），`End/Close` 释放；`SwsContext` 复用 |
+| 未缓存 | `OnlineFrameCached` 为 false 时只标记 waiting，不 seek/不阻塞读；显示「缓冲中（预览）：目标帧 N」；下载追上后下一 tick 重新尝试 |
+| 松手 | `OnScrubFinished` 先 `EndScrubPreview`（interrupt + join）再 `GoToFrame(target)`；精确 seek 仍走 `RequestOnlineSeek`，预览帧不参与落点 |
+| 关窗/切档 | `ShutdownOnlineSession` 先 `online_->Cancel()` 唤醒 reader，再 `StopPreview`；预览句柄在 `.part`→`.mp4` finalize 前关闭 |
+| 本地/缓存命中 | 仍用原 `PreviewDecoder`（路径 + `FrameIndex`），32 帧缓存/只发布目标帧/丢弃过期帧语义未改；增长会话不创建本地预览器 |
+| 截图 | 复用 `preview_timer_->isActive()` 守卫：拖动中 `S` 只提示「拖动预览中，松开后再截图」 |
+| DASH | 只读视频 `source`；音频仍由既有 `AudioEngine/WaveformGenerator` 处理，不擦洗、不建第二下载 |
+
+### 8.3 环境与命令
+
+- 机器：DESKTOP-DA6VQGS / AMD Ryzen 5 7500F 6-Core / 31.6GB / RTX 4060；
+  构建目录 `build\release\bin\lapian.exe`（Low integrity，测试根）。
+- DASH 样本：`BV1BMnv6jE5S` / cid `42915922022`（DASH 1080P AVC qn=80，
+  111s，视频 31,057,770B，音频 1,294,290B，30fps）。
+- durl 样本：同 BV/cid，`--force-durl`，qn=64 720P，14,330,392B。
+- 缓存命中样本：`BV1PAnt6qEga` / cid `42971761157`，720P qn=64，
+  5,169,220B / 2327 帧（完整 `data.mp4`）。
+
+```powershell
+$env:PATH = "$qt\bin;$env:PATH"
+
+# 1) DASH 增长会话：已缓存慢拖 + 未缓存 + 反向 + 首帧/极短 + 关窗
+& .\build\release\bin\lapian.exe --online-drag-preview-test `
+  --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --online-cache-root build\t8.6.1b-cache `
+  --online-pictures build\t8.6.1b-pictures `
+  --online-records-root build\t8.6.1b-records `
+  --drag-seconds 1 --drag-samples 60 --m1-throttle-bps 120000
+
+# 2) 缓存命中（复用完整缓存，不重新下载）
+& .\build\release\bin\lapian.exe --online-drag-preview-test `
+  --bvid BV1PAnt6qEga --cid 42971761157 --drag-cache-hit `
+  --online-cache-root build\t8.6.1a-online-cache `
+  --online-pictures build\t8.6.1b-pictures-cachehit `
+  --online-records-root build\t8.6.1b-records-cachehit `
+  --drag-seconds 1 --drag-samples 60
+
+# 3) durl 回归
+& .\build\release\bin\lapian.exe --online-drag-preview-test `
+  --bvid BV1BMnv6jE5S --cid 42915922022 --force-durl `
+  --online-cache-root build\t8.6.1b-durl-cache `
+  --online-pictures build\t8.6.1b-durl-pictures `
+  --online-records-root build\t8.6.1b-durl-records `
+  --drag-seconds 1 --drag-samples 60 --m1-throttle-bps 120000
+```
+
+### 8.4 已缓存慢拖（DASH 1080P30，最终轮）
+
+| 指标 | forward | backward |
+|---|---|---|
+| 拖动 | 15→75，1s/60 样本 | 75→45，1s/30 样本 |
+| presented | **55** | 10（无 ≥30 要求） |
+| fps_total | **54.95** | 10.00 |
+| fps_active | **61.18** | 32.26 |
+| 首张预览 | 102ms | 690ms |
+| UI gap | **69ms / 0 次 >200ms** | 69ms / 0 |
+| stale / dropped | **0 / 0** | **0 / 0** |
+| 松手 → 精确落地 | release 6ms，landing 99ms，**frame 75 / PTS 2,500,000** | release 4ms，landing 59ms，**frame 45 / PTS 1,500,000** |
+| 预览停止 | yes | yes |
+
+探针检查：33→35 项（新增首帧/极短反向），**35/0 verdict=pass**；关窗 56ms；
+`snapshot_blocked_during_drag=1`；无预览错误。
+
+### 8.5 未缓存/取消（DASH 与 durl）
+
+| 项 | DASH | durl |
+|---|---|---|
+| 未缓存目标 | 3312（`last-1`，stable 121） | 3312（stable 132） |
+| 「缓冲中（预览）」 | 0ms，含目标帧号 | 0ms |
+| `waiting` | 1（无新帧） | 1 |
+| 拖回已缓存 | waiting=0，presented 0→1 | waiting=0，presented 0→1 |
+| 未缓存松手 | UI 0ms，预览停止 | UI 0ms，预览停止 |
+| 新目标取消 | UI 0ms，落点 frame 15 | UI 0ms，落点 frame 15 |
+| UI gap | 69ms / 0 次 >200 | 66ms / 0 次 >200 |
+
+未缓存区只承诺“提示/取消/不冻结”，不承诺帧率或 P7/P9；未缓存目标不做
+`SeekToEstimatedPts` 预览，只有松手后的精确 seek 会按既有路径尝试。
+
+### 8.6 缓存命中与 durl
+
+| 项 | 缓存命中 720P | durl 720P |
+|---|---|---|
+| presented / fps_total / fps_active | **56 / 56.00 / 59.89** | **55 / 55.00 / 60.04** |
+| 松手落点 | frame 75 / PTS 3,125,000（release 39ms，landing 2ms） | frame 76 / PTS 2,533,313（release 4ms，landing 55ms） |
+| UI gap | 67ms / 0 次 >200 | 66ms / 0 次 >200 |
+| stale | 0 | 0（backward dropped=1，未呈现） |
+| 网络 | playurl=0、DASH=0 | 0 额外缓存命中请求；durl 路径 |
+| 关窗 | 9ms | 76ms |
+| checks | **25/0 pass** | **35/0 pass** |
+
+缓存命中仍走本地 `PreviewDecoder`；本地 `--drag-test`
+（`media/proxy/proxy-V1.mp4`，1080p24）**p4_fps 61.8、p4_presents 124、
+p6 p95 51.0ms、p7 back/fwd p95 0.2/10.5ms、p8 26 帧、p9 p95 52.2ms，
+pass**。`S` 拖动中拦截、首帧/极短反向均通过。
+
+### 8.7 单测与回归
+
+| 项 | 结果 |
+|---|---|
+| `lapian_online_preview_test`（新增 ctest） | pass；独立读层 open 19.72ms、2s 正向拖动 **62.98fps/126 帧**、反向 40 步精确、未缓存 waiting、End 3.18ms |
+| `ctest` | **36/36**（60.71s；含新增在线预览单测） |
+| 本地 `--key-test` | **77/0**；2s 27 帧 |
+| 在线 `--online-longpress-test`（`BV1BMnv6jE5S`，fresh cache） | **54/0 pass**；前进/后退 26/26、bad=0、UI gap 60ms、关窗 24ms |
+| 本地 `--drag-test` | p4 61.8fps / p4 124 presents、p6 p95 51.0、p7 p95 0.2/10.5、p8 26 帧、p9 p95 52.2，pass |
+| M2 | 1 条尝试被 `nav_normal_user` 拒绝（当前默认凭据 `vip_status=1`），未进入 34 项；**引用 T8.14 3/3 34/0，不写 M2 重新通过** |
+| P1/P2/P7（`bench-regression -Suites startup,step1080`，final dist） | **PASS exit 0，0 超差**：P1 p50/p95 **275.64/288.02ms**、P2 **332.66/341.7ms**（20/20）；P7 back p50/p95/max **0.20/0.90/54.24ms**、fwd **0.23/0.37/10.08ms** |
+
+### 8.8 失败样本与缺口
+
+1. **反向预览帧率低**：DASH 反向 10 presented/1s（cache 24 帧耗尽后按关键帧重解），
+   只验证单调/无 stale/精确落帧，不承诺 ≥30fps；正向已缓存区才是 ≥30fps 验收面。
+2. **未缓存区不承诺帧率**：只提示/取消/不冻结；未缓存目标不做预览 seek。
+3. **真 4K/1080P60 未测**：样本是 DASH 1080P30；4K/60 仍属 T8.15/T7.4，不写可用。
+4. **软件解码**：预览用软解 + swscale；HEVC/AV1 高码率/弱 CPU 下未测吞吐；
+   预览最长边 1280，不是源分辨率，不是精确帧。
+5. **切档中拖动未测**：产品路径有 `StopPreview`，但探针未在拖动中触发清晰度切档。
+6. **旋转在线样本未单测**：tick 使用 `session_->info().rotation`，与本地预览同一
+   rotation 来源；没有专门的在线旋转样本。
+7. **UI gap 是 16ms 心跳**：只证明没有 >200ms 事件循环停顿，不测渲染掉帧/GPU。
+8. **P1/P2 首轮热缓存噪声**：首轮同机基线 p50 漂移 +11.76%/+13.15%（exit 3），
+   复跑 final dist **PASS exit 0、0 超差**（P1 275.64/288.02ms、P2 332.66/341.7ms、
+   P7 back 0.90ms/fwd 0.37ms）；不写“零退化”，以复跑为准。
+9. **M2 未重跑**：当前默认凭据是 `vip_status=1`，M2 runner 普通用户前置失败；
+   只引用 T8.14，不把本次写成 M2 证据。
+10. **T8.14 残余风险保留**：未定位 teardown `0xC0000374`、L-1 seed 卡住仍列风险，
+    不写“无崩溃/已证明稳定”。

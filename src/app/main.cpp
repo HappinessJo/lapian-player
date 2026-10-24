@@ -1,4 +1,4 @@
-﻿#include <QAbstractButton>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
@@ -44,6 +44,7 @@
 #include "app/OnlineAuthTestRunner.h"
 #include "app/OnlineCacheManageTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
+#include "app/OnlineDragPreviewTestRunner.h"
 #include "app/OnlineFetchTestRunner.h"
 #include "app/OnlineBufferTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
@@ -514,6 +515,12 @@ int main(int argc, char* argv[]) {
   bool online_longpress_test = false;
   int online_longpress_hold_ms = 2000;
   bool online_longpress_fresh_cache = false;
+  // T8.6.1b：在线拖动预览探针（增长会话/缓存命中两轮）。
+  bool online_drag_preview_test = false;
+  int online_drag_seconds = 1;
+  int online_drag_samples = 60;
+  qint64 online_drag_start_frame = 15;
+  bool online_drag_cache_hit = false;
   QString online_m1_bvid;
   QString online_m1_cid_text;
   QString online_m1_tag;
@@ -660,6 +667,7 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--drag-samples") &&
                i + 1 < arguments.size()) {
       drag_samples = arguments[++i].toInt();
+      online_drag_samples = drag_samples;
     } else if (arguments[i] == QStringLiteral("--drag-tag") &&
                i + 1 < arguments.size()) {
       drag_tag = arguments[++i];
@@ -683,6 +691,19 @@ int main(int argc, char* argv[]) {
       online_m1_test = true;
     } else if (arguments[i] == QStringLiteral("--online-longpress-test")) {
       online_longpress_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-drag-preview-test")) {
+      online_drag_preview_test = true;
+    } else if (arguments[i] == QStringLiteral("--drag-seconds") &&
+               i + 1 < arguments.size()) {
+      online_drag_seconds = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--drag-start-frame") &&
+               i + 1 < arguments.size()) {
+      online_drag_start_frame = arguments[++i].toLongLong();
+    } else if (arguments[i] == QStringLiteral("--drag-cache-hit")) {
+      online_drag_cache_hit = true;
+    } else if (arguments[i] == QStringLiteral("--drag-throttle-bps") &&
+               i + 1 < arguments.size()) {
+      online_m1_throttle_bps = arguments[++i].toLongLong();
     } else if (arguments[i] == QStringLiteral("--longpress-hold-ms") &&
                i + 1 < arguments.size()) {
       online_longpress_hold_ms = arguments[++i].toInt();
@@ -840,7 +861,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
-      online_quality_test || online_m2_test ||
+      online_drag_preview_test || online_quality_test || online_m2_test ||
       (online_index_test && online_index_offline_video.isEmpty())) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
@@ -868,6 +889,7 @@ int main(int argc, char* argv[]) {
     if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
       const char* name = online_offline_test ? "offline"
                           : online_longpress_test ? "longpress"
+                          : online_drag_preview_test ? "drag_preview"
                           : online_quality_test ? "quality"
                           : online_m2_test ? "m2"
                           : online_index_test ? "index"
@@ -884,6 +906,21 @@ int main(int argc, char* argv[]) {
     }
     if (online_longpress_hold_ms > 10000) {
       online_longpress_hold_ms = 10000;
+    }
+    if (online_drag_seconds < 1) {
+      online_drag_seconds = 1;
+    }
+    if (online_drag_seconds > 10) {
+      online_drag_seconds = 10;
+    }
+    if (online_drag_samples < 10) {
+      online_drag_samples = 10;
+    }
+    if (online_drag_samples > 240) {
+      online_drag_samples = 240;
+    }
+    if (online_drag_start_frame < 0) {
+      online_drag_start_frame = 0;
     }
     qputenv("LAPIAN_ONLINE_LOG", "1");
     qputenv("LAPIAN_SNAPSHOT_LOG", "1");
@@ -913,23 +950,26 @@ int main(int argc, char* argv[]) {
   // T6.5：--banner-test 同样用独立根，保证波形开/音量默认，布局可复现。
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
-       online_longpress_test || online_buffer_test || online_offline_test ||
-       online_quality_test || online_fault_test) &&
+       online_longpress_test || online_drag_preview_test || online_buffer_test ||
+       online_offline_test || online_quality_test || online_fault_test) &&
       settings_root.isEmpty()) {
-    settings_root =
-        QDir::currentPath() +
-        ((settings_test || settings_expect) ? QStringLiteral("/build/t6.3-settings")
-                                           : (banner_test
-                                                  ? QStringLiteral("/build/t6.5-settings")
-                                                  : (online_quality_test
-                                                         ? QStringLiteral("/build/t8.9-settings")
-                                                         : (online_fault_test
-                                                                ? QStringLiteral("/build/t8.13-fault/settings")
-                                                                : (online_offline_test
-                                                                       ? QStringLiteral("/build/t8.7-settings")
-                                                                       : (online_longpress_test
-                                                                              ? QStringLiteral("/build/t8.6.1a-settings")
-                                                                              : QStringLiteral("/build/t8.6-settings")))))));
+    QString settings_name = QStringLiteral("/build/t8.6-settings");
+    if (settings_test || settings_expect) {
+      settings_name = QStringLiteral("/build/t6.3-settings");
+    } else if (banner_test) {
+      settings_name = QStringLiteral("/build/t6.5-settings");
+    } else if (online_quality_test) {
+      settings_name = QStringLiteral("/build/t8.9-settings");
+    } else if (online_fault_test) {
+      settings_name = QStringLiteral("/build/t8.13-fault/settings");
+    } else if (online_offline_test) {
+      settings_name = QStringLiteral("/build/t8.7-settings");
+    } else if (online_longpress_test) {
+      settings_name = QStringLiteral("/build/t8.6.1a-settings");
+    } else if (online_drag_preview_test) {
+      settings_name = QStringLiteral("/build/t8.6.1b-settings");
+    }
+    settings_root = QDir::currentPath() + settings_name;
   }
   if (settings_test || settings_expect) {
     qputenv("LAPIAN_SETTINGS_LOG", "1");
@@ -1069,7 +1109,8 @@ int main(int argc, char* argv[]) {
   }
   MainWindow window(nullptr, settings_root, !running_test_mode);
   if (online_m2_force_durl &&
-      (online_m1_test || online_longpress_test || online_quality_test)) {
+      (online_m1_test || online_longpress_test || online_drag_preview_test ||
+       online_quality_test)) {
     // T8.10 回归：--force-durl 让既有 M1/长按/档位 UI 探针走 M1 单文件路径，
     // 用来证明 DASH 双输入没有改变 M1 语义。
     window.SetOnlineDashEnabledForTest(false);
@@ -1090,45 +1131,55 @@ int main(int argc, char* argv[]) {
   if (legacy_gui_test) {
     window.SetIndexSynchronousForTest(true);
   }
-  if (online_m1_test || online_longpress_test || online_quality_test ||
+  if (online_m1_test || online_longpress_test || online_drag_preview_test ||
+      online_quality_test ||
       (online_m2_test && !online_m2_default_paths) || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
-      online_m1_cache_root =
-          QDir::currentPath() +
-          (online_offline_test
-               ? QStringLiteral("/build/t8.7-online-cache")
-               : (online_longpress_test
-                      ? QStringLiteral("/build/t8.6.1a-online-cache")
-                      : (online_quality_test
-                             ? QStringLiteral("/build/t8.9-online-cache")
-                             : (online_m2_test
-                                    ? QStringLiteral("/build/t8.10-online-cache")
-                                    : (online_index_test
-                                           ? QStringLiteral("/build/t8.11-online-cache")
-                                           : QStringLiteral("/build/t8.6-online-cache"))))));
+      QString cache_name = QStringLiteral("/build/t8.6-online-cache");
+      if (online_offline_test) {
+        cache_name = QStringLiteral("/build/t8.7-online-cache");
+      } else if (online_longpress_test) {
+        cache_name = QStringLiteral("/build/t8.6.1a-online-cache");
+      } else if (online_drag_preview_test) {
+        cache_name = QStringLiteral("/build/t8.6.1b-online-cache");
+      } else if (online_quality_test) {
+        cache_name = QStringLiteral("/build/t8.9-online-cache");
+      } else if (online_m2_test) {
+        cache_name = QStringLiteral("/build/t8.10-online-cache");
+      } else if (online_index_test) {
+        cache_name = QStringLiteral("/build/t8.11-online-cache");
+      }
+      online_m1_cache_root = QDir::currentPath() + cache_name;
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
     // T8.6.1a 可选：长按探针要求增长中的会话（缓存命中会走本地同步步进）。
     if (online_longpress_test && online_longpress_fresh_cache) {
       QDir(online_m1_cache_root).removeRecursively();
     }
+    // T8.6.1b：增长会话阶段用干净缓存，保证第一次拖到的是 `.part`；缓存命中
+    // 阶段（--drag-cache-hit）必须保留上一轮完整缓存。
+    if (online_drag_preview_test && !online_drag_cache_hit) {
+      QDir(online_m1_cache_root).removeRecursively();
+    }
     QDir().mkpath(online_m1_cache_root);
     window.SetOnlineCacheRootForTest(online_m1_cache_root);
     if (online_m1_pictures.isEmpty()) {
-      online_m1_pictures =
-          QDir::currentPath() +
-          (online_offline_test
-               ? QStringLiteral("/build/t8.7-online-pictures")
-               : (online_longpress_test
-                      ? QStringLiteral("/build/t8.6.1a-online-pictures")
-                      : (online_quality_test
-                             ? QStringLiteral("/build/t8.9-online-pictures")
-                             : (online_m2_test
-                                    ? QStringLiteral("/build/t8.10-online-pictures")
-                                    : (online_index_test
-                                           ? QStringLiteral("/build/t8.11-online-pictures")
-                                           : QStringLiteral("/build/t8.6-online-pictures"))))));
+      QString pictures_name = QStringLiteral("/build/t8.6-online-pictures");
+      if (online_offline_test) {
+        pictures_name = QStringLiteral("/build/t8.7-online-pictures");
+      } else if (online_longpress_test) {
+        pictures_name = QStringLiteral("/build/t8.6.1a-online-pictures");
+      } else if (online_drag_preview_test) {
+        pictures_name = QStringLiteral("/build/t8.6.1b-online-pictures");
+      } else if (online_quality_test) {
+        pictures_name = QStringLiteral("/build/t8.9-online-pictures");
+      } else if (online_m2_test) {
+        pictures_name = QStringLiteral("/build/t8.10-online-pictures");
+      } else if (online_index_test) {
+        pictures_name = QStringLiteral("/build/t8.11-online-pictures");
+      }
+      online_m1_pictures = QDir::currentPath() + pictures_name;
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
@@ -1154,22 +1205,25 @@ int main(int argc, char* argv[]) {
       QDir().mkpath(online_records_root);
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
-  } else if (online_m1_test || online_longpress_test || online_quality_test ||
+  } else if (online_m1_test || online_longpress_test ||
+             online_drag_preview_test || online_quality_test ||
              (online_m2_test && !online_m2_default_paths) || online_index_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
-      online_records_root =
-          QDir::currentPath() +
-          (online_longpress_test
-               ? QStringLiteral("/build/t8.6.1a-online-records")
-               : (online_quality_test
-                      ? QStringLiteral("/build/t8.9-online-records")
-                      : (online_m2_test
-                             ? QStringLiteral("/build/t8.10-online-records")
-                             : (online_index_test
-                                    ? QStringLiteral("/build/t8.11-online-records")
-                                    : QStringLiteral("/build/t8.7-online-records-m1")))));
+      QString records_name = QStringLiteral("/build/t8.7-online-records-m1");
+      if (online_longpress_test) {
+        records_name = QStringLiteral("/build/t8.6.1a-online-records");
+      } else if (online_drag_preview_test) {
+        records_name = QStringLiteral("/build/t8.6.1b-online-records");
+      } else if (online_quality_test) {
+        records_name = QStringLiteral("/build/t8.9-online-records");
+      } else if (online_m2_test) {
+        records_name = QStringLiteral("/build/t8.10-online-records");
+      } else if (online_index_test) {
+        records_name = QStringLiteral("/build/t8.11-online-records");
+      }
+      online_records_root = QDir::currentPath() + records_name;
     }
     online_records_root = QFileInfo(online_records_root).absoluteFilePath();
     QDir(online_records_root).removeRecursively();
@@ -1431,6 +1485,27 @@ int main(int argc, char* argv[]) {
     online_longpress_runner =
         std::make_unique<lapian::app::OnlineLongPressTestRunner>(&window, options);
     online_longpress_runner->Start();
+  }
+
+  // T8.6.1b：在线增长会话拖动预览（已缓存 FPS/精确落帧/未缓存提示/缓存命中）。
+  std::unique_ptr<lapian::app::OnlineDragPreviewTestRunner>
+      online_drag_preview_runner;
+  if (online_drag_preview_test) {
+    lapian::app::OnlineDragPreviewTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.page = online_m1_page;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.drag_seconds = online_drag_seconds;
+    options.drag_samples = online_drag_samples;
+    options.start_frame = online_drag_start_frame;
+    options.cache_hit_only = online_drag_cache_hit;
+    options.throttle_bytes_per_sec = online_m1_throttle_bps;
+    online_drag_preview_runner =
+        std::make_unique<lapian::app::OnlineDragPreviewTestRunner>(&window,
+                                                                   options);
+    online_drag_preview_runner->Start();
   }
 
   std::unique_ptr<lapian::app::OnlineOfflineTestRunner> online_offline_runner;
