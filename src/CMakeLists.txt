@@ -246,6 +246,8 @@ qt_add_executable(lapian WIN32
   app/OnlineQrTestRunner.h
   app/OnlineQualityTestRunner.cpp
   app/OnlineQualityTestRunner.h
+  app/OnlineVipTestRunner.cpp
+  app/OnlineVipTestRunner.h
   app/OnlineResolveDialog.cpp
   app/OnlineResolveDialog.h
   app/OnlineResolveTestRunner.cpp

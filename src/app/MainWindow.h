@@ -106,6 +106,7 @@ class MainWindow : public QMainWindow {
   qint64 OnlineStableFramesForTest() const;
   bool OnlineSeekIdleForTest() const { return !online_seek_running_; }
   int OnlineQualityForTest() const { return online_qn_; }
+  int OnlineCodecidForTest() const { return online_codecid_; }
   QString OnlinePartPathForTest() const { return online_part_path_; }
   qint64 OnlineContainerFramesForTest() const;
   // T8.10 DASH 双输入/音画/seek/内存验收 hooks。

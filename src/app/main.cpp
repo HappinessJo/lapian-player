@@ -55,6 +55,7 @@
 #include "app/OnlineM1TestRunner.h"
 #include "app/OnlineM2TestRunner.h"
 #include "app/OnlineQualityTestRunner.h"
+#include "app/OnlineVipTestRunner.h"
 #include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
@@ -261,6 +262,71 @@ int main(int argc, char* argv[]) {
       options.tag = options.bvid;
     }
     return lapian::app::RunOnlineQualityTest(options);
+  }
+
+  // T8.15：大会员可用档条件验收（O11，非 MVP 门）。无 GUI 的档位目录探针；
+  // `--ui` 走下面的真实窗口分支。只读默认 DPAPI 凭据 / --vip-sessdata-file。
+  if (HasArgument(argc, argv, "--online-vip-test") &&
+      HasArgument(argc, argv, "--vip-catalog-only")) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
+    QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+    lapian::app::OnlineVipTestOptions options;
+    options.catalog_only = true;
+    const QStringList vip_args = QCoreApplication::arguments();
+    for (int i = 1; i < vip_args.size(); ++i) {
+      const QString& arg = vip_args[i];
+      auto take = [&](QString* target) {
+        if (i + 1 < vip_args.size()) {
+          *target = vip_args[++i];
+          return true;
+        }
+        return false;
+      };
+      if (arg == QStringLiteral("--bvid")) {
+        take(&options.bvid);
+      } else if (arg.startsWith(QStringLiteral("--bvid="))) {
+        options.bvid = arg.mid(static_cast<int>(std::strlen("--bvid=")));
+      } else if (arg == QStringLiteral("--cid")) {
+        take(&options.cid_text);
+      } else if (arg.startsWith(QStringLiteral("--cid="))) {
+        options.cid_text = arg.mid(static_cast<int>(std::strlen("--cid=")));
+      } else if (arg == QStringLiteral("--tag")) {
+        take(&options.tag);
+      } else if (arg.startsWith(QStringLiteral("--tag="))) {
+        options.tag = arg.mid(static_cast<int>(std::strlen("--tag=")));
+      } else if (arg == QStringLiteral("--vip-sessdata-file")) {
+        take(&options.sessdata_file);
+      } else if (arg.startsWith(QStringLiteral("--vip-sessdata-file="))) {
+        options.sessdata_file =
+            arg.mid(static_cast<int>(std::strlen("--vip-sessdata-file=")));
+      } else if (arg == QStringLiteral("--timeout-ms")) {
+        QString text;
+        if (take(&text)) {
+          options.timeout_ms = text.toInt();
+        }
+      } else if (arg.startsWith(QStringLiteral("--timeout-ms="))) {
+        options.timeout_ms =
+            arg.mid(static_cast<int>(std::strlen("--timeout-ms="))).toInt();
+      }
+    }
+    options.cid = options.cid_text.toLongLong();
+    if (options.cid <= 0) {
+      options.cid = 0;
+    }
+    if (options.timeout_ms < 3000) {
+      options.timeout_ms = 3000;
+    }
+    if (options.timeout_ms > 120000) {
+      options.timeout_ms = 120000;
+    }
+    if (options.tag.isEmpty()) {
+      options.tag = options.bvid;
+    }
+    return lapian::app::RunOnlineVipCatalogTest(options);
   }
 
   // T8.4：可增长读层探针同样无 GUI、离线（本地 faststart 样本 + 临时缓存根）。
@@ -549,6 +615,15 @@ int main(int argc, char* argv[]) {
   bool online_quality_odd_qn = false;
   bool online_quality_no_catalog = false;
   QString online_quality_sessdata_file;
+  // T8.15：大会员可用档条件验收（O11，非门）。
+  bool online_vip_test = false;
+  int online_vip_qn = 0;
+  int online_vip_codecid = 0;
+  int online_vip_expect_auto = -1;
+  int online_vip_play_seconds = 10;
+  int online_vip_seeks = 20;
+  int online_vip_switch_qn = 80;
+  QString online_vip_sessdata_file;
   // T8.10：DASH 双输入验收（真实窗口）。
   bool online_m2_test = false;
   bool online_m2_force_durl = false;
@@ -745,6 +820,29 @@ int main(int argc, char* argv[]) {
       online_m2_seeks = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--online-index-test")) {
       online_index_test = true;
+    } else if (arguments[i] == QStringLiteral("--online-vip-test")) {
+      online_vip_test = true;
+    } else if (arguments[i] == QStringLiteral("--vip-qn") &&
+               i + 1 < arguments.size()) {
+      online_vip_qn = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-codecid") &&
+               i + 1 < arguments.size()) {
+      online_vip_codecid = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-expect-auto") &&
+               i + 1 < arguments.size()) {
+      online_vip_expect_auto = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-play-seconds") &&
+               i + 1 < arguments.size()) {
+      online_vip_play_seconds = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-seeks") &&
+               i + 1 < arguments.size()) {
+      online_vip_seeks = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-switch-qn") &&
+               i + 1 < arguments.size()) {
+      online_vip_switch_qn = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--vip-sessdata-file") &&
+               i + 1 < arguments.size()) {
+      online_vip_sessdata_file = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--online-fault-test")) {
       online_fault_test = true;
     } else if (arguments[i] == QStringLiteral("--fault-media") &&
@@ -862,6 +960,7 @@ int main(int argc, char* argv[]) {
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
       online_drag_preview_test || online_quality_test || online_m2_test ||
+      online_vip_test ||
       (online_index_test && online_index_offline_video.isEmpty())) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
@@ -886,7 +985,34 @@ int main(int argc, char* argv[]) {
     if (online_m1_tag.isEmpty()) {
       online_m1_tag = online_m1_bvid;
     }
-    if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
+    if (online_vip_test) {
+      // T8.15：cid 可省略，探针用 view 的 P1 cid；bvid 必填。
+      if (online_m1_bvid.isEmpty()) {
+        std::fprintf(stderr,
+                     "online_vip_fail reason=missing_bvid usage=--online-vip-test "
+                     "--ui --bvid BV... [--cid 123]\n");
+        std::fflush(stderr);
+        return 2;
+      }
+      if (online_vip_qn < 0) {
+        online_vip_qn = 0;
+      }
+      if (online_vip_codecid < 0 || online_vip_codecid > 13) {
+        online_vip_codecid = 0;
+      }
+      if (online_vip_play_seconds < 1) {
+        online_vip_play_seconds = 1;
+      }
+      if (online_vip_play_seconds > 120) {
+        online_vip_play_seconds = 120;
+      }
+      if (online_vip_seeks < 0) {
+        online_vip_seeks = 0;
+      }
+      if (online_vip_seeks > 100) {
+        online_vip_seeks = 100;
+      }
+    } else if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
       const char* name = online_offline_test ? "offline"
                           : online_longpress_test ? "longpress"
                           : online_drag_preview_test ? "drag_preview"
@@ -951,7 +1077,8 @@ int main(int argc, char* argv[]) {
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
        online_longpress_test || online_drag_preview_test || online_buffer_test ||
-       online_offline_test || online_quality_test || online_fault_test) &&
+       online_offline_test || online_quality_test || online_vip_test ||
+       online_fault_test) &&
       settings_root.isEmpty()) {
     QString settings_name = QStringLiteral("/build/t8.6-settings");
     if (settings_test || settings_expect) {
@@ -960,6 +1087,8 @@ int main(int argc, char* argv[]) {
       settings_name = QStringLiteral("/build/t6.5-settings");
     } else if (online_quality_test) {
       settings_name = QStringLiteral("/build/t8.9-settings");
+    } else if (online_vip_test) {
+      settings_name = QStringLiteral("/build/t8.15-settings");
     } else if (online_fault_test) {
       settings_name = QStringLiteral("/build/t8.13-fault/settings");
     } else if (online_offline_test) {
@@ -1132,7 +1261,7 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_drag_preview_test ||
-      online_quality_test ||
+      online_quality_test || online_vip_test ||
       (online_m2_test && !online_m2_default_paths) || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
@@ -1145,6 +1274,8 @@ int main(int argc, char* argv[]) {
         cache_name = QStringLiteral("/build/t8.6.1b-online-cache");
       } else if (online_quality_test) {
         cache_name = QStringLiteral("/build/t8.9-online-cache");
+      } else if (online_vip_test) {
+        cache_name = QStringLiteral("/build/t8.15-online-cache");
       } else if (online_m2_test) {
         cache_name = QStringLiteral("/build/t8.10-online-cache");
       } else if (online_index_test) {
@@ -1174,6 +1305,8 @@ int main(int argc, char* argv[]) {
         pictures_name = QStringLiteral("/build/t8.6.1b-online-pictures");
       } else if (online_quality_test) {
         pictures_name = QStringLiteral("/build/t8.9-online-pictures");
+      } else if (online_vip_test) {
+        pictures_name = QStringLiteral("/build/t8.15-online-pictures");
       } else if (online_m2_test) {
         pictures_name = QStringLiteral("/build/t8.10-online-pictures");
       } else if (online_index_test) {
@@ -1206,7 +1339,7 @@ int main(int argc, char* argv[]) {
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
   } else if (online_m1_test || online_longpress_test ||
-             online_drag_preview_test || online_quality_test ||
+             online_drag_preview_test || online_quality_test || online_vip_test ||
              (online_m2_test && !online_m2_default_paths) || online_index_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
@@ -1218,6 +1351,8 @@ int main(int argc, char* argv[]) {
         records_name = QStringLiteral("/build/t8.6.1b-online-records");
       } else if (online_quality_test) {
         records_name = QStringLiteral("/build/t8.9-online-records");
+      } else if (online_vip_test) {
+        records_name = QStringLiteral("/build/t8.15-online-records");
       } else if (online_m2_test) {
         records_name = QStringLiteral("/build/t8.10-online-records");
       } else if (online_index_test) {
@@ -1424,6 +1559,30 @@ int main(int argc, char* argv[]) {
     online_quality_runner =
         std::make_unique<lapian::app::OnlineQualityUiTestRunner>(&window, options);
     online_quality_runner->Start();
+  }
+
+  // T8.15：大会员可用档条件验收（真实窗口；O11，非 MVP 门）。
+  std::unique_ptr<lapian::app::OnlineVipUiTestRunner> online_vip_runner;
+  if (online_vip_test) {
+    lapian::app::OnlineVipTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid_text = online_m1_cid_text;
+    options.cid = online_m1_cid;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.qn = online_vip_qn;
+    options.codecid = online_vip_codecid;
+    options.expect_auto = online_vip_expect_auto;
+    options.play_seconds = online_vip_play_seconds;
+    options.seeks = online_vip_seeks;
+    options.switch_qn = online_vip_switch_qn;
+    options.sessdata_file = online_vip_sessdata_file;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    online_vip_runner =
+        std::make_unique<lapian::app::OnlineVipUiTestRunner>(&window, options);
+    online_vip_runner->Start();
   }
 
   // T8.10：DASH 双输入真实窗口验收（音画/seek/缓存命中/内存）。
