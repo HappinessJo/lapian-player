@@ -382,6 +382,7 @@
 | `docs/handoff-2026-10-24-dp1.md` | v1 | 2026-10-24 | DP-1 交接：实现/设备生命周期/回退、验证数字、残余、DP-2 下一步；4K 硬解关闭 |
 | `docs/handoff-2026-10-24-drag-preview-plan.md` | v1 | 2026-10-24 | DP 规划交接：基线 `079f0dd`、现状/瓶颈/指标、DP-1 先做硬件预览 spike |
 | `docs/next-session-prompt-dp1.md` | v1 | 2026-10-24 | 下一会话提示词：DP-1 硬件预览 + 诊断；含基线/文件/验收/停止条件 |
+| `docs/next-session-prompt-dp2.md` | v1 | 2026-10-24 | 下一会话提示词：DP-2 反向缓存/预取/远跳粗帧；含 DP-1 基线/预算/验收/停止/交付 |
 | `docs/handoff-2026-10-23-s3.md` | v1.2 | 2026-10-23 | S3 交接：T8.0 完成、DEC/B 拍板结果、ADR 附条件接受、S4 从 T8.1 开始 |
 | `docs/perf/v2-online-resolve.md` | v1.0 | 2026-10-23 | T8.1 解析层证据：BV/URL、匿名 view、分P、错误矩阵、取消/超时、本地回归、dist 导入表 |
 | `docs/handoff-2026-10-23-t8.1.md` | v1 | 2026-10-23 | 历史交接：T8.1 接口、156 项探针、缺口、T8.2 所需账号/网络/curl 对照 |

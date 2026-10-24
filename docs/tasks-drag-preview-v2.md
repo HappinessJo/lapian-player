@@ -103,6 +103,8 @@
 
 ## DP-2 反向缓存/预取/远跳粗帧
 
+- **下一会话提示词**：[next-session-prompt-dp2.md](next-session-prompt-dp2.md)。
+
 ### 目标
 
 反向拖动优先命中已解过的帧；远跳先出低分辨率粗帧；缓存有界。
