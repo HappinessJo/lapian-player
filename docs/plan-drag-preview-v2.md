@@ -1,13 +1,14 @@
 # 拖动预览 v2 规划（DP 计划，非门）
 
-- **版本**：v1.1（2026-10-24，DP-3 完成）
-- **状态**：**DP-0/DP-1/DP-2/DP-3 已实施（1080p 硬件默认；DP-2/DP-3
-  强制软件快反向残余）；DP-4 待做**。这是本地拖动预览的体验改造计划，不是
+- **版本**：v1.2（2026-10-24，DP-4 完成）
+- **状态**：**DP-0/DP-1/DP-2/DP-3/DP-4 已实施（1080p 硬件默认；DP-2/DP-3
+  强制软件快反向残余；4K 只记录）**。这是本地拖动预览的体验改造计划，不是
   M1/M2/P4/P7 验收变更，也不是 v2 在线任务。
 - **基线**：提交 `079f0dd`（本地快拖热修），dist 34.48MB/25 文件；
   当前 `ctest` 37/37（DP-2 新增缓存单测）、key 77/0。
 - **关联证据**：[local-drag-fast-2026-10-24.md](perf/local-drag-fast-2026-10-24.md)、
-  [handoff-2026-10-24-drag-fast.md](handoff-2026-10-24-drag-fast.md)。
+  [handoff-2026-10-24-drag-fast.md](handoff-2026-10-24-drag-fast.md)、
+  [DP-4 证据](perf/drag-preview-dp4.md)、[DP-4 交接](handoff-2026-10-24-dp4.md)。
 
 ---
 
@@ -243,6 +244,14 @@ FarJump 用 `deferred_exact` 保证先粗后精，并禁止精确目标后的粗
 - `dist` 重建并验证 Medium 副本；
 - 文档写清 1080p 体验结果与 4K 残余；
 - 不写 M1/M2/P4/P7 通过。
+
+**完成记录（2026-10-24）**：从 `d586548` clean Release 重建，
+`ctest` 37/37、key 77/0、T8.6.1b 35/0；dist 25 文件 / 34.55MB，
+Medium 副本本地拖动/松手/键位/循环播放通过；`--drag-test` P4 64.5、
+P6 22.3、P7 0.1/16.1、P8 12.9、P9 39.8；缓存峰值 233.4MiB、
+缩略图 ≤2.72MiB、`readbacks=0`。强制软件快反向与 4K 仍为残余/只记录；
+未改门/数字/代码。证据 [perf/drag-preview-dp4.md](perf/drag-preview-dp4.md)、
+交接 [handoff-2026-10-24-dp4.md](handoff-2026-10-24-dp4.md)。
 
 ## 7. 风险与回滚
 

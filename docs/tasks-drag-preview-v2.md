@@ -1,6 +1,6 @@
 # 拖动预览 v2 任务表（DP 任务，非门）
 
-- **版本**：v1.3（2026-10-24；DP-3 完成）
+- **版本**：v1.4（2026-10-24；DP-4 完成，DP-0…DP-4 收口）
 - **计划**：[plan-drag-preview-v2.md](plan-drag-preview-v2.md)
 - **基线**：`079f0dd`（本地快拖热修）+ `bf37ccd`（DP-0）；dist 34.48MB/25、
   `ctest` 36/36、key 77/0。
@@ -18,7 +18,7 @@
 | DP-1 硬件预览 + 诊断 | **完成（2026-10-24，1080p；4K 硬解关闭/只记录）** | DP-0 |
 | DP-2 反向缓存/预取/远跳粗帧 | **完成（2026-10-24；1080p 硬件默认；强制软件快反向残余）** | DP-1 |
 | DP-3 交互策略 + 验收探针 | **完成（2026-10-24；1080p 硬件默认；强制软件快反向残余）** | DP-1/DP-2 |
-| DP-4 集成/发布 | 待开始 | DP-1/2/3 |
+| DP-4 集成/发布 | **完成（2026-10-24；dist 34.55MB/25、Medium 副本；强制软件/4K 残余）** | DP-1/2/3 |
 
 ---
 
@@ -226,6 +226,28 @@
 - DP-1/2/3 指标复跑；
 - `dist` 重建、Medium 副本验证、工作区干净；
 - 文档明确 1080p 体验与 4K 残余；不写 M1/M2/P4/P7 通过。
+
+### 完成记录（2026-10-24）
+
+- 从 `d586548` clean Release 重建：`ctest` **37/37**（64.40s）、
+  `--key-test` **77/0**、T8.6.1b **35/0**（UI gap 93ms）。
+- `dist` **25 文件 / 36,227,912B / 34.55MB**；无 QtNetwork/
+  D3dcompiler_47/tls/networkinformation/generic；导入/环境自检通过。
+- 重建后复跑：策略矩阵 `all_pass=1`；`+60` 80.7fps、`-60`
+  50.4–57.5fps、`-20` 49.8fps、`-1` 命中 84.2%/lag p95 2；远跳粗帧
+  21.9/20.5ms → 精确 29.8/40.8ms；`--drag-test` P4 64.5、P6 22.3、
+  P7 0.1/16.1、P8 12.9、P9 39.8；缓存峰值 233.4MiB、
+  缩略图 ≤2.72MiB、`readbacks=0`。
+- Medium 副本：`%LOCALAPPDATA%\Programs\拉片软件`（stage 整目录复制，
+  hash 与 dist 一致）；`--drag-test`（P4/P7 只记录）、
+  `--drag-strategy-test`、key 77/0、`--loop-test` 均完成；
+  默认凭据/设置/记录/缓存未写。
+- 打包：portable zip 14.43MB、setup 11.86MB；setup 从 E: 启动被主机
+  SmartScreen/策略拦截，未重装（T7.6 结论不重开）。
+- 残余：强制软件 `-20` 10.5fps/190ms、`-60` 33.4fps/50ms；4K 只记录
+  （67.6fps/11.5ms/`source_too_large`）。不写 M1/M2/P4/P7 通过。
+- 证据 [perf/drag-preview-dp4.md](perf/drag-preview-dp4.md)、交接
+  [handoff-2026-10-24-dp4.md](handoff-2026-10-24-dp4.md)。
 
 ### 交付
 
