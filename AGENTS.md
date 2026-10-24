@@ -403,7 +403,8 @@
 | `docs/perf/v2-online-index.md` | v1.0 | 2026-10-24 | **当前证据**：T8.11 渐进索引/波形/总帧数；增量 builder（前沿 guard/resume_pos/快照/tail guard 48/统计）；OB-3 真实在线 27/0（首次索引 128ms、30s 内容 6.209s、20/20 seek 落点 0、exact 5306、波形 0.525 帧、UI gap 58ms、opens=1/reopens=0/read_ratio=1.000）、离线 2MB/s 22/0、单测 28/0；ctest 33/33；未判 M2 |
 | `docs/handoff-2026-10-24-t8.11.md` | v1 | 2026-10-24 | **当前交接**：T8.11 接口/数字/决定/缺口、T8.12 需要；非门；一个 commit |
 | `docs/handoff-2026-10-24-t8.12.md` | v1 | 2026-10-24 | **当前交接**：T8.12 档位策略/手动切档/降帧提示；接口、数字、决定、缺口、T8.13 起点；非门；一个 commit |
-| `docs/next-session-prompt-t8.13.md` | v1 | 2026-10-24 | **当前提示词**：T8.12 后刷新，基线 `cbf4f31`；新会话 T8.13（网络/并发加固）；≥10 故障矩阵、`--online-fault-test`、错误 ≤5s、关闭 ≤1s、4 读者 10min、真实休眠不可做只能写未验证、停止条件 |
+| `docs/next-session-prompt-t8.14.md` | v1 | 2026-10-24 | **当前提示词**：T8.13 后刷新，基线 `01b98d5`；新会话 T8.14（M2 门）；6 条硬条件、OP1–OP8（DEC-2）、OP4 5min 缺探针需最小补探针、OP5 需 Medium 副本、失败矩阵引用 T8.13、本地 O9/F1–F8、停止条件 |
+| `docs/next-session-prompt-t8.13.md` | v1 | 2026-10-24 | 历史提示词（T8.13 已执行）：T8.12 后刷新，基线 `cbf4f31`；≥10 故障矩阵、`--online-fault-test`、错误 ≤5s、关闭 ≤1s、4 读者 10min、真实休眠写未验证 |
 | `docs/next-session-prompt-t8.12.md` | v1 | 2026-10-24 | 历史提示词（T8.12 已执行）：T8.11 后刷新，基线 `a6cdf6d`；新会话 T8.12（档位策略/降帧提示）；fps 口径/权限列档/手动切档/PTS 映射/降帧横幅+角标/停止条件 |
 | `docs/next-session-prompt-t8.11.md` | v1 | 2026-10-24 | 历史提示词：T8.10 后刷新，基线 `b560607`；T8.11（渐进索引/波形/总帧数） |
 | `docs/next-session-prompt-t8.10.md` | v1 | 2026-10-24 | 历史提示词：T8.9 后刷新，基线 `a3cf655`；新会话 T8.10（DASH 双输入）；边界/验收/代码入口/spike 清单/音频缓存键建议/停止条件 |
