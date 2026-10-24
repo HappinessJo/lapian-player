@@ -654,6 +654,10 @@ bool DownloadJob::WritePart(const std::uint8_t* data, std::size_t size,
     stats_.written_bytes = written_;
     stats_.downloaded_bytes = session_bytes_;
   }
+  // T8.11：测试慢增长在写盘后、发布前节流；产品默认 0 不进入。
+  if (options_.throttle_bytes_per_sec > 0) {
+    ThrottleWrite(static_cast<std::size_t>(written));
+  }
   // 必须先写盘再发布：reader 只读 Published 以内的字节。
   source_->Publish(updated);
 
@@ -692,6 +696,28 @@ bool DownloadJob::SleepInterruptible(int ms) {
     return false;
   }
   return true;
+}
+
+void DownloadJob::ThrottleWrite(std::size_t size) {
+  const std::int64_t rate = options_.throttle_bytes_per_sec;
+  if (rate <= 0 || size == 0) {
+    return;
+  }
+  const std::int64_t now = NowMs();
+  if (throttle_start_ms_ == 0) {
+    throttle_start_ms_ = now;
+  }
+  throttle_bytes_ += static_cast<std::int64_t>(size);
+  const std::int64_t target_ms =
+      throttle_start_ms_ + throttle_bytes_ * 1000 / rate;
+  while (!IsCancelRequested()) {
+    const std::int64_t remaining = target_ms - NowMs();
+    if (remaining <= 0) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(
+        std::min<std::int64_t>(remaining, 20)));
+  }
 }
 
 bool DownloadJob::WaitWhilePaused() {

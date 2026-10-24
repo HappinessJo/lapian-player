@@ -97,6 +97,9 @@ struct DownloadOptions {
   // T8.6：写完后不立即 rename，进入 kAwaitingFinalize；调用方先停所有 reader，
   // 再调用 FinalizeCompleted()。T8.5 默认 false，行为不变。
   bool defer_finalize = false;
+  // T8.11 测试钩子：>0 时按字节/秒节流写入（1–2MB/s 复现“边下边索引”）；
+  // 默认 0 不改变产品下载速度/发布语义。
+  std::int64_t throttle_bytes_per_sec = 0;
 };
 
 class DownloadJob {
@@ -148,6 +151,8 @@ class DownloadJob {
   bool IsPauseRequested() const;
   bool SleepInterruptible(int ms);
   bool WaitWhilePaused();
+  // 仅测试慢增长：按 throttle_bytes_per_sec 均匀节流，取消/暂停时提前返回。
+  void ThrottleWrite(std::size_t size);
   void UpdateState(DownloadState state);
   void SetStats(const std::function<void(DownloadStats*)>& update);
 
@@ -185,6 +190,8 @@ class DownloadJob {
   std::int64_t session_bytes_ = 0;  // 本次会话写入（含覆盖）
   std::int64_t last_progress_ms_ = 0;
   std::int64_t run_start_ms_ = 0;
+  std::int64_t throttle_start_ms_ = 0;
+  std::int64_t throttle_bytes_ = 0;
   int sink_av_error_ = 0;
 };
 

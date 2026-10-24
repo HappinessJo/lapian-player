@@ -1442,6 +1442,7 @@ void MainWindow::EnsureOnlineSession() {
   if (online_test_threshold_ > 0) {
     online_->SetReadyThresholdForTest(online_test_threshold_);
   }
+  online_->SetDownloadThrottleForTest(online_download_throttle_bps_, 0);
   // T8.9：档位目录默认首帧后异步取；测试可关/注入（注入不联网）。
   online_->SetQualityCatalogEnabledForTest(online_quality_enabled_);
   if (has_online_test_quality_) {
@@ -1834,6 +1835,9 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
+  online_index_pending_.reset();
+  online_index_pending_generation_ = 0;
+  online_index_stats_.clear();
   online_last_error_.clear();
   online_buffer_event_count_ = 0;
   online_gate_last_ = true;
@@ -2058,6 +2062,9 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
+  online_index_pending_.reset();
+  online_index_pending_generation_ = 0;
+  online_index_stats_.clear();
   online_last_error_.clear();
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
@@ -2192,6 +2199,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   // 波形：独立 GrowingFormat，渐进填充；不因未下载完而阻塞 UI。
   if (has_audio) {
     waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
+    waveform_last_bucket_count_ = 0;
     const bool waveform_started =
         info.dash
             ? waveform_->StartGrowing(info.audio_source, info.audio_part_path.toUtf8().constData(),
@@ -2392,7 +2400,11 @@ void MainWindow::ApplyOnlineProgress(
     return;
   }
   online_published_bytes_ = progress.published;
-  online_total_bytes_ = progress.total;
+  // T8.11：首帧后 online_total_bytes_ 只代表视频流（索引/缓存进度分项），
+  // 不能被 DASH 视频+音频的合并 progress.total 覆盖。
+  if (!online_ready_) {
+    online_total_bytes_ = progress.total;
+  }
   if (online_ready_) {
     return;  // 首帧后不覆盖播放/seek 状态栏；下载继续在后台。
   }
@@ -2422,6 +2434,8 @@ void MainWindow::ApplyOnlineProgress(
 
 void MainWindow::StopOnlineIndexBuild() {
   ++online_index_generation_;
+  online_index_pending_.reset();
+  online_index_pending_generation_ = 0;
   if (online_index_cancel_) {
     online_index_cancel_->store(true, std::memory_order_relaxed);
   }
@@ -2431,8 +2445,72 @@ void MainWindow::StopOnlineIndexBuild() {
   online_index_cancel_.reset();
 }
 
+void MainWindow::InstallPendingOnlineIndex() {
+  if (!online_index_pending_ || online_seek_running_) {
+    return;
+  }
+  auto built = std::move(online_index_pending_);
+  online_index_pending_.reset();
+  if (online_index_pending_generation_ != online_index_generation_) {
+    return;
+  }
+  InstallOnlineIndexSnapshot(std::move(built));
+}
+
+void MainWindow::InstallOnlineIndexSnapshot(
+    std::shared_ptr<lapian::media::OnlineIndexResult> built) {
+  if (!built || !built->ok || !online_mode_ || session_ == nullptr) {
+    return;
+  }
+  // 帧号前缀必须稳定；若新快照在已暴露前缀上出现不同 PTS，不安装，
+  // 避免 UI 帧号漂移（T8.6 语义不变）。
+  const lapian::media::FrameIndex& current = session_->index();
+  const std::size_t compare = std::min(current.size(), built->index.size());
+  for (std::size_t i = 0; i < compare; ++i) {
+    const lapian::media::FrameIndexEntry* a =
+        current.Entry(static_cast<std::int64_t>(i));
+    const lapian::media::FrameIndexEntry* b =
+        built->index.Entry(static_cast<std::int64_t>(i));
+    if (a != nullptr && b != nullptr && a->pts_us != b->pts_us) {
+      if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+        std::fprintf(stderr,
+                     "T8.11 online_index_prefix_changed frame=%zu old=%lld "
+                     "new=%lld\n",
+                     i, static_cast<long long>(a->pts_us),
+                     static_cast<long long>(b->pts_us));
+        std::fflush(stderr);
+      }
+      return;
+    }
+  }
+  const bool first_install = online_stable_frames_ == 0;
+  const int previous_stable = online_stable_frames_;
+  online_stable_frames_ = built->stable_frames;
+  online_index_complete_ = built->complete;
+  online_spans_ = std::move(built->spans);
+  const double build_ms = built->build_ms;
+  session_->InstallOnlineIndex(std::move(built->index), build_ms);
+  ApplyIndexState();
+  ReconcileOnlineMarks();
+  if (mark_action_ != nullptr) {
+    mark_action_->setEnabled(online_stable_frames_ > 0);
+  }
+  if (online_index_complete_) {
+    statusBar()->showMessage(
+        QStringLiteral("在线索引完成：%1 帧").arg(online_stable_frames_), 5000);
+  } else if (first_install ||
+             (previous_stable > 0 &&
+              online_stable_frames_ - previous_stable >= 30)) {
+    statusBar()->showMessage(
+        QStringLiteral("在线索引：已缓存 %1 帧（扫描中）")
+            .arg(online_stable_frames_),
+        2000);
+  }
+}
+
 void MainWindow::StartOnlineIndexBuild() {
   StopOnlineIndexBuild();
+  online_index_stats_.clear();
   if (!online_ready_ || session_ == nullptr || !session_->IsGrowing()) {
     return;
   }
@@ -2448,76 +2526,104 @@ void MainWindow::StartOnlineIndexBuild() {
   try {
     online_index_thread_ =
         std::thread([this, generation, source, part, stream, cancel]() {
+          std::unique_ptr<lapian::media::IncrementalOnlineIndexBuilder> builder;
+          std::string create_error;
+          int create_failures = 0;
+          int last_posted_total = -1;
+          auto last_post = std::chrono::steady_clock::now() -
+                           std::chrono::seconds(1);
           while (!cancel->load(std::memory_order_relaxed)) {
-            auto built = std::make_shared<lapian::media::OnlineIndexResult>(
-                lapian::media::BuildOnlineIndex(source, part, stream, 48,
-                                                cancel.get()));
+            if (!builder) {
+              builder = lapian::media::IncrementalOnlineIndexBuilder::Create(
+                  source, part, stream, 48, &create_error);
+              if (!builder) {
+                if (++create_failures == 1 ||
+                    create_failures % 20 == 0) {
+                  std::fprintf(
+                      stderr,
+                      "T8.11 online_index_open_wait attempts=%d published=%lld "
+                      "error=%s\n",
+                      create_failures,
+                      static_cast<long long>(source->Published()),
+                      create_error.c_str());
+                  std::fflush(stderr);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+              }
+              create_failures = 0;
+            }
+            const lapian::media::OnlineIndexStepInfo step =
+                builder->Step(cancel.get(), 40, 8192);
             if (cancel->load(std::memory_order_relaxed)) {
               return;
             }
-            QMetaObject::invokeMethod(
-                this,
-                [this, generation, built]() {
-                  if (generation != online_index_generation_ ||
-                      !online_mode_ || session_ == nullptr) {
-                    return;
-                  }
-                  // seek worker 正在读同一个 FrameIndex；不要并发替换它。
-                  if (online_seek_running_) {
-                    return;
-                  }
-                  if (!built->ok) {
-                    return;
-                  }
-                  // 帧号前缀必须稳定；若新扫描在已暴露前缀上出现不同 PTS，
-                  // 不安装新索引，避免 UI 帧号漂移。
-                  const lapian::media::FrameIndex& current = session_->index();
-                  const std::size_t compare =
-                      std::min(current.size(), built->index.size());
-                  for (std::size_t i = 0; i < compare; ++i) {
-                    const lapian::media::FrameIndexEntry* a = current.Entry(
-                        static_cast<std::int64_t>(i));
-                    const lapian::media::FrameIndexEntry* b = built->index.Entry(
-                        static_cast<std::int64_t>(i));
-                    if (a != nullptr && b != nullptr && a->pts_us != b->pts_us) {
-                      if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
-                        std::fprintf(stderr,
-                                     "T8.6 online_index_prefix_changed frame=%zu "
-                                     "old=%lld new=%lld\n",
-                                     i, static_cast<long long>(a->pts_us),
-                                     static_cast<long long>(b->pts_us));
-                        std::fflush(stderr);
-                      }
-                      return;
-                    }
-                  }
-                  online_stable_frames_ = built->stable_frames;
-                  online_index_complete_ = built->complete;
-                  online_spans_ = built->spans;
-                  session_->InstallOnlineIndex(std::move(built->index),
-                                               built->build_ms);
-                  ApplyIndexState();
-                  ReconcileOnlineMarks();
-                  if (online_index_complete_) {
-                    statusBar()->showMessage(
-                        QStringLiteral("在线索引完成：%1 帧").arg(online_stable_frames_),
-                        5000);
-                  } else {
-                    statusBar()->showMessage(
-                        QStringLiteral("在线索引：已缓存 %1 帧（扫描中）")
-                            .arg(online_stable_frames_),
-                        2000);
-                  }
-                  // 索引首次覆盖当前帧后，允许标记/时间轴导航。
-                  if (mark_action_ != nullptr) {
-                    mark_action_->setEnabled(online_stable_frames_ > 0);
-                  }
-                },
-                Qt::QueuedConnection);
-            if (built->complete) {
+            if (!step.ok) {
+              if (step.cancelled) {
+                return;
+              }
+              std::fprintf(stderr,
+                           "T8.11 online_index_step_failed error=%s "
+                           "total=%d complete=%d\n",
+                           step.error.c_str(), step.total_frames,
+                           step.complete ? 1 : 0);
+              std::fflush(stderr);
               return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(650));
+            const auto now = std::chrono::steady_clock::now();
+            const bool due =
+                step.complete ||
+                (now - last_post >= std::chrono::milliseconds(250) &&
+                 builder->total_frames() != last_posted_total);
+            if (due) {
+              auto built =
+                  std::make_shared<lapian::media::OnlineIndexResult>();
+              if (builder->Snapshot(built.get())) {
+                last_post = now;
+                last_posted_total = builder->total_frames();
+                const lapian::media::OnlineIndexStats stats = builder->stats();
+                const QString stats_text =
+                    QStringLiteral(
+                        "steps=%1 opens=%2 reopens=%3 skips=%4 from_start=%5 "
+                        "packets=%6 parsed=%7 read_bytes=%8 max_step_ms=%9 "
+                        "complete=%10")
+                        .arg(stats.steps)
+                        .arg(stats.opens)
+                        .arg(stats.reopens)
+                        .arg(stats.resume_skips)
+                        .arg(stats.resume_from_start)
+                        .arg(stats.packets)
+                        .arg(stats.parsed_frames)
+                        .arg(stats.read_bytes)
+                        .arg(QString::number(stats.max_step_ms, 'f', 2))
+                        .arg(builder->complete() ? 1 : 0);
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, generation, built, stats_text]() {
+                      if (generation != online_index_generation_ ||
+                          !online_mode_ || session_ == nullptr) {
+                        return;
+                      }
+                      online_index_stats_ = stats_text;
+                      if (online_seek_running_) {
+                        // seek worker 正在读同一个 FrameIndex；等它结束后
+                        // 再安装最新快照，complete 快照不能被丢掉。
+                        online_index_pending_ = built;
+                        online_index_pending_generation_ = generation;
+                        return;
+                      }
+                      InstallOnlineIndexSnapshot(std::move(built));
+                    },
+                    Qt::QueuedConnection);
+              }
+            }
+            if (step.complete) {
+              return;
+            }
+            if (step.at_frontier || (!step.appended && !step.budget_hit)) {
+              // 等下载增长；guard 保证正常情况下不会在这里撞 ETIMEDOUT。
+              std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            }
           }
         });
   } catch (...) {
@@ -2821,6 +2927,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
     }
     online_seek_running_ = false;
     online_session_poisoned_ = true;
+    InstallPendingOnlineIndex();
   }
   // 上一 worker 成功结束后 std::thread 仍 joinable；不先 join 就 move 赋值会
   // std::terminate（0xC0000409）。
@@ -2899,6 +3006,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                     online_seek_running_ = false;
                     online_last_error_ = result->error;
                     statusBar()->showMessage(result->error, 8000);
+                    InstallPendingOnlineIndex();
                   },
                   Qt::QueuedConnection);
               return;
@@ -2960,6 +3068,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                   statusBar()->showMessage(
                       QStringLiteral("跳帧失败：%1").arg(result->error), 6000);
                   OnOnlineStepFailed(target);
+                  InstallPendingOnlineIndex();
                 },
                 Qt::QueuedConnection);
             return;
@@ -3025,6 +3134,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 }
                 statusBar()->showMessage(
                     QStringLiteral("第 %1 帧（在线）").arg(target), 2000);
+                InstallPendingOnlineIndex();
                 OnOnlineStepLanded(target);
               },
               Qt::QueuedConnection);
@@ -3032,6 +3142,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
   } catch (...) {
     online_seek_running_ = false;
     statusBar()->showMessage(QStringLiteral("在线 seek 线程启动失败"), 5000);
+    InstallPendingOnlineIndex();
   }
 }
 
@@ -3131,6 +3242,9 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_stable_frames_ = 0;
   online_index_complete_ = false;
   online_spans_.clear();
+  online_index_pending_.reset();
+  online_index_pending_generation_ = 0;
+  online_index_stats_.clear();
   online_part_path_.clear();
   online_display_path_.clear();
   online_published_bytes_ = 0;
@@ -3269,6 +3383,102 @@ void MainWindow::PausePlaybackForTest() {
 qint64 MainWindow::OnlineContainerFramesForTest() const {
   const lapian::core::TotalFrameCount total = ContainerTotal();
   return total.has_value() ? total.value() : 0;
+}
+
+void MainWindow::SetOnlineDownloadThrottleForTest(qint64 bytes_per_sec) {
+  online_download_throttle_bps_ = bytes_per_sec > 0 ? bytes_per_sec : 0;
+  if (online_) {
+    // 只节流视频：波形渐进已由离线 slow case 覆盖；音频跟视频同速会让
+    // CDN 音频首两个尝试在慢回调下失败（重试可恢复，但证据噪音大）。
+    online_->SetDownloadThrottleForTest(online_download_throttle_bps_, 0);
+  }
+}
+
+QString MainWindow::OnlineTotalStateForTest() const {
+  if (session_ == nullptr) {
+    return QStringLiteral("unknown");
+  }
+  const bool online_growing = online_ready_ && !online_cache_hit_;
+  if (!online_growing) {
+    const lapian::core::TotalFrameCount total = ContainerTotal();
+    return total.IsExact() ? QStringLiteral("exact:%1").arg(total.value())
+                           : QStringLiteral("estimate:%1").arg(total.value());
+  }
+  if (online_index_complete_ && online_stable_frames_ > 0) {
+    return QStringLiteral("exact:%1").arg(online_stable_frames_);
+  }
+  const lapian::core::TotalFrameCount total = ContainerTotal();
+  if (total.has_value() && total.value() > 0) {
+    return QStringLiteral("estimate:%1").arg(total.value());
+  }
+  return QStringLiteral("scanning");
+}
+
+QString MainWindow::OnlineIndexStatsForTest() const {
+  return online_index_stats_;
+}
+
+qint64 MainWindow::OnlineCachedSecondsForTest() const {
+  if (!online_ready_ || session_ == nullptr || online_total_bytes_ <= 0) {
+    return -1;
+  }
+  const qint64 duration_us = session_->info().duration_us;
+  if (duration_us <= 0) {
+    return -1;
+  }
+  const double fraction =
+      static_cast<double>(session_->GrowingPublished()) /
+      static_cast<double>(online_total_bytes_);
+  return static_cast<qint64>(
+      std::llround(static_cast<double>(duration_us) / 1.0e6 * fraction));
+}
+
+qint64 MainWindow::OnlinePublishedBytesForTest() const {
+  return session_ != nullptr ? session_->GrowingPublished() : 0;
+}
+
+double MainWindow::OnlineDurationSecondsForTest() const {
+  if (session_ == nullptr) {
+    return -1.0;
+  }
+  // 帧号/总帧数数学用容器 duration；DASH 目录 duration 只作回退。
+  if (session_->info().duration_us > 0) {
+    return static_cast<double>(session_->info().duration_us) / 1.0e6;
+  }
+  if (online_dash_duration_ms_ > 0) {
+    return static_cast<double>(online_dash_duration_ms_) / 1000.0;
+  }
+  return -1.0;
+}
+
+double MainWindow::OnlineVideoFpsForTest() const {
+  if (session_ == nullptr) {
+    return -1.0;
+  }
+  return session_->info().video.frame_rate.ToDouble();
+}
+
+int MainWindow::OnlineWaveformBucketCountForTest() const {
+  if (!waveform_) {
+    return 0;
+  }
+  const auto waveform_data = waveform_->data();
+  return waveform_data ? static_cast<int>(waveform_data->bucket_count()) : 0;
+}
+
+double MainWindow::OnlineWaveformOffsetFramesForTest() const {
+  if (!waveform_ || session_ == nullptr) {
+    return -1.0;
+  }
+  const auto waveform_data = waveform_->data();
+  if (!waveform_data) {
+    return -1.0;
+  }
+  const double fps = session_->info().video.frame_rate.ToDouble();
+  if (fps <= 0.0) {
+    return -1.0;
+  }
+  return std::abs(waveform_data->offset_seconds()) * fps;
 }
 
 QString MainWindow::StatusMessageForTest() const {
@@ -3704,6 +3914,9 @@ void MainWindow::OpenLocalMedia(const QString& path,
     online_stable_frames_ = 0;
     online_index_complete_ = false;
     online_spans_.clear();
+    online_index_pending_.reset();
+    online_index_pending_generation_ = 0;
+    online_index_stats_.clear();
     online_last_error_.clear();
     if (online_cancel_action_ != nullptr) {
       online_cancel_action_->setEnabled(false);
@@ -3827,6 +4040,7 @@ void MainWindow::OpenLocalMedia(const QString& path,
   }
   if (info.has_audio) {
     waveform_ = std::make_unique<lapian::audio::WaveformGenerator>();
+    waveform_last_bucket_count_ = 0;
     QElapsedTimer waveform_timer;
     waveform_timer.start();
     const bool waveform_started =
@@ -4083,10 +4297,17 @@ void MainWindow::ApplyIndexState() {
   if (session_->IsVfrSuspect()) {
     info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
   } else if (online_growing) {
-    info_bar_->SetTotal(online_index_complete_
-                            ? lapian::core::TotalFrameCount::Exact(
-                                  online_stable_frames_)
-                            : lapian::core::TotalFrameCount::Scanning());
+    // T8.11 三态：容器 duration×fps 可得时为“估算 ≈N”；索引读到 EOF 且缓存
+    // 完整后才是“精确 N”。不拿 API fps/部分索引冒充精确总帧数。
+    if (online_index_complete_ && online_stable_frames_ > 0) {
+      info_bar_->SetTotal(
+          lapian::core::TotalFrameCount::Exact(online_stable_frames_));
+    } else if (container_total.has_value() && container_total.value() > 0) {
+      info_bar_->SetTotal(lapian::core::TotalFrameCount::Estimated(
+          container_total.value()));
+    } else {
+      info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+    }
   } else {
     info_bar_->SetTotal(ready ? session_->index().Total() : ContainerTotal());
   }
@@ -6627,6 +6848,17 @@ void MainWindow::PollWaveformStatus() {
   waveform_status_revision_ = status.revision;
 
   using lapian::audio::WaveformState;
+  const auto waveform_data = waveform_->data();
+  const int bucket_count =
+      waveform_data ? static_cast<int>(waveform_data->bucket_count()) : 0;
+  const bool buckets_grew = bucket_count != waveform_last_bucket_count_;
+  waveform_last_bucket_count_ = bucket_count;
+  // T8.11：波形渐进可见。时间轴只在桶数量增长/就绪时重绘，避免每 200ms 空转。
+  if (timeline_ != nullptr &&
+      (buckets_grew || status.state == WaveformState::kReady)) {
+    timeline_->update();
+  }
+
   switch (status.state) {
     case WaveformState::kRunning:
       waveform_label_->setText(

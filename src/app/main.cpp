@@ -48,6 +48,7 @@
 #include "app/OnlineBufferTestRunner.h"
 #include "app/OnlineGrowingTestRunner.h"
 #include "app/OnlineHttpSelfCheckRunner.h"
+#include "app/OnlineIndexTestRunner.h"
 #include "app/OnlineLongPressTestRunner.h"
 #include "app/OnlineM1TestRunner.h"
 #include "app/OnlineM2TestRunner.h"
@@ -546,6 +547,12 @@ int main(int argc, char* argv[]) {
   bool online_m2_skip_cache_hit = false;
   int online_m2_play_seconds = 60;
   int online_m2_seeks = 20;
+  // T8.11：渐进索引/波形/总帧数（真实 OB-3 + 受控慢增长离线 case）。
+  bool online_index_test = false;
+  qint64 online_index_throttle_bps = 0;
+  int online_index_seeks = 20;
+  QString online_index_offline_video;
+  QString online_index_offline_audio;
   QString robust_media;
   QString robust_tag;
   QString robust_root;
@@ -692,6 +699,20 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--m2-seeks") &&
                i + 1 < arguments.size()) {
       online_m2_seeks = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--online-index-test")) {
+      online_index_test = true;
+    } else if (arguments[i] == QStringLiteral("--index-throttle-bps") &&
+               i + 1 < arguments.size()) {
+      online_index_throttle_bps = arguments[++i].toLongLong();
+    } else if (arguments[i] == QStringLiteral("--index-seeks") &&
+               i + 1 < arguments.size()) {
+      online_index_seeks = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--index-offline-video") &&
+               i + 1 < arguments.size()) {
+      online_index_offline_video = arguments[++i];
+    } else if (arguments[i] == QStringLiteral("--index-offline-audio") &&
+               i + 1 < arguments.size()) {
+      online_index_offline_audio = arguments[++i];
     } else if (arguments[i] == QStringLiteral("--ui")) {
       online_quality_ui = true;
     } else if (arguments[i] == QStringLiteral("--anonymous")) {
@@ -785,7 +806,8 @@ int main(int argc, char* argv[]) {
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
-      online_quality_test || online_m2_test) {
+      online_quality_test || online_m2_test ||
+      (online_index_test && online_index_offline_video.isEmpty())) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
       std::fprintf(stderr, "online_quality_fail reason=ui_flag_required\n");
@@ -813,7 +835,9 @@ int main(int argc, char* argv[]) {
       const char* name = online_offline_test ? "offline"
                           : online_longpress_test ? "longpress"
                           : online_quality_test ? "quality"
-                                                  : "m1";
+                          : online_m2_test ? "m2"
+                          : online_index_test ? "index"
+                                              : "m1";
       std::fprintf(stderr,
                    "online_%s_fail reason=missing_bvid_cid usage=--online-%s-test "
                    "--bvid BV... --cid 123\n",
@@ -1028,7 +1052,7 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_quality_test ||
-      online_m2_test ||
+      online_m2_test || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
       online_m1_cache_root =
@@ -1041,7 +1065,9 @@ int main(int argc, char* argv[]) {
                              ? QStringLiteral("/build/t8.9-online-cache")
                              : (online_m2_test
                                     ? QStringLiteral("/build/t8.10-online-cache")
-                                    : QStringLiteral("/build/t8.6-online-cache")))));
+                                    : (online_index_test
+                                           ? QStringLiteral("/build/t8.11-online-cache")
+                                           : QStringLiteral("/build/t8.6-online-cache"))))));
     }
     online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
     // T8.6.1a 可选：长按探针要求增长中的会话（缓存命中会走本地同步步进）。
@@ -1061,7 +1087,9 @@ int main(int argc, char* argv[]) {
                              ? QStringLiteral("/build/t8.9-online-pictures")
                              : (online_m2_test
                                     ? QStringLiteral("/build/t8.10-online-pictures")
-                                    : QStringLiteral("/build/t8.6-online-pictures")))));
+                                    : (online_index_test
+                                           ? QStringLiteral("/build/t8.11-online-pictures")
+                                           : QStringLiteral("/build/t8.6-online-pictures"))))));
     }
     online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
     QDir(online_m1_pictures).removeRecursively();
@@ -1088,7 +1116,7 @@ int main(int argc, char* argv[]) {
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
   } else if (online_m1_test || online_longpress_test || online_quality_test ||
-             online_m2_test) {
+             online_m2_test || online_index_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
     if (online_records_root.isEmpty()) {
@@ -1098,7 +1126,11 @@ int main(int argc, char* argv[]) {
                ? QStringLiteral("/build/t8.6.1a-online-records")
                : (online_quality_test
                       ? QStringLiteral("/build/t8.9-online-records")
-                      : QStringLiteral("/build/t8.7-online-records-m1")));
+                      : (online_m2_test
+                             ? QStringLiteral("/build/t8.10-online-records")
+                             : (online_index_test
+                                    ? QStringLiteral("/build/t8.11-online-records")
+                                    : QStringLiteral("/build/t8.7-online-records-m1")))));
     }
     online_records_root = QFileInfo(online_records_root).absoluteFilePath();
     QDir(online_records_root).removeRecursively();
@@ -1289,6 +1321,25 @@ int main(int argc, char* argv[]) {
     online_m2_runner =
         std::make_unique<lapian::app::OnlineM2TestRunner>(&window, options);
     online_m2_runner->Start();
+  }
+
+  // T8.11：渐进索引/波形/总帧数（真实在线 + 受控慢增长离线 case）。
+  std::unique_ptr<lapian::app::OnlineIndexTestRunner> online_index_runner;
+  if (online_index_test) {
+    lapian::app::OnlineIndexTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid_text = online_m1_cid_text;
+    options.cid = online_m1_cid;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.seeks = online_index_seeks;
+    options.throttle_bytes_per_sec = online_index_throttle_bps;
+    options.offline_video = online_index_offline_video;
+    options.offline_audio = online_index_offline_audio;
+    options.sessdata_file = online_quality_sessdata_file;
+    online_index_runner =
+        std::make_unique<lapian::app::OnlineIndexTestRunner>(&window, options);
+    online_index_runner->Start();
   }
 
   // T8.6.1a：在线长按 PgUp/PgDn（异步步进队列/边界/未缓存提示）。

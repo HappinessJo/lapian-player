@@ -123,6 +123,17 @@ class MainWindow : public QMainWindow {
   bool OnlineIndexCompleteForTest() const { return online_index_complete_; }
   bool WaitForOnlineIndexFramesForTest(int min_frames, int timeout_ms);
   bool WaitForOnlineCacheCompleteForTest(int timeout_ms);
+  // T8.11：帧号三态（unknown/scanning/estimate:<n>/exact:<n>）、增量索引统计、
+  // 已缓存秒数、波形渐进/偏移 hooks。
+  QString OnlineTotalStateForTest() const;
+  QString OnlineIndexStatsForTest() const;
+  qint64 OnlineCachedSecondsForTest() const;
+  qint64 OnlinePublishedBytesForTest() const;
+  double OnlineDurationSecondsForTest() const;
+  double OnlineVideoFpsForTest() const;
+  int OnlineWaveformBucketCountForTest() const;
+  double OnlineWaveformOffsetFramesForTest() const;
+  void SetOnlineDownloadThrottleForTest(qint64 bytes_per_sec);
   void SetOnlineDashEnabledForTest(bool enabled);
   void ShutdownOnlineForTest() { ShutdownOnlineSession(true); }
   qint64 CurrentPtsUsForTest() const { return current_pts_us_; }
@@ -460,6 +471,11 @@ class MainWindow : public QMainWindow {
   void StartOnlineIndexBuild();
   void CancelOnlineLoading();
   void StopOnlineIndexBuild();
+  // T8.11：索引快照只在 GUI 线程小步安装；seek 正在读当前索引时先挂起，
+  // seek 结束后再装最新快照（避免丢掉 complete 快照）。
+  void InstallOnlineIndexSnapshot(
+      std::shared_ptr<lapian::media::OnlineIndexResult> built);
+  void InstallPendingOnlineIndex();
   void StopOnlineSeekWorker();
   // T8.6.1a：在线步进不走同步 current_frame_ 检查，改为“目标帧 → 异步 seek →
   // 落地后再走下一步”的状态机；本地模式仍用原同步路径。
@@ -709,6 +725,11 @@ class MainWindow : public QMainWindow {
   std::thread online_index_thread_;
   std::shared_ptr<std::atomic<bool>> online_index_cancel_;
   std::uint64_t online_index_generation_ = 0;
+  std::shared_ptr<lapian::media::OnlineIndexResult> online_index_pending_;
+  std::uint64_t online_index_pending_generation_ = 0;
+  QString online_index_stats_;
+  qint64 online_download_throttle_bps_ = 0;
+  int waveform_last_bucket_count_ = 0;
   std::thread online_seek_thread_;
   std::shared_ptr<std::atomic<bool>> online_seek_cancel_;
   std::uint64_t online_seek_generation_ = 0;

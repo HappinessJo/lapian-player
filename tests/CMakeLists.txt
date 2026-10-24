@@ -165,6 +165,18 @@ add_test(NAME lapian_online_dash_test COMMAND lapian_online_dash_test)
 set_tests_properties(lapian_online_dash_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# T8.11 渐进索引/波形：真实 OB-3 缓存按 256KB 受控增长（等价 1–2MB/s），
+# 验证只扫已发布前缀/stable 单调/前缀 PTS 不变/30s 覆盖/完成精确/读字节比；
+# 独立音频慢增长验证 bucket 只追加、偏移 ≤1 帧。素材缺失返回 77。
+add_executable(lapian_online_index_test online_index_test.cpp)
+lapian_apply_common_options(lapian_online_index_test)
+target_link_libraries(lapian_online_index_test PRIVATE lapian_media lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_online_index_test)
+add_test(NAME lapian_online_index_test COMMAND lapian_online_index_test)
+set_tests_properties(lapian_online_index_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77)
+
 # T5.2 标记侧栏：100 条列表、点击/删除信号、存储位置/回退/警告展示、离屏性能。
 add_executable(lapian_mark_panel_test mark_panel_test.cpp)
 lapian_apply_common_options(lapian_mark_panel_test)

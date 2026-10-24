@@ -1060,6 +1060,7 @@ void OnlineSession::StartDurlDownload(const lapian::online::PlayUrlData& data,
 
   lapian::online::DownloadOptions options;
   options.defer_finalize = true;
+  options.throttle_bytes_per_sec = download_throttle_bps_;
 
   // 刷新回调运行在下载线程：只做一次 playurl，不碰 UI/日志中的签名 URL。
   auto refresh = [this](lapian::online::DownloadPlan* fresh,
@@ -1162,6 +1163,7 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
 
   lapian::online::DownloadOptions options;
   options.defer_finalize = true;
+  options.throttle_bytes_per_sec = download_throttle_bps_;
 
   const int video_qn = outcome.video.qn;
   const int video_codecid = outcome.video.codecid;
@@ -1229,12 +1231,14 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
     };
   };
 
+  lapian::online::DownloadOptions audio_options = options;
+  audio_options.throttle_bytes_per_sec = audio_download_throttle_bps_;
   auto video_job = std::make_unique<lapian::online::DownloadJob>(
       cache_, video_key, source_, transport_.get(), video_plan,
       make_refresh(false), options);
   auto audio_job = std::make_unique<lapian::online::DownloadJob>(
       cache_, audio_key, audio_source_, transport_.get(), audio_plan,
-      make_refresh(true), options);
+      make_refresh(true), audio_options);
   QString start_error;
   {
     const ScopedSlowLog job_log("job_start_dash");

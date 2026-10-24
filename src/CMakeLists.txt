@@ -228,6 +228,8 @@ qt_add_executable(lapian WIN32
   app/OnlineM1TestRunner.h
   app/OnlineM2TestRunner.cpp
   app/OnlineM2TestRunner.h
+  app/OnlineIndexTestRunner.cpp
+  app/OnlineIndexTestRunner.h
   app/OnlineOfflineTestRunner.cpp
   app/OnlineOfflineTestRunner.h
   app/OnlineHttpSelfCheckRunner.cpp

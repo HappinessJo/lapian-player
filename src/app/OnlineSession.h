@@ -151,6 +151,15 @@ class OnlineSession : public QObject {
   OnlineQualityCatalog quality_catalog() const;
   // T8.10 诊断/回归：false 时跳过 DASH，直接走 M1 durl 单文件路径。
   void SetDashEnabledForTest(bool enabled) { dash_enabled_.store(enabled); }
+  // T8.11 慢增长测试钩子：>0 时下载按字节/秒节流，复现“边下边索引/波形”；
+  // 0（默认）不改变产品下载。audio_bps<0 表示与视频同速。必须在 Start 前调用。
+  void SetDownloadThrottleForTest(qint64 video_bytes_per_sec,
+                                  qint64 audio_bytes_per_sec = -1) {
+    download_throttle_bps_ = video_bytes_per_sec > 0 ? video_bytes_per_sec : 0;
+    audio_download_throttle_bps_ =
+        audio_bytes_per_sec < 0 ? download_throttle_bps_
+                                : (audio_bytes_per_sec > 0 ? audio_bytes_per_sec : 0);
+  }
 
   void SetCallbacks(StateCallback state, ProgressCallback progress,
                     ReadyCallback ready, ErrorCallback error,
@@ -291,6 +300,8 @@ class OnlineSession : public QObject {
   std::shared_ptr<lapian::online::HttpCancelToken> quality_cancel_;
   std::atomic<bool> quality_enabled_{true};
   std::atomic<bool> dash_enabled_{true};
+  qint64 download_throttle_bps_ = 0;
+  qint64 audio_download_throttle_bps_ = 0;
   bool has_injected_quality_ = false;
   OnlineQualityCatalog injected_quality_;
   bool quality_started_ = false;
