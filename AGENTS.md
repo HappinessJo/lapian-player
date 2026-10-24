@@ -385,6 +385,7 @@
 | `docs/perf/drag-preview-dp3.md` | v1.0 | 2026-10-24 | DP-3 证据：DragStrategy 四模式/阈值、慢拖 lag p95 0、快拖 +60 76.9–80.8fps、-60 54.4–64.4fps、-20 47.3–49.2fps、远跳粗帧 20.8/20.6ms→精确 30.6/30.0ms、P4/P6/P7/P8/P9、峰值 233.4MiB、软件残余、4K 只记录、ctest 37/37 |
 | `docs/handoff-2026-10-24-dp3.md` | v1 | 2026-10-24 | DP-3 交接：模式判定/Exact 关粗帧/FarJump 闸门/精确后禁粗帧、验证数字、残余、DP-4 下一步；不改 P4/P6/P7 |
 | `docs/next-session-prompt-dp3.md` | v1 | 2026-10-24 | 历史提示词（DP-3 已执行）：交互策略 + 验收探针；保留作口径参考 |
+| `docs/next-session-prompt-dp4.md` | v1 | 2026-10-24 | 下一会话提示词：DP-4 集成/发布；含 DP-3 基线/边界/回归、dist/Medium 验证、停止/交付/不要做 |
 | `docs/handoff-2026-10-24-drag-preview-plan.md` | v1 | 2026-10-24 | DP 规划交接：基线 `079f0dd`、现状/瓶颈/指标、DP-1 先做硬件预览 spike |
 | `docs/next-session-prompt-dp1.md` | v1 | 2026-10-24 | 下一会话提示词：DP-1 硬件预览 + 诊断；含基线/文件/验收/停止条件 |
 | `docs/next-session-prompt-dp2.md` | v1 | 2026-10-24 | 下一会话提示词：DP-2 反向缓存/预取/远跳粗帧；含 DP-1 基线/预算/验收/停止/交付 |
