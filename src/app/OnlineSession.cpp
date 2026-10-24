@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
 #include <utility>
 
 #include "online/DownloadTransport.h"
@@ -59,6 +61,20 @@ lapian::online::CacheMetadata MakeMetadata(const OnlineRequest& request) {
   metadata.owner = request.owner;
   metadata.duration_ms = request.duration_ms;
   return metadata;
+}
+
+// T8.17 诊断：默认静默，只在 LAPIAN_ONLINE_LOG 下输出缓存键/命中分支。
+// 只打印 bvid/cid/qn/codecid/audio_id/complete 等非敏感字段；绝不打印
+// SESSDATA/Cookie/签名 URL。
+void OnlineDiag(const char* format, ...) {
+  if (!qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  std::vfprintf(stderr, format, args);
+  va_end(args);
+  std::fflush(stderr);
 }
 
 // T8.10：DASH 不返回总字节，用 `Range: bytes=0-0` 探测 Content-Range 总长。
@@ -266,16 +282,23 @@ QString OnlineSession::cache_audio_mp4_path() const {
 }
 
 bool OnlineSession::HasPendingFinalize() const {
-  if (!job_) {
-    return false;
-  }
-  const bool video =
-      job_->state() == lapian::online::DownloadState::kAwaitingFinalize;
-  if (!audio_job_) {
-    return video;
-  }
-  return video && audio_job_->state() ==
-                      lapian::online::DownloadState::kAwaitingFinalize;
+  using lapian::online::DownloadState;
+  bool pending = false;
+  auto consider = [&](const lapian::online::DownloadJob* job) -> bool {
+    if (job == nullptr) {
+      return true;  // 该路已完整并复用，无需 job/finalize
+    }
+    switch (job->state()) {
+      case DownloadState::kCompleted:
+        return true;
+      case DownloadState::kAwaitingFinalize:
+        pending = true;
+        return true;
+      default:
+        return false;
+    }
+  };
+  return consider(job_.get()) && consider(audio_job_.get()) && pending;
 }
 
 void OnlineSession::PublishProgress() {
@@ -709,12 +732,23 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
   QString scan_error;
   if (!cache_->Scan(&entries, &broken, &scan_error)) {
     // 缓存根不可读不应阻止在线播放；按未命中继续取流。
+    OnlineDiag("T8.17 online_cache_lookup scan_failed bvid=%s cid=%lld\n",
+               request.bvid.toUtf8().constData(),
+               static_cast<long long>(request.cid));
     return CacheLookupResult::kMiss;
   }
+  OnlineDiag("T8.17 online_cache_lookup begin bvid=%s cid=%lld requested_qn=%d "
+             "requested_codecid=%d entries=%d broken=%d\n",
+             request.bvid.toUtf8().constData(),
+             static_cast<long long>(request.cid), request.requested_qn,
+             request.requested_codecid, static_cast<int>(entries.size()),
+             static_cast<int>(broken.size()));
 
   const lapian::online::CacheEntry* best = nullptr;
   for (const lapian::online::CacheEntry& entry : entries) {
     if (!entry.complete || entry.broken || entry.key.is_audio()) {
+      OnlineDiag("T8.17 online_cache_lookup skip key=%s reason=not_complete_video\n",
+                 lapian::online::CacheKeyLabel(entry.key).toUtf8().constData());
       continue;
     }
     if (entry.key.bvid != request.bvid || entry.key.cid != request.cid) {
@@ -723,10 +757,18 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
     // T8.12 手动切档：必须命中请求的 qn/codecid；否则继续联网取该档，
     // 不能因为“同片有更高档缓存”而忽略用户选择。
     if (request.requested_qn > 0 && entry.key.qn != request.requested_qn) {
+      OnlineDiag("T8.17 online_cache_lookup skip key=%s reason=qn_mismatch "
+                 "requested_qn=%d\n",
+                 lapian::online::CacheKeyLabel(entry.key).toUtf8().constData(),
+                 request.requested_qn);
       continue;
     }
     if (request.requested_codecid > 0 &&
         entry.key.codecid != request.requested_codecid) {
+      OnlineDiag("T8.17 online_cache_lookup skip key=%s reason=codecid_mismatch "
+                 "requested_codecid=%d\n",
+                 lapian::online::CacheKeyLabel(entry.key).toUtf8().constData(),
+                 request.requested_codecid);
       continue;
     }
     if (best == nullptr || entry.last_access_at > best->last_access_at ||
@@ -755,8 +797,14 @@ OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
         return CacheLookupResult::kError;
       }
     }
+    OnlineDiag("T8.17 online_cache_lookup miss reason=no_matching_video "
+               "requested_qn=%d requested_codecid=%d\n",
+               request.requested_qn, request.requested_codecid);
     return CacheLookupResult::kMiss;
   }
+  OnlineDiag("T8.17 online_cache_lookup best key=%s dash=%d audio_id=%d\n",
+             lapian::online::CacheKeyLabel(best->key).toUtf8().constData(),
+             best->dash ? 1 : 0, best->audio_id);
   if (best->dash) {
     // T8.10：DASH 视频单流必须和配套音频条目同时完整才能命中；缺一个就
     // 明确报“需要重建”，不静默降级成无声播放、也不偷偷联网。
@@ -808,12 +856,17 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
     const OnlineRequest& request, const lapian::online::CacheEntry& video,
     QString* error, QVector<lapian::online::CacheKey>* rebuild_keys) {
   using namespace lapian::online;
+  OnlineDiag("T8.17 online_dash_cache video=%s audio_id=%d\n",
+             CacheKeyLabel(video.key).toUtf8().constData(), video.audio_id);
   if (video.audio_id <= 0) {
-    *error = QStringLiteral("DASH 缓存缺少音频 id（meta 不完整），需要清理后重下");
-    if (rebuild_keys != nullptr) {
-      rebuild_keys->push_back(video.key);
-    }
-    return CacheLookupResult::kError;
+    // T8.17：meta 缺少 audio_id 不代表视频数据坏了；不删视频，继续解析实际
+    // 目录后按实际 audio key 做精确检查（0 网络命中或补齐）。
+    partial_cache_notice_ = QStringLiteral(
+        "视频缓存缺少配套 audio_id，需要重新解析音频；不会删除已缓存视频");
+    OnlineDiag("T8.17 online_dash_cache result=miss reason=missing_audio_id "
+               "video=%s\n",
+               CacheKeyLabel(video.key).toUtf8().constData());
+    return CacheLookupResult::kMiss;
   }
   QVector<CacheEntry> entries;
   QVector<CacheEntry> broken;
@@ -834,25 +887,31 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
   }
   for (const CacheEntry& entry : broken) {
     if (entry.key == audio_key) {
-      *error = QStringLiteral("DASH 音频缓存损坏，需要重建：%1")
+      *error = QStringLiteral("DASH 音频缓存损坏，需要重建/补音频：%1")
                    .arg(entry.broken_reason.isEmpty()
                             ? QStringLiteral("data.mp4/meta.json 校验失败")
                             : entry.broken_reason);
+      partial_cache_notice_ =
+          QStringLiteral("音频缓存损坏，将只重建音频（保留视频缓存）");
       if (rebuild_keys != nullptr) {
-        rebuild_keys->push_back(video.key);
+        // T8.17：只重建音频，保留完整视频；重建后按未命中继续补音频。
         rebuild_keys->push_back(audio_key);
       }
       return CacheLookupResult::kError;
     }
   }
   if (audio == nullptr) {
-    *error = QStringLiteral("DASH 缓存不完整：视频条目存在但缺少音频条目"
-                            "（audio-%1），请清空该视频缓存后重新打开")
-                 .arg(video.audio_id);
-    if (rebuild_keys != nullptr) {
-      rebuild_keys->push_back(video.key);
-    }
-    return CacheLookupResult::kError;
+    // T8.17：视频完整、音频缺失时保留视频，继续解析实际音频 id 后只补音频；
+    // 不再删视频重下，也不把“视频完整但音频缺失”报成完整缓存命中失败。
+    partial_cache_notice_ =
+        QStringLiteral("视频已完整缓存（%1），缺少音频（audio-%2）；"
+                       "需要补下音频")
+            .arg(QualityName(video.key.qn))
+            .arg(video.audio_id);
+    OnlineDiag("T8.17 online_dash_cache result=miss reason=audio_missing "
+               "audio_key=%s\n",
+               CacheKeyLabel(audio_key).toUtf8().constData());
+    return CacheLookupResult::kMiss;
   }
 
   QString video_path;
@@ -914,6 +973,9 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
   }
   SetState(OnlineState::kCacheHit,
            QStringLiteral("缓存命中：DASH 视频+音频（0 网络）"));
+  OnlineDiag("T8.17 online_dash_cache result=hit video=%s audio=%s\n",
+             CacheKeyLabel(video.key).toUtf8().constData(),
+             CacheKeyLabel(audio_key).toUtf8().constData());
   const std::uint64_t generation = generation_;
   QTimer::singleShot(0, this, [this, generation]() {
     if (generation == generation_ && active_.load() && !closing_.load()) {
@@ -922,6 +984,139 @@ OnlineSession::CacheLookupResult OnlineSession::TryDashCacheHit(
   });
   PublishProgress();
   return CacheLookupResult::kHit;
+}
+
+OnlineSession::DashCacheInspection OnlineSession::InspectDashCache(
+    const lapian::online::CacheKey& video_key,
+    const lapian::online::CacheKey& audio_key) {
+  using namespace lapian::online;
+  DashCacheInspection result;
+  auto inspect = [&](const CacheKey& key, bool* complete, bool* broken,
+                     CacheEntry* entry, QString* path, QString* error) {
+    if (cache_ == nullptr) {
+      *error = QStringLiteral("在线缓存未初始化");
+      return;
+    }
+    QString load_error;
+    const std::optional<CacheEntry> loaded = cache_->Load(key, &load_error);
+    if (!loaded.has_value()) {
+      *error = load_error.isEmpty() ? QStringLiteral("条目不存在") : load_error;
+      return;
+    }
+    *entry = *loaded;
+    if (loaded->broken) {
+      *broken = true;
+      *error = loaded->broken_reason.isEmpty()
+                   ? QStringLiteral("data.mp4/meta.json 校验失败")
+                   : loaded->broken_reason;
+      return;
+    }
+    if (!loaded->complete) {
+      *error = QStringLiteral("未完成：%1/%2 字节")
+                   .arg(loaded->downloaded_bytes)
+                   .arg(loaded->total_bytes);
+      return;
+    }
+    QString open_error;
+    if (!cache_->OpenComplete(key, path, &open_error)) {
+      *error = open_error;
+      return;
+    }
+    *complete = true;
+  };
+  inspect(video_key, &result.video_complete, &result.video_broken,
+          &result.video, &result.video_path, &result.video_error);
+  inspect(audio_key, &result.audio_complete, &result.audio_broken,
+          &result.audio, &result.audio_path, &result.audio_error);
+  OnlineDiag(
+      "T8.17 online_dash_exact video=%s complete=%d broken=%d error=%s "
+      "audio=%s complete=%d broken=%d error=%s\n",
+      CacheKeyLabel(video_key).toUtf8().constData(),
+      result.video_complete ? 1 : 0, result.video_broken ? 1 : 0,
+      result.video_error.toUtf8().constData(),
+      CacheKeyLabel(audio_key).toUtf8().constData(),
+      result.audio_complete ? 1 : 0, result.audio_broken ? 1 : 0,
+      result.audio_error.toUtf8().constData());
+  return result;
+}
+
+bool OnlineSession::EmitResolvedDashCacheHit(
+    const ResolveOutcome& outcome, const lapian::online::CacheKey& video_key,
+    const lapian::online::CacheKey& audio_key,
+    const DashCacheInspection& cache) {
+  using namespace lapian::online;
+  if (!cache.video_complete || !cache.audio_complete) {
+    return false;
+  }
+  cache_entry_ = cache.video;
+  cache_entry_audio_ = cache.audio;
+  if (cache_entry_.fps <= 0.0) {
+    cache_entry_.fps = outcome.video.fps;
+  }
+  cache_hit_ = true;
+  dash_mode_ = true;
+  video_reused_complete_ = true;
+  audio_reused_complete_ = true;
+  source_ = std::make_shared<GrowingSource>(cache.video.total_bytes);
+  audio_source_ = std::make_shared<GrowingSource>(cache.audio.total_bytes);
+  if (!source_->IsValid() || !audio_source_->IsValid()) {
+    source_.reset();
+    audio_source_.reset();
+    return false;
+  }
+  source_->Publish(cache.video.total_bytes);
+  audio_source_->Publish(cache.audio.total_bytes);
+  total_ = cache.video.total_bytes;
+  audio_total_ = cache.audio.total_bytes;
+  qn_ = video_key.qn;
+  codecid_ = video_key.codecid;
+  audio_id_ = audio_key.audio_id;
+  dash_fps_ = outcome.video.fps > 0.0 ? outcome.video.fps : cache_entry_.fps;
+  dash_duration_ms_ = cache.video.duration_ms > 0
+                          ? cache.video.duration_ms
+                          : dash_catalog_.duration_ms;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    part_path_ = cache.video_path;
+    audio_part_path_ = cache.audio_path;
+    progress_.published = total_ + audio_total_;
+    progress_.total = total_ + audio_total_;
+    progress_.bps = 0.0;
+    progress_.job_state = QStringLiteral("cache_hit");
+    progress_.qn = qn_;
+    progress_.codecid = codecid_;
+    progress_.complete = true;
+    progress_.awaiting_finalize = false;
+    progress_.error.clear();
+  }
+  SetState(OnlineState::kCacheHit,
+           QStringLiteral("缓存命中：DASH 视频+音频（0 网络）"));
+  OnlineDiag("T8.17 online_dash_cache result=hit_after_resolve video=%s "
+             "audio=%s\n",
+             CacheKeyLabel(video_key).toUtf8().constData(),
+             CacheKeyLabel(audio_key).toUtf8().constData());
+  const std::uint64_t generation = generation_;
+  QTimer::singleShot(0, this, [this, generation]() {
+    if (generation == generation_ && active_.load() && !closing_.load()) {
+      EmitCacheHitReady();
+    }
+  });
+  PublishProgress();
+  return true;
+}
+
+void OnlineSession::EmitDashQualityCatalog() {
+  if (!dash_catalog_available_) {
+    StartQualityWorker(generation_);
+    return;
+  }
+  OnlineQualityCatalog catalog;
+  catalog.ok = true;
+  catalog.fetched = true;
+  catalog.catalog = dash_catalog_;
+  catalog.http_requests = dash_requests_;
+  catalog.http_status = 200;
+  EmitQuality(catalog);
 }
 
 void OnlineSession::EmitCacheHitReady() {
@@ -965,10 +1160,15 @@ void OnlineSession::EmitCacheHitReady() {
   ready_callback_(info);
 
   // T8.9：缓存命中不联网；档位来自 meta（qn/codecid；meta 未记录 fps/分辨率时
-  // 菜单只显示档位名，不伪造）。
+  // 菜单只显示档位名，不伪造）。T8.17：解析后命中的路径已有完整目录，菜单
+  // 仍可列出其它档位，不能被“缓存 meta 只有当前档”锁死。
   if (!quality_emitted_ && !quality_started_) {
     quality_started_ = true;
-    EmitQuality(CacheQualityFromEntry());
+    if (dash_mode_ && dash_catalog_available_) {
+      EmitDashQualityCatalog();
+    } else {
+      EmitQuality(CacheQualityFromEntry());
+    }
   }
 }
 
@@ -1102,6 +1302,9 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   cache_audio_mp4_path_.clear();
   cache_entry_ = lapian::online::CacheEntry{};
   cache_entry_audio_ = lapian::online::CacheEntry{};
+  partial_cache_notice_.clear();
+  video_reused_complete_ = false;
+  audio_reused_complete_ = false;
   resolve_outcome_.reset();
   resolve_cancel_.reset();
   if (state_callback_) {
@@ -1132,6 +1335,13 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
     }
   } else if (cache_result == CacheLookupResult::kHit) {
     return true;
+  }
+  if (cache_result == CacheLookupResult::kMiss &&
+      !partial_cache_notice_.isEmpty()) {
+    // T8.17：视频完整/音频缺失不是错误；给 UI 明确“正在解析/补下音频”。
+    // 损坏重建路径保留 kRecovering 的“已重建”提示，随后由 StartDashDownload
+    // 覆盖成“补下音频/视频”的准确状态。
+    SetState(OnlineState::kPreparing, partial_cache_notice_);
   }
 
   if (has_injected_playurl_) {
@@ -1244,7 +1454,50 @@ void OnlineSession::StartDurlDownload(const lapian::online::PlayUrlData& data,
   }
   job_ = std::move(job);
   if (job_->state() == lapian::online::DownloadState::kCompleted) {
-    Fail(QStringLiteral("该视频已完整缓存，但本次未走缓存命中路径；请重新打开"));
+    // T8.17：kCompleted 是内部信号（缓存竞态防御），转成正常缓存命中路径，
+    // 不作为用户错误。
+    QString mp4_path;
+    QString open_error;
+    const std::optional<lapian::online::CacheEntry> loaded =
+        cache_->Load(key, nullptr);
+    if (!loaded.has_value() ||
+        !cache_->OpenComplete(key, &mp4_path, &open_error)) {
+      Fail(QStringLiteral("缓存已完整但无法打开：%1")
+               .arg(open_error.isEmpty() ? QStringLiteral("条目不存在")
+                                         : open_error));
+      return;
+    }
+    cache_entry_ = *loaded;
+    cache_hit_ = true;
+    dash_mode_ = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      part_path_ = mp4_path;
+      total_ = cache_entry_.total_bytes;
+      qn_ = key.qn;
+      codecid_ = key.codecid;
+      progress_.published = total_;
+      progress_.total = total_;
+      progress_.bps = 0.0;
+      progress_.job_state = QStringLiteral("cache_hit");
+      progress_.qn = qn_;
+      progress_.codecid = codecid_;
+      progress_.complete = true;
+      progress_.awaiting_finalize = false;
+      progress_.error.clear();
+    }
+    OnlineDiag("T8.17 online_job_start key=%s state=completed_convert_to_hit\n",
+               lapian::online::CacheKeyLabel(key).toUtf8().constData());
+    SetState(OnlineState::kCacheHit,
+             QStringLiteral("缓存命中：直接打开本地 data.mp4（0 网络）"));
+    const std::uint64_t cache_generation = generation_;
+    QTimer::singleShot(0, this, [this, cache_generation]() {
+      if (cache_generation == generation_ && active_.load() &&
+          !closing_.load()) {
+        EmitCacheHitReady();
+      }
+    });
+    PublishProgress();
     return;
   }
   {
@@ -1270,6 +1523,16 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
     Fail(plan_error);
     return;
   }
+  OnlineDiag("T8.17 online_dash_keys bvid=%s cid=%lld requested_qn=%d "
+             "requested_codecid=%d actual_qn=%d actual_codecid=%d video=%s "
+             "audio=%s video_total=%lld audio_total=%lld\n",
+             request_.bvid.toUtf8().constData(),
+             static_cast<long long>(request_.cid), request_.requested_qn,
+             request_.requested_codecid, video_plan.qn, video_plan.codecid,
+             lapian::online::CacheKeyLabel(video_key).toUtf8().constData(),
+             lapian::online::CacheKeyLabel(audio_key).toUtf8().constData(),
+             static_cast<long long>(video_plan.total_bytes),
+             static_cast<long long>(audio_plan.total_bytes));
   dash_mode_ = true;
   total_ = video_plan.total_bytes;
   audio_total_ = audio_plan.total_bytes;
@@ -1285,6 +1548,59 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
   }
   audio_ready_threshold_ = std::min<qint64>(kAudioReadyThresholdBytes, audio_total_);
 
+  // T8.17：解析出**实际** video/audio key 后、创建 DownloadJob 前做精确检查。
+  // 不能只看 requested_qn/requested_codecid（切到新档时旧音频通常已完整）。
+  DashCacheInspection cache = InspectDashCache(video_key, audio_key);
+  if (cache.video_complete &&
+      cache.video.total_bytes != video_plan.total_bytes) {
+    OnlineDiag("T8.17 online_dash_stale key=%s cached_bytes=%lld plan_bytes=%lld\n",
+               lapian::online::CacheKeyLabel(video_key).toUtf8().constData(),
+               static_cast<long long>(cache.video.total_bytes),
+               static_cast<long long>(video_plan.total_bytes));
+    cache.video_broken = true;
+  }
+  if (cache.audio_complete &&
+      cache.audio.total_bytes != audio_plan.total_bytes) {
+    OnlineDiag("T8.17 online_dash_stale key=%s cached_bytes=%lld plan_bytes=%lld\n",
+               lapian::online::CacheKeyLabel(audio_key).toUtf8().constData(),
+               static_cast<long long>(cache.audio.total_bytes),
+               static_cast<long long>(audio_plan.total_bytes));
+    cache.audio_broken = true;
+  }
+  auto rebuild_broken = [&](const lapian::online::CacheKey& key, bool* complete,
+                            bool* broken, QString* path,
+                            const char* label) -> bool {
+    if (!*broken) {
+      return true;
+    }
+    QString rebuild_error;
+    if (!cache_->Rebuild(key, &rebuild_error)) {
+      Fail(QStringLiteral("DASH %1缓存损坏且重建失败：%2")
+               .arg(QString::fromUtf8(label),
+                    rebuild_error.isEmpty() ? QStringLiteral("未知错误")
+                                            : rebuild_error));
+      return false;
+    }
+    OnlineDiag("T8.17 online_dash_rebuild key=%s label=%s\n",
+               lapian::online::CacheKeyLabel(key).toUtf8().constData(), label);
+    *broken = false;
+    *complete = false;
+    path->clear();
+    return true;
+  };
+  if (!rebuild_broken(video_key, &cache.video_complete, &cache.video_broken,
+                      &cache.video_path, "视频") ||
+      !rebuild_broken(audio_key, &cache.audio_complete, &cache.audio_broken,
+                      &cache.audio_path, "音频")) {
+    return;
+  }
+  if (cache.video_complete && cache.audio_complete) {
+    if (!EmitResolvedDashCacheHit(outcome, video_key, audio_key, cache)) {
+      Fail(QStringLiteral("DASH 缓存条目大小无效，需要重建"));
+    }
+    return;
+  }
+
   {
     const ScopedSlowLog source_log("source_create");
     source_ = std::make_shared<lapian::online::GrowingSource>(total_);
@@ -1295,7 +1611,17 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
                                : audio_source_->InvalidReason());
       return;
     }
+    if (cache.video_complete) {
+      source_->Publish(total_);
+      video_reused_complete_ = true;
+    }
+    if (cache.audio_complete) {
+      audio_source_->Publish(audio_total_);
+      audio_reused_complete_ = true;
+    }
   }
+  OnlineDiag("T8.17 online_dash_reuse video_complete=%d audio_complete=%d\n",
+             cache.video_complete ? 1 : 0, cache.audio_complete ? 1 : 0);
 
   if (injected_transport_) {
     transport_ = std::move(injected_transport_);
@@ -1378,41 +1704,96 @@ void OnlineSession::StartDashDownload(const ResolveOutcome& outcome,
 
   lapian::online::DownloadOptions audio_options = options;
   audio_options.throttle_bytes_per_sec = audio_download_throttle_bps_;
-  auto video_job = std::make_unique<lapian::online::DownloadJob>(
-      cache_, video_key, source_, transport_.get(), video_plan,
-      make_refresh(false), options);
-  auto audio_job = std::make_unique<lapian::online::DownloadJob>(
-      cache_, audio_key, audio_source_, transport_.get(), audio_plan,
-      make_refresh(true), audio_options);
+  std::unique_ptr<lapian::online::DownloadJob> video_job;
+  std::unique_ptr<lapian::online::DownloadJob> audio_job;
+  if (!cache.video_complete) {
+    video_job = std::make_unique<lapian::online::DownloadJob>(
+        cache_, video_key, source_, transport_.get(), video_plan,
+        make_refresh(false), options);
+  }
+  if (!cache.audio_complete) {
+    audio_job = std::make_unique<lapian::online::DownloadJob>(
+        cache_, audio_key, audio_source_, transport_.get(), audio_plan,
+        make_refresh(true), audio_options);
+  }
   QString start_error;
   {
     const ScopedSlowLog job_log("job_start_dash");
-    if (!video_job->Start(&start_error)) {
+    if (video_job != nullptr && !video_job->Start(&start_error)) {
       Fail(start_error.isEmpty() ? QStringLiteral("无法开始 DASH 视频下载")
                                  : start_error);
       return;
     }
-    if (!audio_job->Start(&start_error)) {
-      video_job->Cancel();
+    if (audio_job != nullptr && !audio_job->Start(&start_error)) {
+      if (video_job != nullptr) {
+        video_job->Cancel();
+      }
       source_->Cancel();
+      audio_source_->Cancel();
       Fail(start_error.isEmpty() ? QStringLiteral("无法开始 DASH 音频下载")
                                  : start_error);
       return;
     }
-  }
-  if (video_job->state() == lapian::online::DownloadState::kCompleted ||
-      audio_job->state() == lapian::online::DownloadState::kCompleted) {
-    Fail(QStringLiteral("DASH 条目已完整缓存，但本次未走缓存命中路径；请重新打开"));
-    return;
+    // T8.17：DownloadJob::Start 发现完整缓存时返回 kCompleted。这是内部信号
+    // （竞态防御），不是用户错误：发布已完整字节、复用该路数据，不报错。
+    auto adopt_completed = [&](lapian::online::DownloadJob* job,
+                               const lapian::online::CacheKey& key,
+                               std::shared_ptr<lapian::online::GrowingSource> src,
+                               qint64 total, QString* path,
+                               bool* reused, const char* label) -> bool {
+      if (job == nullptr ||
+          job->state() != lapian::online::DownloadState::kCompleted) {
+        return true;
+      }
+      QString mp4_path;
+      QString open_error;
+      if (!cache_->OpenComplete(key, &mp4_path, &open_error)) {
+        Fail(QStringLiteral("DASH %1缓存状态不一致：%2")
+                 .arg(QString::fromUtf8(label), open_error));
+        return false;
+      }
+      src->Publish(total);
+      *path = mp4_path;
+      *reused = true;
+      OnlineDiag("T8.17 online_job_already_complete stream=%s key=%s "
+                 "already_complete=%d\n",
+                 label, lapian::online::CacheKeyLabel(key).toUtf8().constData(),
+                 job->stats().already_complete ? 1 : 0);
+      return true;
+    };
+    if (!adopt_completed(video_job.get(), video_key, source_, total_,
+                         &cache.video_path, &video_reused_complete_, "video") ||
+        !adopt_completed(audio_job.get(), audio_key, audio_source_, audio_total_,
+                         &cache.audio_path, &audio_reused_complete_, "audio")) {
+      return;
+    }
   }
   job_ = std::move(video_job);
   audio_job_ = std::move(audio_job);
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    part_path_ = job_->part_path();
-    audio_part_path_ = audio_job_->part_path();
+    part_path_ = cache.video_complete || video_reused_complete_
+                     ? cache.video_path
+                     : (job_ != nullptr ? job_->part_path() : QString());
+    audio_part_path_ =
+        cache.audio_complete || audio_reused_complete_
+            ? cache.audio_path
+            : (audio_job_ != nullptr ? audio_job_->part_path() : QString());
   }
-  SetState(OnlineState::kBuffering, QStringLiteral("缓冲中 0%"));
+  if (cache.video_complete && !cache.audio_complete) {
+    SetState(OnlineState::kBuffering,
+             QStringLiteral("视频已完整缓存（%1），正在补下音频（audio-%2）")
+                 .arg(lapian::online::QualityName(video_plan.qn))
+                 .arg(audio_plan.metadata.audio_id));
+  } else if (cache.audio_complete && !cache.video_complete) {
+    SetState(OnlineState::kBuffering,
+             QStringLiteral("音频已完整缓存，正在下载请求的视频档"
+                            "（%1 codecid=%2）")
+                 .arg(lapian::online::QualityName(video_plan.qn))
+                 .arg(video_plan.codecid));
+  } else {
+    SetState(OnlineState::kBuffering, QStringLiteral("缓冲中 0%"));
+  }
   poll_timer_->start();
   PublishProgress();
   Poll();
@@ -1518,13 +1899,7 @@ void OnlineSession::EmitReady() {
   if (quality_enabled_.load() && !quality_started_) {
     if (dash_catalog_available_) {
       quality_started_ = true;
-      OnlineQualityCatalog catalog;
-      catalog.ok = true;
-      catalog.fetched = true;
-      catalog.catalog = dash_catalog_;
-      catalog.http_requests = dash_requests_;
-      catalog.http_status = 200;
-      EmitQuality(catalog);
+      EmitDashQualityCatalog();
     } else {
       StartQualityWorker(generation_);
     }
@@ -1533,14 +1908,19 @@ void OnlineSession::EmitReady() {
 
 void OnlineSession::Poll() {
   const ScopedSlowLog slow_log("poll");
-  if (!active_.load() || closing_.load() || !job_ || !source_) {
+  if (!active_.load() || closing_.load() || (!job_ && !audio_job_) ||
+      !source_) {
     return;
   }
   using lapian::online::DownloadState;
-  const DownloadState video_state = job_->state();
+  // T8.17：某一路实际键已完整时不再为它建 DownloadJob；用 kCompleted 代表
+  // “该路已完整”，与下载完成的聚合/就绪/落盘判断保持一致。
+  const DownloadState video_state =
+      job_ ? job_->state() : DownloadState::kCompleted;
   const DownloadState audio_state =
-      audio_job_ ? audio_job_->state() : DownloadState::kIdle;
-  const lapian::online::DownloadStats video_stats = job_->stats();
+      audio_job_ ? audio_job_->state() : DownloadState::kCompleted;
+  const lapian::online::DownloadStats video_stats =
+      job_ ? job_->stats() : lapian::online::DownloadStats{};
   const lapian::online::DownloadStats audio_stats =
       audio_job_ ? audio_job_->stats() : lapian::online::DownloadStats{};
   const qint64 video_published = source_->Published();
@@ -1549,17 +1929,22 @@ void OnlineSession::Poll() {
   const qint64 published = video_published + audio_published;
   const qint64 total = source_->Size() + (audio_source_ ? audio_total_ : 0);
 
-  // DASH 双下载聚合：任一失败即失败；两个都写完才 awaiting finalize。
+  // DASH 双下载聚合：任一失败即失败；两路都完成（等待落盘/已完整）才算完成。
   DownloadState job_state = video_state;
-  if (dash_mode_ && audio_job_) {
+  if (dash_mode_ && audio_source_) {
+    const bool video_done = video_state == DownloadState::kCompleted ||
+                            video_state == DownloadState::kAwaitingFinalize;
+    const bool audio_done = audio_state == DownloadState::kCompleted ||
+                            audio_state == DownloadState::kAwaitingFinalize;
     if (video_state == DownloadState::kFailed ||
         audio_state == DownloadState::kFailed) {
       job_state = DownloadState::kFailed;
     } else if (video_state == DownloadState::kCancelled ||
                audio_state == DownloadState::kCancelled) {
       job_state = DownloadState::kCancelled;
-    } else if (video_state == DownloadState::kAwaitingFinalize &&
-               audio_state == DownloadState::kAwaitingFinalize) {
+    } else if (video_done && audio_done &&
+               (video_state == DownloadState::kAwaitingFinalize ||
+                audio_state == DownloadState::kAwaitingFinalize)) {
       job_state = DownloadState::kAwaitingFinalize;
     } else if (video_state == DownloadState::kRefreshing ||
                audio_state == DownloadState::kRefreshing) {
@@ -1582,7 +1967,7 @@ void OnlineSession::Poll() {
   snapshot.codecid = codecid_;
   snapshot.complete =
       video_published >= total_ &&
-      (!audio_job_ || audio_published >= audio_total_);
+      (!audio_source_ || audio_published >= audio_total_);
   snapshot.awaiting_finalize = job_state == DownloadState::kAwaitingFinalize;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1690,7 +2075,7 @@ void OnlineSession::FailJobsAndSources(bool keep_cached_readable) {
 }
 
 void OnlineSession::CheckDownloadStall() {
-  if (!job_) {
+  if (!job_ && !audio_job_) {
     return;
   }
   const std::int64_t now = NowMs();
@@ -1755,7 +2140,8 @@ void OnlineSession::Cancel() {
 }
 
 void OnlineSession::Close() {
-  if (!active_.load() && !job_ && !resolve_thread_.joinable()) {
+  if (!active_.load() && !job_ && !audio_job_ &&
+      !resolve_thread_.joinable()) {
     if (poll_timer_) {
       poll_timer_->stop();
     }
@@ -1806,7 +2192,7 @@ bool OnlineSession::FinalizeAfterReadersStopped(QString* error) {
   if (error != nullptr) {
     error->clear();
   }
-  if (!job_) {
+  if (!job_ && !audio_job_) {
     if (error != nullptr) {
       *error = QStringLiteral("没有可完成的下载");
     }

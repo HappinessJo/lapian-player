@@ -637,6 +637,49 @@ void SeedPart(CacheStore* cache, const CacheKey& key, const QByteArray& data,
   file.close();
 }
 
+// T8.17：种一条完整缓存（data.part → data.mp4），可选写 DASH meta。
+bool SeedComplete(CacheStore* cache, const CacheKey& key,
+                  const QByteArray& data,
+                  const lapian::online::CacheMetadata* metadata = nullptr) {
+  QString part_path;
+  qint64 existing = 0;
+  QString error;
+  if (!cache->Reserve(key, data.size(), &error) ||
+      !cache->OpenPart(key, &part_path, &existing, &error)) {
+    std::printf("[FAIL] seed complete reserve: %s\n", error.toUtf8().constData());
+    ++g_failures;
+    return false;
+  }
+  QFile file(part_path);
+  if (!file.open(QIODevice::WriteOnly)) {
+    std::printf("[FAIL] seed complete open\n");
+    ++g_failures;
+    return false;
+  }
+  file.write(data);
+  file.close();
+  if (!cache->MarkComplete(key, &error)) {
+    std::printf("[FAIL] seed complete mark: %s\n", error.toUtf8().constData());
+    ++g_failures;
+    return false;
+  }
+  if (metadata != nullptr && !cache->SetMetadata(key, *metadata, &error)) {
+    std::printf("[FAIL] seed complete meta: %s\n", error.toUtf8().constData());
+    ++g_failures;
+    return false;
+  }
+  return true;
+}
+
+CacheKey MakeAudioKey(const QString& bvid, qint64 cid, int audio_id) {
+  CacheKey key;
+  key.bvid = bvid;
+  key.cid = cid;
+  key.kind = lapian::online::CacheStreamKind::kAudio;
+  key.audio_id = audio_id;
+  return key;
+}
+
 struct JobOutcome {
   DownloadState state = DownloadState::kIdle;
   DownloadStats stats;
@@ -1363,18 +1406,21 @@ void TestDiskFull() {
 // ---------------------------------------------------------------- T12 DASH 单流失败
 
 QByteArray MakeDashJson(const QString& video_url, const QString& audio_url,
-                        qint64 duration_seconds = 10) {
+                        qint64 duration_seconds = 10, int video_qn = 80,
+                        int video_codecid = 7, int audio_id = 30280) {
   QJsonObject video;
-  video.insert(QStringLiteral("id"), 80);
+  video.insert(QStringLiteral("id"), video_qn);
   video.insert(QStringLiteral("baseUrl"), video_url);
   video.insert(QStringLiteral("backupUrl"), QJsonArray());
   video.insert(QStringLiteral("bandwidth"), 2000000);
   video.insert(QStringLiteral("mimeType"), QStringLiteral("video/mp4"));
-  video.insert(QStringLiteral("codecs"), QStringLiteral("avc1.640028"));
+  video.insert(QStringLiteral("codecs"),
+               video_codecid == 12 ? QStringLiteral("hvc1.1.6.L150.90")
+                                   : QStringLiteral("avc1.640028"));
   video.insert(QStringLiteral("width"), 1920);
   video.insert(QStringLiteral("height"), 1080);
   video.insert(QStringLiteral("frameRate"), QStringLiteral("30.000"));
-  video.insert(QStringLiteral("codecid"), 7);
+  video.insert(QStringLiteral("codecid"), video_codecid);
   QJsonObject video_segment;
   video_segment.insert(QStringLiteral("Initialization"), QStringLiteral("0-917"));
   video_segment.insert(QStringLiteral("indexRange"), QStringLiteral("918-1245"));
@@ -1383,7 +1429,7 @@ QByteArray MakeDashJson(const QString& video_url, const QString& audio_url,
   videos.append(video);
 
   QJsonObject audio;
-  audio.insert(QStringLiteral("id"), 30280);
+  audio.insert(QStringLiteral("id"), audio_id);
   audio.insert(QStringLiteral("baseUrl"), audio_url);
   audio.insert(QStringLiteral("backupUrl"), QJsonArray());
   audio.insert(QStringLiteral("bandwidth"), 128000);
@@ -1488,6 +1534,281 @@ void TestDashSingleStreamFailure() {
   CheckLe(close_timer.elapsed(), 1000, "dash_fail: close ≤1s");
   Check(harness.session->job_state() == DownloadState::kIdle,
         "dash_fail: both download jobs joined/released on close");
+}
+
+// ---------------------------------------------------------------- T8.17 切档缓存
+
+int MediaRequestsFor(FakeTransport* transport, const QString& url) {
+  int count = 0;
+  for (const DownloadRequest& request : transport->requests()) {
+    if (request.url == url && request.range_end < 0) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void TestDashCompleteCacheHit() {
+  Section("T8.17 DASH 完整视频+音频：精确缓存命中、0 网络、0 DownloadJob");
+  QTemporaryDir root;
+  CacheStore cache(root.path());
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022;
+  const QString video_url = QStringLiteral("https://cdn.test/dash-v-hit.m4s");
+  const QString audio_url = QStringLiteral("https://cdn.test/dash-a-hit.m4s");
+  auto transport = std::make_shared<FakeTransport>();
+  transport->data = MakeSample(400 * 1024);
+  auto http = std::make_shared<FakeHttp>();
+  http->body = MakeDashJson(video_url, audio_url);
+
+  const CacheKey video_key = MakeKey(bvid, cid, 80, 7);
+  const CacheKey audio_key = MakeAudioKey(bvid, cid, 30280);
+  lapian::online::CacheMetadata meta;
+  meta.dash = true;
+  meta.audio_id = 30280;
+  meta.duration_ms = 10000;
+  meta.width = 1920;
+  meta.height = 1080;
+  meta.fps = 30.0;
+  Check(SeedComplete(&cache, video_key, transport->data, &meta), "hit: seed video");
+  Check(SeedComplete(&cache, audio_key, transport->data), "hit: seed audio");
+
+  SessionHarness harness;
+  harness.session = std::make_unique<OnlineSession>(&cache);
+  harness.session->SetHttpClientForTest(std::make_unique<HttpRef>(http));
+  harness.session->SetDownloadTransportForTest(
+      std::make_unique<TransportRef>(transport));
+  harness.session->SetQualityCatalogEnabledForTest(false);
+  harness.Connect();
+  OnlineRequest request = MakeSessionRequest(video_key);
+  request.requested_qn = 80;
+  request.requested_codecid = 7;
+  QString start_error;
+  Check(harness.session->Start(request, &start_error), "hit: session started");
+  Check(PumpUntil([&]() { return harness.ready; }, 8000), "hit: ready");
+  Check(harness.ready_info.cache_hit, "hit: cache_hit");
+  Check(harness.ready_info.dash, "hit: dash");
+  Check(harness.ready_info.part_path.endsWith(QStringLiteral("data.mp4")),
+        "hit: video path data.mp4");
+  Check(harness.ready_info.audio_part_path.endsWith(QStringLiteral("data.mp4")),
+        "hit: audio path data.mp4");
+  CheckEqI64(harness.ready_info.total_bytes, transport->data.size(),
+             "hit: video total");
+  CheckEqI64(harness.ready_info.audio_total_bytes, transport->data.size(),
+             "hit: audio total");
+  Check(harness.ready_info.source != nullptr &&
+            harness.ready_info.source->Published() == transport->data.size(),
+        "hit: video source fully published");
+  Check(harness.ready_info.audio_source != nullptr &&
+            harness.ready_info.audio_source->Published() ==
+                transport->data.size(),
+        "hit: audio source fully published");
+  CheckEqI64(harness.session->PlayUrlRequestsForTest(), 0,
+             "hit: 0 playurl requests");
+  CheckEqI64(harness.session->DashRequestsForTest(), 0,
+             "hit: 0 DASH catalog requests");
+  CheckEqI64(http->call_count(), 0, "hit: 0 HTTP calls");
+  Check(transport->requests().isEmpty(), "hit: 0 CDN requests");
+  Check(harness.error.isEmpty(), "hit: no error callback");
+  harness.session->Close();
+}
+
+void TestDashMissingAudio() {
+  Section("T8.17 DASH 视频完整/音频缺失：复用视频、只补音频、不误报");
+  QTemporaryDir root;
+  CacheStore cache(root.path());
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022;
+  const QString video_url = QStringLiteral("https://cdn.test/dash-v-miss.m4s");
+  const QString audio_url = QStringLiteral("https://cdn.test/dash-a-miss.m4s");
+  auto transport = std::make_shared<FakeTransport>();
+  transport->data = MakeSample(400 * 1024);
+  auto http = std::make_shared<FakeHttp>();
+  http->body = MakeDashJson(video_url, audio_url);
+
+  const CacheKey video_key = MakeKey(bvid, cid, 80, 7);
+  const CacheKey audio_key = MakeAudioKey(bvid, cid, 30280);
+  lapian::online::CacheMetadata meta;
+  meta.dash = true;
+  meta.audio_id = 30280;
+  meta.duration_ms = 10000;
+  meta.width = 1920;
+  meta.height = 1080;
+  meta.fps = 30.0;
+  Check(SeedComplete(&cache, video_key, transport->data, &meta),
+        "miss_audio: seed video only");
+  const QString video_mp4 = cache.Mp4Path(video_key);
+  const QString video_hash = HashFile(video_mp4);
+
+  SessionHarness harness;
+  harness.session = std::make_unique<OnlineSession>(&cache);
+  harness.session->SetHttpClientForTest(std::make_unique<HttpRef>(http));
+  harness.session->SetDownloadTransportForTest(
+      std::make_unique<TransportRef>(transport));
+  harness.session->SetQualityCatalogEnabledForTest(false);
+  harness.session->SetReadyThresholdForTest(64 * 1024);
+  harness.Connect();
+  OnlineRequest request = MakeSessionRequest(video_key);
+  request.requested_qn = 80;
+  request.requested_codecid = 7;
+  QString start_error;
+  Check(harness.session->Start(request, &start_error),
+        "miss_audio: session started");
+  Check(PumpUntil([&]() { return harness.ready; }, 8000),
+        "miss_audio: ready");
+  Check(!harness.ready_info.cache_hit, "miss_audio: not reported as full hit");
+  Check(harness.ready_info.dash, "miss_audio: dash");
+  CheckEqI64(harness.ready_info.source->Published(), transport->data.size(),
+             "miss_audio: video reused fully");
+  CheckEqI64(MediaRequestsFor(transport.get(), video_url), 0,
+             "miss_audio: video not re-downloaded");
+  Check(MediaRequestsFor(transport.get(), audio_url) >= 1,
+        "miss_audio: audio downloaded");
+  Check(harness.error.isEmpty(), "miss_audio: no error callback");
+  Check(harness.session->LastErrorForTest().isEmpty(),
+        "miss_audio: no user-facing complete-cache error");
+  Check(PumpUntil([&]() { return harness.session->HasPendingFinalize(); },
+                  8000),
+        "miss_audio: audio job finalizable");
+  QString finalize_error;
+  Check(harness.session->FinalizeAfterReadersStopped(&finalize_error),
+        "miss_audio: finalize audio");
+  const std::optional<CacheEntry> audio = cache.Load(audio_key);
+  Check(audio.has_value() && audio->complete,
+        "miss_audio: audio entry complete");
+  const std::optional<CacheEntry> video = cache.Load(video_key);
+  Check(video.has_value() && video->complete,
+        "miss_audio: video entry still complete");
+  CheckEqI64(QFileInfo(video_mp4).size(), transport->data.size(),
+             "miss_audio: video file unchanged");
+  Check(HashFile(video_mp4) == video_hash,
+        "miss_audio: video bytes unchanged");
+  harness.session->Close();
+}
+
+void TestDashRequestedCodecMismatch() {
+  Section("T8.17 请求 codecid 与缓存不同：下载请求的 HEVC，不静默复用 AVC");
+  QTemporaryDir root;
+  CacheStore cache(root.path());
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022;
+  const QString hevc_url = QStringLiteral("https://cdn.test/dash-v-hevc.m4s");
+  const QString audio_url = QStringLiteral("https://cdn.test/dash-a-hevc.m4s");
+  auto transport = std::make_shared<FakeTransport>();
+  transport->data = MakeSample(400 * 1024);
+  auto http = std::make_shared<FakeHttp>();
+  http->body = MakeDashJson(hevc_url, audio_url, 10, 80, 12, 30280);
+
+  const CacheKey avc_key = MakeKey(bvid, cid, 80, 7);
+  const CacheKey hevc_key = MakeKey(bvid, cid, 80, 12);
+  const CacheKey audio_key = MakeAudioKey(bvid, cid, 30280);
+  lapian::online::CacheMetadata meta;
+  meta.dash = true;
+  meta.audio_id = 30280;
+  meta.duration_ms = 10000;
+  meta.width = 1920;
+  meta.height = 1080;
+  meta.fps = 30.0;
+  Check(SeedComplete(&cache, avc_key, transport->data, &meta),
+        "codec: seed AVC video");
+  Check(SeedComplete(&cache, audio_key, transport->data),
+        "codec: seed audio");
+  const QString avc_mp4 = cache.Mp4Path(avc_key);
+  const QString avc_hash = HashFile(avc_mp4);
+
+  SessionHarness harness;
+  harness.session = std::make_unique<OnlineSession>(&cache);
+  harness.session->SetHttpClientForTest(std::make_unique<HttpRef>(http));
+  harness.session->SetDownloadTransportForTest(
+      std::make_unique<TransportRef>(transport));
+  harness.session->SetQualityCatalogEnabledForTest(false);
+  harness.session->SetReadyThresholdForTest(64 * 1024);
+  harness.Connect();
+  OnlineRequest request = MakeSessionRequest(avc_key);
+  request.requested_qn = 80;
+  request.requested_codecid = 12;
+  QString start_error;
+  Check(harness.session->Start(request, &start_error),
+        "codec: session started");
+  Check(PumpUntil([&]() { return harness.ready; }, 8000), "codec: ready");
+  Check(!harness.ready_info.cache_hit, "codec: not a cache hit");
+  CheckEqI64(harness.ready_info.codecid, 12, "codec: actual codecid 12");
+  CheckEqI64(harness.ready_info.qn, 80, "codec: actual qn 80");
+  Check(MediaRequestsFor(transport.get(), hevc_url) >= 1,
+        "codec: requested HEVC downloaded");
+  Check(harness.error.isEmpty(), "codec: no error callback");
+  Check(PumpUntil([&]() { return harness.session->HasPendingFinalize(); },
+                  8000),
+        "codec: HEVC finalizable");
+  QString finalize_error;
+  Check(harness.session->FinalizeAfterReadersStopped(&finalize_error),
+        "codec: finalize HEVC");
+  const std::optional<CacheEntry> hevc = cache.Load(hevc_key);
+  Check(hevc.has_value() && hevc->complete, "codec: HEVC entry complete");
+  const std::optional<CacheEntry> avc = cache.Load(avc_key);
+  Check(avc.has_value() && avc->complete, "codec: AVC entry still complete");
+  CheckEqI64(QFileInfo(avc_mp4).size(), transport->data.size(),
+             "codec: AVC file unchanged");
+  Check(HashFile(avc_mp4) == avc_hash, "codec: AVC bytes unchanged");
+  harness.session->Close();
+}
+
+void TestDashResolvedBothComplete() {
+  Section("T8.17 解析后实际键两条都完整：走 cache-hit，不下载媒体");
+  QTemporaryDir root;
+  CacheStore cache(root.path());
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022;
+  const QString video_url = QStringLiteral("https://cdn.test/dash-v-post.m4s");
+  const QString audio_url = QStringLiteral("https://cdn.test/dash-a-post.m4s");
+  auto transport = std::make_shared<FakeTransport>();
+  transport->data = MakeSample(400 * 1024);
+  auto http = std::make_shared<FakeHttp>();
+  http->body = MakeDashJson(video_url, audio_url);
+
+  const CacheKey video_key = MakeKey(bvid, cid, 80, 7);
+  const CacheKey audio_key = MakeAudioKey(bvid, cid, 30280);
+  lapian::online::CacheMetadata stale_meta;
+  stale_meta.dash = true;
+  stale_meta.audio_id = 9999;  // meta 指向不存在的音频，迫使解析后按实际键检查
+  stale_meta.duration_ms = 10000;
+  stale_meta.width = 1920;
+  stale_meta.height = 1080;
+  stale_meta.fps = 30.0;
+  Check(SeedComplete(&cache, video_key, transport->data, &stale_meta),
+        "post: seed video with stale audio_id");
+  Check(SeedComplete(&cache, audio_key, transport->data),
+        "post: seed actual audio");
+
+  SessionHarness harness;
+  harness.session = std::make_unique<OnlineSession>(&cache);
+  harness.session->SetHttpClientForTest(std::make_unique<HttpRef>(http));
+  harness.session->SetDownloadTransportForTest(
+      std::make_unique<TransportRef>(transport));
+  harness.session->SetQualityCatalogEnabledForTest(false);
+  harness.Connect();
+  OnlineRequest request = MakeSessionRequest(video_key);
+  request.requested_qn = 80;
+  request.requested_codecid = 7;
+  QString start_error;
+  Check(harness.session->Start(request, &start_error), "post: session started");
+  Check(PumpUntil([&]() { return harness.ready; }, 8000), "post: ready");
+  Check(harness.ready_info.cache_hit, "post: cache_hit after resolve");
+  Check(harness.ready_info.dash, "post: dash");
+  CheckEqI64(harness.session->PlayUrlRequestsForTest(), 0,
+             "post: 0 playurl requests");
+  CheckEqI64(harness.session->DashRequestsForTest(), 1,
+             "post: 1 DASH catalog request");
+  CheckEqI64(MediaRequestsFor(transport.get(), video_url), 0,
+             "post: no video media request");
+  CheckEqI64(MediaRequestsFor(transport.get(), audio_url), 0,
+             "post: no audio media request");
+  CheckEqI64(harness.ready_info.source->Published(), transport->data.size(),
+             "post: video source fully published");
+  CheckEqI64(harness.ready_info.audio_source->Published(),
+             transport->data.size(), "post: audio source fully published");
+  Check(harness.error.isEmpty(), "post: no error callback");
+  harness.session->Close();
 }
 
 // ---------------------------------------------------------------- T13 关闭/取消
@@ -1799,6 +2120,10 @@ int main(int argc, char** argv) {
   TestCorruptCacheRebuild();
   TestDiskFull();
   TestDashSingleStreamFailure();
+  TestDashCompleteCacheHit();
+  TestDashMissingAudio();
+  TestDashRequestedCodecMismatch();
+  TestDashResolvedBothComplete();
   TestCloseWhileBuffering();
   TestRedaction();
   TestFourReaders(readers_minutes);

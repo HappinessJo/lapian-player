@@ -3952,6 +3952,9 @@ void MainWindow::TryApplyPendingOnlineQualitySwitch() {
           .arg(online_qn_)
           .arg(mapped_frame)
           .arg(online_switch_old_frame_);
+  // T8.17：切档期间菜单按“会话还不能重新取流”置灰；落地后 pending 已清，
+  // 必须重建一次，否则用户切回其它档时菜单仍是 disabled。
+  RebuildOnlineQualityMenu();
   if (online_switch_old_fps_ > 0.0 && online_actual_fps_ > 0.0 &&
       std::fabs(online_switch_old_fps_ - online_actual_fps_) > 0.01) {
     online_switch_status_ +=
@@ -4881,6 +4884,10 @@ int MainWindow::OnlineDashRequestsForTest() const {
 
 bool MainWindow::OnlineCacheCompleteForTest() const {
   return online_ != nullptr && online_->progress().complete;
+}
+
+bool MainWindow::OnlineCacheFinalizableForTest() const {
+  return online_ != nullptr && online_->HasPendingFinalize();
 }
 
 void MainWindow::SetOnlineHttpClientForTest(

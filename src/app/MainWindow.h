@@ -388,6 +388,9 @@ class MainWindow : public QMainWindow {
   bool OnlineCacheHitForTest() const { return online_cache_hit_; }
   QString OnlineCachePathForTest() const { return online_cache_path_; }
   bool OnlineCacheCompleteForTest() const;
+  // T8.17：切换前等待两路下载都进入可 finalize 状态，保证旧档在切档时落盘
+  // （否则 audio `.part` 不会变成 complete，无法验证“音频已缓存”分支）。
+  bool OnlineCacheFinalizableForTest() const;
   int OnlinePlayUrlRequestsForTest() const;
   int OnlineDashRequestsForTest() const;
   // T8.7 断网验证：注入不会成功的 HTTP 客户端；命中缓存时它不应被调用。

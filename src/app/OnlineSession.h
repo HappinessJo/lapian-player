@@ -240,10 +240,35 @@ class OnlineSession : public QObject {
   // 按 kMiss 继续联网重下（O5-A7/O7-A5“检测/重建/重试成功”）。重建失败仍报错。
   CacheLookupResult TryCacheHit(const OnlineRequest& request, QString* error,
                                 QVector<lapian::online::CacheKey>* rebuild_keys);
+  // T8.10：DASH 命中要求视频+音频都完整；T8.17 起缺音频/缺 audio_id 不再删视频
+  // 重下，而是记录 partial_cache_notice_ 后按 kMiss 继续解析实际 audio key，
+  // 由 StartDashDownload 的精确检查决定“补音频/补视频”。
   CacheLookupResult TryDashCacheHit(const OnlineRequest& request,
                                     const lapian::online::CacheEntry& video,
                                     QString* error,
                                     QVector<lapian::online::CacheKey>* rebuild_keys);
+  // T8.17：解析出实际 video/audio key 后的精确缓存检查（不按请求档位猜）。
+  struct DashCacheInspection {
+    bool video_complete = false;
+    bool audio_complete = false;
+    bool video_broken = false;
+    bool audio_broken = false;
+    lapian::online::CacheEntry video;
+    lapian::online::CacheEntry audio;
+    QString video_path;
+    QString audio_path;
+    QString video_error;
+    QString audio_error;
+  };
+  DashCacheInspection InspectDashCache(
+      const lapian::online::CacheKey& video_key,
+      const lapian::online::CacheKey& audio_key);
+  // 实际键两条都完整：直接 cache-hit（不创建 DownloadJob）。
+  bool EmitResolvedDashCacheHit(const ResolveOutcome& outcome,
+                                const lapian::online::CacheKey& video_key,
+                                const lapian::online::CacheKey& audio_key,
+                                const DashCacheInspection& cache);
+  void EmitDashQualityCatalog();
   bool RebuildCorruptEntries(const QVector<lapian::online::CacheKey>& keys,
                              QString* error);
   void EmitCacheHitReady();
@@ -348,6 +373,11 @@ class OnlineSession : public QObject {
   QString cache_audio_mp4_path_;
   lapian::online::CacheEntry cache_entry_;
   lapian::online::CacheEntry cache_entry_audio_;
+  // T8.17：仅“视频完整、音频缺失”时给 UI 的明确说明；不是错误。
+  QString partial_cache_notice_;
+  // T8.17：某一路实际键已完整、复用本地文件（不再为该路建 DownloadJob）。
+  bool video_reused_complete_ = false;
+  bool audio_reused_complete_ = false;
   double dash_fps_ = 0.0;
   qint64 dash_duration_ms_ = 0;
 

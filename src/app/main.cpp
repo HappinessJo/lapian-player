@@ -56,6 +56,7 @@
 #include "app/OnlineM1TestRunner.h"
 #include "app/OnlineM2TestRunner.h"
 #include "app/OnlineQualityTestRunner.h"
+#include "app/OnlineQualitySwitchTestRunner.h"
 #include "app/OnlineVipTestRunner.h"
 #include "app/OnlineOfflineTestRunner.h"
 #include "app/OnlineQrTestRunner.h"
@@ -625,6 +626,11 @@ int main(int argc, char* argv[]) {
   bool online_quality_odd_qn = false;
   bool online_quality_no_catalog = false;
   QString online_quality_sessdata_file;
+  // T8.17：默认 1080P → 大会员 1080P+ 高码率 → 切回 1080P30。
+  bool online_quality_switch_test = false;
+  int online_quality_switch_high_qn = 112;
+  int online_quality_switch_back_qn = 80;
+  int online_quality_switch_wait_ms = 120000;
   // T8.15：大会员可用档条件验收（O11，非门）。
   bool online_vip_test = false;
   int online_vip_qn = 0;
@@ -982,11 +988,24 @@ int main(int argc, char* argv[]) {
     } else if (!arguments[i].startsWith(QLatin1Char('-')) && file_path.isEmpty()) {
       file_path = arguments[i];
     }
+    // T8.17：单独解析，避免把主参数链再加深一层（MSVC C1061 嵌套上限）。
+    if (arguments[i] == QStringLiteral("--online-quality-switch-test")) {
+      online_quality_switch_test = true;
+    } else if (arguments[i] == QStringLiteral("--quality-switch-high") &&
+               i + 1 < arguments.size()) {
+      online_quality_switch_high_qn = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--quality-switch-back") &&
+               i + 1 < arguments.size()) {
+      online_quality_switch_back_qn = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--quality-switch-wait-ms") &&
+               i + 1 < arguments.size()) {
+      online_quality_switch_wait_ms = arguments[++i].toInt();
+    }
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
-      online_drag_preview_test || online_quality_test || online_m2_test ||
-      online_vip_test ||
+      online_drag_preview_test || online_quality_test ||
+      online_quality_switch_test || online_m2_test || online_vip_test ||
       (online_index_test && online_index_offline_video.isEmpty())) {
     if (online_quality_test && !online_quality_ui) {
       // 无 GUI 的 T8.9 探针在上面已分流；走到这里说明参数组合不成立。
@@ -1109,7 +1128,8 @@ int main(int argc, char* argv[]) {
   QString settings_root = settings_path_arg;
   if ((settings_test || settings_expect || banner_test || online_m1_test ||
        online_longpress_test || online_drag_preview_test || online_buffer_test ||
-       online_offline_test || online_quality_test || online_vip_test ||
+       online_offline_test || online_quality_test ||
+       online_quality_switch_test || online_vip_test ||
        online_fault_test) &&
       settings_root.isEmpty()) {
     QString settings_name = QStringLiteral("/build/t8.6-settings");
@@ -1119,6 +1139,8 @@ int main(int argc, char* argv[]) {
       settings_name = QStringLiteral("/build/t6.5-settings");
     } else if (online_quality_test) {
       settings_name = QStringLiteral("/build/t8.9-settings");
+    } else if (online_quality_switch_test) {
+      settings_name = QStringLiteral("/build/t8.17-settings");
     } else if (online_vip_test) {
       settings_name = QStringLiteral("/build/t8.15-settings");
     } else if (online_fault_test) {
@@ -1294,7 +1316,7 @@ int main(int argc, char* argv[]) {
     window.SetIndexSynchronousForTest(true);
   }
   if (online_m1_test || online_longpress_test || online_drag_preview_test ||
-      online_quality_test || online_vip_test ||
+      online_quality_test || online_quality_switch_test || online_vip_test ||
       (online_m2_test && !online_m2_default_paths) || online_index_test ||
       (online_offline_test && !online_offline_default_paths)) {
     if (online_m1_cache_root.isEmpty()) {
@@ -1307,6 +1329,8 @@ int main(int argc, char* argv[]) {
         cache_name = QStringLiteral("/build/t8.6.1b-online-cache");
       } else if (online_quality_test) {
         cache_name = QStringLiteral("/build/t8.9-online-cache");
+      } else if (online_quality_switch_test) {
+        cache_name = QStringLiteral("/build/t8.17-online-cache");
       } else if (online_vip_test) {
         cache_name = QStringLiteral("/build/t8.15-online-cache");
       } else if (online_m2_test) {
@@ -1338,6 +1362,8 @@ int main(int argc, char* argv[]) {
         pictures_name = QStringLiteral("/build/t8.6.1b-online-pictures");
       } else if (online_quality_test) {
         pictures_name = QStringLiteral("/build/t8.9-online-pictures");
+      } else if (online_quality_switch_test) {
+        pictures_name = QStringLiteral("/build/t8.17-online-pictures");
       } else if (online_vip_test) {
         pictures_name = QStringLiteral("/build/t8.15-online-pictures");
       } else if (online_m2_test) {
@@ -1372,7 +1398,8 @@ int main(int argc, char* argv[]) {
       window.SetOnlineRecordsRootForTest(online_records_root);
     }
   } else if (online_m1_test || online_longpress_test ||
-             online_drag_preview_test || online_quality_test || online_vip_test ||
+             online_drag_preview_test || online_quality_test ||
+             online_quality_switch_test || online_vip_test ||
              (online_m2_test && !online_m2_default_paths) || online_index_test) {
     // T8.7：在线记录现在会落盘；E2E 用独立根，避免 Low 工作区写 AppData
     // 失败时弹出模态“保存失败”阻塞自动化。
@@ -1384,6 +1411,8 @@ int main(int argc, char* argv[]) {
         records_name = QStringLiteral("/build/t8.6.1b-online-records");
       } else if (online_quality_test) {
         records_name = QStringLiteral("/build/t8.9-online-records");
+      } else if (online_quality_switch_test) {
+        records_name = QStringLiteral("/build/t8.17-online-records");
       } else if (online_vip_test) {
         records_name = QStringLiteral("/build/t8.15-online-records");
       } else if (online_m2_test) {
@@ -1604,6 +1633,33 @@ int main(int argc, char* argv[]) {
     online_quality_runner =
         std::make_unique<lapian::app::OnlineQualityUiTestRunner>(&window, options);
     online_quality_runner->Start();
+  }
+
+  // T8.17：默认 1080P → 大会员 1080P+ → 切回 1080P30 的真实窗口探针。
+  std::unique_ptr<lapian::app::OnlineQualitySwitchUiTestRunner>
+      online_quality_switch_runner;
+  if (online_quality_switch_test) {
+    lapian::app::OnlineQualitySwitchTestOptions options;
+    options.bvid = online_m1_bvid;
+    options.cid = online_m1_cid;
+    options.cid_text = online_m1_cid_text;
+    options.tag = online_m1_tag;
+    options.timeout_ms = online_m1_timeout_ms;
+    options.high_qn = online_quality_switch_high_qn > 0
+                          ? online_quality_switch_high_qn
+                          : 112;
+    options.back_qn = online_quality_switch_back_qn > 0
+                          ? online_quality_switch_back_qn
+                          : 80;
+    options.wait_complete_ms = std::max(30000, online_quality_switch_wait_ms);
+    options.sessdata_file = online_quality_sessdata_file;
+    options.cache_root = online_m1_cache_root;
+    options.pictures_root = online_m1_pictures;
+    options.records_root = online_records_root;
+    online_quality_switch_runner =
+        std::make_unique<lapian::app::OnlineQualitySwitchUiTestRunner>(
+            &window, options);
+    online_quality_switch_runner->Start();
   }
 
   // T8.15：大会员可用档条件验收（真实窗口；O11，非 MVP 门）。
