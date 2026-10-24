@@ -19,10 +19,15 @@ struct PreviewFrame {
   std::int64_t pts_us = 0;
   std::int64_t frame_index = -1;
   std::uint64_t generation = 0;
+  // DP-2：精确帧/关键帧粗帧/缓存命中/硬件帧必须可区分；粗帧永远不是最终帧。
+  bool coarse = false;
+  bool from_cache = false;
+  bool hardware = false;
 };
 
 // DP-1：拖动预览诊断。hw_active 只在预览解码器真的走 D3D11VA 时为 true；
 // 打开失败/格式不符/上传失败都会回退软件并记录 hw_fallback_reason。
+// DP-2：增加有界缓存/缩略图/预取/粗帧与分段耗时诊断。
 struct PreviewDiagnostics {
   bool open_attempted = false;
   bool open_ok = false;
@@ -32,9 +37,31 @@ struct PreviewDiagnostics {
   std::string open_error;
   int seeks = 0;
   int cache_hits = 0;
+  int cache_misses = 0;
+  int cache_requests = 0;
+  int cache_evictions = 0;
   int published = 0;
   int decoder_reopens = 0;
   std::size_t cache_frames = 0;
+  std::size_t cache_bytes = 0;
+  std::size_t cache_peak_bytes = 0;
+  std::size_t thumbnail_frames = 0;
+  std::size_t thumbnail_bytes = 0;
+  std::size_t thumbnail_peak_bytes = 0;
+  int coarse_hits = 0;
+  int coarse_requests = 0;
+  int coarse_published = 0;
+  int prefetched_frames = 0;
+  int readbacks = 0;
+  int decoded_frames = 0;
+  double seek_ms_avg = 0.0;
+  double decode_ms_avg = 0.0;
+  double readback_ms_avg = 0.0;
+  double first_coarse_ms = -1.0;
+  double last_coarse_ms = -1.0;
+  bool cache_enabled = true;
+  bool prefetch_enabled = true;
+  bool thumbnails_enabled = true;
   std::int64_t target_frame = 0;
   std::int64_t last_published_frame = -1;
 };
@@ -43,9 +70,12 @@ struct PreviewDiagnostics {
 // 只服务拖动预览：正向拖动从最近关键帧向前解码并发布经过帧；反向拖动只发布
 // 目标帧，避免“重新从关键帧向前冲”造成频闪。不参与松手/步进/输入的精确落点。
 // DP-1：有共享 D3D11 设备且源 ≤1080p 时优先硬解，硬件帧不经过 sws_scale、
-// 直接交给 GfxWidget；失败自动回退软件 NV12（最长边约 1280）。硬件帧不进入
-// 预览缓存，避免占满 D3D11VA 表面池/显存；软件缓存仍是 32 帧。4K/HEVC 超过
+// 直接交给 GfxWidget；失败自动回退软件 NV12（最长边约 1280）。4K/HEVC 超过
 // 保证档时继续走软件预览并记录 source_too_large（不设 4K 通过线）。
+// DP-2：32 帧热缓存保留；新增有界环缓存（192MiB）与粗帧缓存（64MiB）。
+// 反向目标先查精确缓存；局部/慢速反向由独立低优先级预取线程解“上一 GOP”的
+// 软件 NV12 入环缓存；远跳先发粗帧（软件 320×180，硬件关键帧全分辨率）再精确。
+// 硬件帧仍然不直接缓存，也不占 D3D11VA 表面池。
 class PreviewDecoder {
  public:
   PreviewDecoder();

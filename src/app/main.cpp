@@ -567,6 +567,9 @@ int main(int argc, char* argv[]) {
   QString drag_tag;
   bool drag_fast = false;
   int drag_fast_step = 60;
+  int drag_fast_cycles = 1;
+  // DP-2：远跳粗帧探针。
+  bool drag_far = false;
   bool force_software_decode = false;
   // DP-1：只强制本地拖动预览走软件解码，用于验证自动回退路径仍能出帧。
   bool preview_force_software = false;
@@ -746,9 +749,15 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--drag-fast")) {
       drag_test = true;
       drag_fast = true;
+    } else if (arguments[i] == QStringLiteral("--drag-far-test")) {
+      drag_test = true;
+      drag_far = true;
     } else if (arguments[i] == QStringLiteral("--drag-fast-step") &&
                i + 1 < arguments.size()) {
       drag_fast_step = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--drag-fast-cycles") &&
+               i + 1 < arguments.size()) {
+      drag_fast_cycles = arguments[++i].toInt();
     } else if (arguments[i] == QStringLiteral("--drag-samples") &&
                i + 1 < arguments.size()) {
       drag_samples = arguments[++i].toInt();
@@ -1477,6 +1486,10 @@ int main(int argc, char* argv[]) {
     }
     drag_runner = std::make_unique<lapian::app::DragTestRunner>(
         &window, file_path, drag_samples, drag_tag, drag_fast, drag_fast_step);
+    if (drag_far) {
+      drag_runner->EnableFarTest();
+    }
+    drag_runner->SetFastCycles(drag_fast_cycles);
     drag_runner->Start();
   }
 

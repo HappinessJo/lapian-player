@@ -126,6 +126,10 @@ void DragTestRunner::OnReady() {
   }
   window_->ClearFocusForTest();
   window_->FocusVideoForTest();
+  if (far_only_) {
+    RunFar();
+    return;
+  }
   if (fast_only_) {
     RunFast();
     return;
@@ -280,7 +284,41 @@ void DragTestRunner::RunFast() {
       // 保留整个 2s，两者都打印。
       const double effective_fps =
           fast_boundary_hit_ ? active_fps : fast_fps_;
+      const double hit_rate =
+          diagnostics.cache_requests > 0
+              ? static_cast<double>(diagnostics.cache_hits) /
+                    static_cast<double>(diagnostics.cache_requests)
+              : 0.0;
+      const double coarse_hit_rate =
+          diagnostics.coarse_requests > 0
+              ? static_cast<double>(diagnostics.coarse_hits) /
+                    static_cast<double>(diagnostics.coarse_requests)
+              : 0.0;
       window_->ScrubFinishForTest(std::min<qint64>(last_frame_, fast_target_));
+      if (fast_cycle_ + 1 < fast_cycles_) {
+        std::fprintf(
+            stderr,
+            "T8.17 drag_fast_cycle cycle=%d presents=%d cache_hits=%d "
+            "cache_bytes=%lld cache_peak_bytes=%lld thumbnail_bytes=%lld "
+            "max_gap_ms=%.1f\n",
+            fast_cycle_ + 1, fast_presents_, diagnostics.cache_hits,
+            static_cast<long long>(diagnostics.cache_bytes),
+            static_cast<long long>(diagnostics.cache_peak_bytes),
+            static_cast<long long>(diagnostics.thumbnail_bytes),
+            fast_max_gap_ms_);
+        std::fflush(stderr);
+        ++fast_cycle_;
+        fast_boundary_hit_ = false;
+        fast_active_seconds_ = 0.0;
+        fast_active_presents_ = 0;
+        fast_max_gap_ms_ = 0.0;
+        fast_first_present_ms_ = 0.0;
+        fast_has_present_ = false;
+        fast_target_lag_frames_.clear();
+        fast_target_lag_ms_.clear();
+        QTimer::singleShot(50, this, &DragTestRunner::RunFast);
+        return;
+      }
       std::fprintf(
           stderr,
           "T8.17 drag_fast tag=%s file=%s frames=%lld step_frames=%d "
@@ -288,7 +326,14 @@ void DragTestRunner::RunFast() {
           "active_seconds=%.2f active_presents=%d active_fps=%.1f "
           "boundary_hit=%d first_present_ms=%.1f max_gap_ms=%.1f "
           "hw_requested=%d hw_active=%d preview_hw_fallback=%s seeks=%d "
-          "cache_hits=%d preview_published=%d decoder_reopens=%d "
+          "cache_hits=%d cache_misses=%d cache_requests=%d "
+          "cache_hit_rate=%.3f cache_bytes=%lld cache_peak_bytes=%lld "
+          "thumbnail_frames=%lld thumbnail_bytes=%lld "
+          "thumbnail_peak_bytes=%lld coarse_hits=%d coarse_requests=%d "
+          "coarse_hit_rate=%.3f coarse_published=%d first_coarse_ms=%.1f "
+          "last_coarse_ms=%.1f prefetched=%d readbacks=%d "
+          "seek_ms_avg=%.2f decode_ms_avg=%.2f readback_ms_avg=%.2f "
+          "preview_published=%d decoder_reopens=%d "
           "target_lag_samples=%zu target_lag_frames_p50=%.1f "
           "target_lag_frames_p95=%.1f target_lag_frames_max=%.1f "
           "target_lag_ms_p50=%.1f target_lag_ms_p95=%.1f "
@@ -299,10 +344,23 @@ void DragTestRunner::RunFast() {
           active_presents, active_fps, fast_boundary_hit_ ? 1 : 0,
           fast_first_present_ms_, fast_max_gap_ms_,
           diagnostics.hw_requested ? 1 : 0, diagnostics.hw_active ? 1 : 0,
-          fallback_reason.constData(), diagnostics.seeks, diagnostics.cache_hits,
-          diagnostics.published, diagnostics.decoder_reopens,
-          fast_target_lag_frames_.size(), lag_frames.p50, lag_frames.p95,
-          lag_frames.max, lag_ms.p50, lag_ms.p95, lag_ms.max);
+          fallback_reason.constData(), diagnostics.seeks,
+          diagnostics.cache_hits, diagnostics.cache_misses,
+          diagnostics.cache_requests, hit_rate,
+          static_cast<long long>(diagnostics.cache_bytes),
+          static_cast<long long>(diagnostics.cache_peak_bytes),
+          static_cast<long long>(diagnostics.thumbnail_frames),
+          static_cast<long long>(diagnostics.thumbnail_bytes),
+          static_cast<long long>(diagnostics.thumbnail_peak_bytes),
+          diagnostics.coarse_hits, diagnostics.coarse_requests,
+          coarse_hit_rate, diagnostics.coarse_published,
+          diagnostics.first_coarse_ms, diagnostics.last_coarse_ms,
+          diagnostics.prefetched_frames, diagnostics.readbacks,
+          diagnostics.seek_ms_avg, diagnostics.decode_ms_avg,
+          diagnostics.readback_ms_avg, diagnostics.published,
+          diagnostics.decoder_reopens, fast_target_lag_frames_.size(),
+          lag_frames.p50, lag_frames.p95, lag_frames.max, lag_ms.p50,
+          lag_ms.p95, lag_ms.max);
       std::fflush(stderr);
       QCoreApplication::exit(0);
       return;
@@ -320,6 +378,160 @@ void DragTestRunner::RunFast() {
     QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
   };
   QTimer::singleShot(10, Qt::PreciseTimer, this, [tick]() { (*tick)(); });
+}
+
+void DragTestRunner::RunFar() {
+  far_coarse_ms_samples_.clear();
+  far_first_present_ms_samples_.clear();
+  far_exact_ms_samples_.clear();
+  far_release_ms_samples_.clear();
+  BeginFarJump(true);
+}
+
+void DragTestRunner::BeginFarJump(bool forward) {
+  far_forward_ = forward;
+  far_finishing_ = false;
+  if (forward) {
+    far_start_ = std::min<qint64>(300, last_frame_ / 4);
+    far_target_ = std::max<qint64>(3000, last_frame_ - 300);
+  } else {
+    far_start_ = std::max<qint64>(300, last_frame_ - 300);
+    // 不要回到前向起点（那里已被前向拖动缓存），选一个未预热的中间位置。
+    far_target_ = std::max<qint64>(600, last_frame_ / 3);
+  }
+  if (far_target_ == far_start_) {
+    far_target_ = std::clamp<qint64>(far_start_ + (forward ? 1000 : -1000), 0,
+                                     last_frame_ - 1);
+  }
+  // 先停在同一位置 300ms，给缩略图/缓存预热；再远跳。
+  window_->ScrubStartForTest(far_start_);
+  QTimer::singleShot(300, this, [this]() { StartFarTarget(); });
+}
+
+void DragTestRunner::StartFarTarget() {
+  far_coarse_seen_ = false;
+  far_first_present_seen_ = false;
+  far_exact_seen_ = false;
+  far_first_coarse_ms_ = 0.0;
+  far_first_present_ms_ = 0.0;
+  far_exact_ms_ = 0.0;
+  if (far_present_connection_) {
+    disconnect(far_present_connection_);
+    far_present_connection_ = {};
+  }
+  far_present_connection_ = connect(
+      window_, &MainWindow::framePresented, this, [this]() {
+        if (far_finishing_) {
+          return;
+        }
+        const PreviewTestDiagnostics diagnostics =
+            window_->PreviewDiagnosticsForTest();
+        if (diagnostics.displayed_frame >= 0) {
+          if (!far_first_present_seen_) {
+            far_first_present_seen_ = true;
+            far_first_present_ms_ =
+                static_cast<double>(far_jump_timer_.nsecsElapsed()) / 1.0e6;
+          }
+          if (!far_coarse_seen_ && diagnostics.displayed_coarse) {
+            far_coarse_seen_ = true;
+            far_first_coarse_ms_ =
+                static_cast<double>(far_jump_timer_.nsecsElapsed()) / 1.0e6;
+          }
+        }
+        if (!far_exact_seen_ && diagnostics.displayed_frame == far_target_ &&
+            !diagnostics.displayed_coarse) {
+          far_exact_seen_ = true;
+          far_exact_ms_ =
+              static_cast<double>(far_jump_timer_.nsecsElapsed()) / 1.0e6;
+          QTimer::singleShot(0, this, [this]() { FinishFarJump(); });
+        }
+      });
+  far_jump_timer_.start();
+  window_->ScrubTargetForTest(far_target_);
+  QTimer::singleShot(2000, this, [this]() {
+    if (!far_finishing_) {
+      FinishFarJump();
+    }
+  });
+}
+
+void DragTestRunner::FinishFarJump() {
+  if (far_finishing_) {
+    return;
+  }
+  far_finishing_ = true;
+  if (far_present_connection_) {
+    disconnect(far_present_connection_);
+    far_present_connection_ = {};
+  }
+  far_coarse_ms_samples_.push_back(far_coarse_seen_ ? far_first_coarse_ms_
+                                                    : -1.0);
+  far_first_present_ms_samples_.push_back(
+      far_first_present_seen_ ? far_first_present_ms_ : -1.0);
+  far_exact_ms_samples_.push_back(far_exact_seen_ ? far_exact_ms_ : -1.0);
+  QElapsedTimer release_timer;
+  release_timer.start();
+  window_->ScrubFinishForTest(far_target_);
+  far_release_ms_ = static_cast<double>(release_timer.nsecsElapsed()) / 1.0e6;
+  far_release_ms_samples_.push_back(far_release_ms_);
+  if (far_forward_) {
+    BeginFarJump(false);
+    return;
+  }
+  const double forward_coarse = far_coarse_ms_samples_.size() > 0
+                                    ? far_coarse_ms_samples_[0]
+                                    : -1.0;
+  const double forward_exact =
+      far_exact_ms_samples_.size() > 0 ? far_exact_ms_samples_[0] : -1.0;
+  const double backward_coarse = far_coarse_ms_samples_.size() > 1
+                                     ? far_coarse_ms_samples_[1]
+                                     : -1.0;
+  const double backward_exact =
+      far_exact_ms_samples_.size() > 1 ? far_exact_ms_samples_[1] : -1.0;
+  const double release_p95 = Summarize(far_release_ms_samples_, 0.0).p95;
+  std::fprintf(
+      stderr,
+      "T8.17 drag_far tag=%s file=%s frames=%lld start_forward=%lld "
+      "target_forward=%lld start_backward=%lld target_backward=%lld "
+      "forward_coarse_ms=%.1f forward_first_present_ms=%.1f "
+      "forward_exact_ms=%.1f backward_coarse_ms=%.1f "
+      "backward_first_present_ms=%.1f backward_exact_ms=%.1f "
+      "forward_release_ms=%.1f backward_release_ms=%.1f release_p95=%.1f "
+      "hw_requested=%d hw_active=%d preview_hw_fallback=%s "
+      "cache_bytes=%lld cache_peak_bytes=%lld thumbnail_bytes=%lld "
+      "coarse_published=%d readbacks=%d first_coarse_diag=%.1f\n",
+      tag_.toUtf8().constData(), file_.toUtf8().constData(),
+      static_cast<long long>(last_frame_), static_cast<long long>(300),
+      static_cast<long long>(std::max<qint64>(3000, last_frame_ - 300)),
+      static_cast<long long>(std::max<qint64>(300, last_frame_ - 300)),
+      static_cast<long long>(std::max<qint64>(600, last_frame_ / 3)),
+      forward_coarse, far_first_present_ms_samples_.size() > 0
+                          ? far_first_present_ms_samples_[0]
+                          : -1.0,
+      forward_exact, backward_coarse,
+      far_first_present_ms_samples_.size() > 1
+          ? far_first_present_ms_samples_[1]
+          : -1.0,
+      backward_exact,
+      far_release_ms_samples_.size() > 0 ? far_release_ms_samples_[0] : -1.0,
+      far_release_ms_, release_p95,
+      window_->PreviewDiagnosticsForTest().hw_requested ? 1 : 0,
+      window_->PreviewDiagnosticsForTest().hw_active ? 1 : 0,
+      window_->PreviewDiagnosticsForTest().hw_fallback_reason.isEmpty()
+          ? "-"
+          : window_->PreviewDiagnosticsForTest()
+                .hw_fallback_reason.toUtf8()
+                .constData(),
+      static_cast<long long>(window_->PreviewDiagnosticsForTest().cache_bytes),
+      static_cast<long long>(
+          window_->PreviewDiagnosticsForTest().cache_peak_bytes),
+      static_cast<long long>(
+          window_->PreviewDiagnosticsForTest().thumbnail_bytes),
+      window_->PreviewDiagnosticsForTest().coarse_published,
+      window_->PreviewDiagnosticsForTest().readbacks,
+      window_->PreviewDiagnosticsForTest().first_coarse_ms);
+  std::fflush(stderr);
+  QCoreApplication::exit(0);
 }
 
 void DragTestRunner::RunP4() {

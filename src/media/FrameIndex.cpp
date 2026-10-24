@@ -333,6 +333,43 @@ std::int64_t FrameIndex::KeyframeAtOrBefore(std::int64_t pts_us) const {
   return *(it - 1);
 }
 
+std::int64_t FrameIndex::KeyframeAtOrBeforeFrame(std::int64_t frame) const {
+  if (keyframe_frames_.empty()) {
+    return -1;
+  }
+  const auto it = std::upper_bound(keyframe_frames_.begin(),
+                                   keyframe_frames_.end(), frame);
+  if (it == keyframe_frames_.begin()) {
+    return -1;
+  }
+  return *(it - 1);
+}
+
+std::int64_t FrameIndex::PreviousKeyframe(std::int64_t frame) const {
+  const std::int64_t at_or_before = KeyframeAtOrBeforeFrame(frame);
+  if (at_or_before < 0) {
+    return -1;
+  }
+  if (at_or_before < frame) {
+    return at_or_before;
+  }
+  const auto it = std::lower_bound(keyframe_frames_.begin(),
+                                   keyframe_frames_.end(), at_or_before);
+  if (it == keyframe_frames_.begin()) {
+    return -1;
+  }
+  return *(it - 1);
+}
+
+std::int64_t FrameIndex::NextKeyframe(std::int64_t frame) const {
+  const auto it = std::upper_bound(keyframe_frames_.begin(),
+                                   keyframe_frames_.end(), frame);
+  if (it == keyframe_frames_.end()) {
+    return -1;
+  }
+  return *it;
+}
+
 const FrameIndexEntry* FrameIndex::Entry(std::int64_t frame) const {
   if (frame < 0 || static_cast<std::size_t>(frame) >= entries_.size()) {
     return nullptr;

@@ -4994,6 +4994,8 @@ PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   result.target_frame = preview_target_frame_;
   result.displayed_frame = preview_displayed_frame_;
   result.displayed_pts_us = preview_displayed_pts_us_;
+  result.displayed_coarse = preview_displayed_coarse_;
+  result.displayed_from_cache = preview_displayed_from_cache_;
   result.presented = preview_presented_count_;
   if (preview_ == nullptr) {
     return result;
@@ -5004,6 +5006,24 @@ PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   result.hw_fallback_reason = QString::fromStdString(diagnostics.hw_fallback_reason);
   result.seeks = diagnostics.seeks;
   result.cache_hits = diagnostics.cache_hits;
+  result.cache_misses = diagnostics.cache_misses;
+  result.cache_requests = diagnostics.cache_requests;
+  result.coarse_hits = diagnostics.coarse_hits;
+  result.coarse_requests = diagnostics.coarse_requests;
+  result.coarse_published = diagnostics.coarse_published;
+  result.prefetched_frames = diagnostics.prefetched_frames;
+  result.readbacks = diagnostics.readbacks;
+  result.cache_bytes = static_cast<qint64>(diagnostics.cache_bytes);
+  result.cache_peak_bytes = static_cast<qint64>(diagnostics.cache_peak_bytes);
+  result.thumbnail_frames = static_cast<qint64>(diagnostics.thumbnail_frames);
+  result.thumbnail_bytes = static_cast<qint64>(diagnostics.thumbnail_bytes);
+  result.thumbnail_peak_bytes =
+      static_cast<qint64>(diagnostics.thumbnail_peak_bytes);
+  result.first_coarse_ms = diagnostics.first_coarse_ms;
+  result.last_coarse_ms = diagnostics.last_coarse_ms;
+  result.seek_ms_avg = diagnostics.seek_ms_avg;
+  result.decode_ms_avg = diagnostics.decode_ms_avg;
+  result.readback_ms_avg = diagnostics.readback_ms_avg;
   result.published = diagnostics.published;
   result.decoder_reopens = diagnostics.decoder_reopens;
   return result;
@@ -5051,6 +5071,8 @@ void MainWindow::ResetPreviewStatsForTest() {
   preview_target_frame_ = -1;
   preview_displayed_frame_ = -1;
   preview_displayed_pts_us_ = 0;
+  preview_displayed_coarse_ = false;
+  preview_displayed_from_cache_ = false;
   online_preview_wait_status_ = false;
   online_preview_error_shown_ = false;
 }
@@ -5489,6 +5511,8 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     preview_target_frame_ = frame;
     preview_displayed_frame_ = -1;
     preview_displayed_pts_us_ = 0;
+    preview_displayed_coarse_ = false;
+    preview_displayed_from_cache_ = false;
     EnsurePreviewDecoderDevice();
     preview_->Begin(frame);
     if (preview_timer_ != nullptr) {
@@ -5810,6 +5834,8 @@ void MainWindow::OnPreviewTick() {
   ++preview_presented_count_;
   preview_displayed_frame_ = preview_frame.frame_index;
   preview_displayed_pts_us_ = preview_frame.pts_us;
+  preview_displayed_coarse_ = preview_frame.coarse;
+  preview_displayed_from_cache_ = preview_frame.from_cache;
   av_frame_free(&preview_frame.frame);
   if (timing && tick_timer.elapsed() > 200) {
     std::fprintf(stderr, "T2.10 preview_tick_ms=%lld\n",

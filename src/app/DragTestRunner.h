@@ -27,6 +27,10 @@ class DragTestRunner : public QObject {
                  bool fast_only, int fast_step, QObject* parent = nullptr);
 
   void Start();
+  // DP-2：远跳粗帧探针（--drag-far-test）。
+  void EnableFarTest() { far_only_ = true; }
+  // DP-2：同一进程连续跑 N 次快拖，验证缓存峰值不持续增长。
+  void SetFastCycles(int cycles) { fast_cycles_ = cycles > 0 ? cycles : 1; }
 
  private:
   void Begin();
@@ -36,6 +40,10 @@ class DragTestRunner : public QObject {
   void RunP6(int index, int total);
   void RunP4();
   void RunFast();
+  void RunFar();
+  void BeginFarJump(bool forward);
+  void StartFarTarget();
+  void FinishFarJump();
   void RunP7();
   void RunP8();
   void Finish();
@@ -53,6 +61,28 @@ class DragTestRunner : public QObject {
   bool failed_ = false;
   bool fast_only_ = false;
   int fast_step_ = 60;
+  int fast_cycles_ = 1;
+  int fast_cycle_ = 0;
+
+  // DP-2 远跳粗帧探针
+  bool far_only_ = false;
+  bool far_forward_ = true;
+  qint64 far_start_ = 0;
+  qint64 far_target_ = 0;
+  double far_first_coarse_ms_ = 0.0;
+  double far_first_present_ms_ = 0.0;
+  double far_exact_ms_ = 0.0;
+  double far_release_ms_ = 0.0;
+  bool far_coarse_seen_ = false;
+  bool far_first_present_seen_ = false;
+  bool far_exact_seen_ = false;
+  bool far_finishing_ = false;
+  QElapsedTimer far_jump_timer_;
+  QMetaObject::Connection far_present_connection_;
+  std::vector<double> far_coarse_ms_samples_;
+  std::vector<double> far_first_present_ms_samples_;
+  std::vector<double> far_exact_ms_samples_;
+  std::vector<double> far_release_ms_samples_;
 
   // 素材规格
   qint64 last_frame_ = 0;

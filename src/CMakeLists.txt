@@ -166,6 +166,8 @@ add_library(lapian_media STATIC
   media/PathProbe.h
   media/PreviewDecoder.cpp
   media/PreviewDecoder.h
+  media/PreviewRingCache.cpp
+  media/PreviewRingCache.h
   media/SeekEngine.cpp
   media/SeekEngine.h
   media/StatusNotice.cpp

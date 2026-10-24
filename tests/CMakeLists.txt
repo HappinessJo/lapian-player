@@ -337,6 +337,16 @@ set_tests_properties(lapian_preview_decoder_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
 
+# DP-2 预览环缓存/关键帧缩略图缓存：预算、LRU、窗口裁剪、最近关键帧查询。
+add_executable(lapian_preview_cache_test preview_cache_test.cpp)
+lapian_apply_common_options(lapian_preview_cache_test)
+target_link_libraries(lapian_preview_cache_test PRIVATE lapian_media)
+lapian_copy_ffmpeg_dlls(lapian_preview_cache_test)
+
+add_test(NAME lapian_preview_cache_test COMMAND lapian_preview_cache_test)
+set_tests_properties(lapian_preview_cache_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # T8.6.1b 在线拖动预览解码器：GrowingSource 独立读层、降采样、最新目标合并、
 # 反向缓存、过期帧丢弃、未缓存 waiting、End 有界。素材缺失返回 77。
 add_executable(lapian_online_preview_test online_preview_decoder_test.cpp)

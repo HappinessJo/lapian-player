@@ -36,6 +36,10 @@ class FrameIndex {
   bool FindExactPts(std::int64_t pts_us, std::int64_t* frame) const;
   // 目标 PTS 之前（含）最近的关键帧帧号；没有返回 -1。
   std::int64_t KeyframeAtOrBefore(std::int64_t pts_us) const;
+  // DP-2：按帧号取关键帧，供缩略图滑动窗口/预取使用。
+  std::int64_t KeyframeAtOrBeforeFrame(std::int64_t frame) const;
+  std::int64_t PreviousKeyframe(std::int64_t frame) const;
+  std::int64_t NextKeyframe(std::int64_t frame) const;
   const FrameIndexEntry* Entry(std::int64_t frame) const;
 
   lapian::core::TotalFrameCount Total() const;
