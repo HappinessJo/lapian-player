@@ -142,6 +142,7 @@ struct OnlineDragStatsSnapshot {
   qint64 first_publish_ms = -1;
   qint64 first_delivered_ms = -1;
   qint64 last_delivered_before_resume = -1;
+  qint64 baseline_frame = -1;
   int published = 0;
   int delivered = 0;
   int published_before_release = 0;
@@ -504,8 +505,19 @@ class MainWindow : public QMainWindow {
   OnlineDragStatsSnapshot OnlineDragStatsForTest() const {
     return online_drag_stats_;
   }
-  // P0 占位：S1 恒 true；S3 才实现真实后台预热状态。
-  bool OnlinePreviewWarmIdleForTest() const { return true; }
+  qint64 OnlinePreviewBaselineFrameForTest() const {
+    return online_drag_stats_.baseline_frame;
+  }
+  qint64 OnlinePreviewWarmMsForTest() const;
+  qint64 OnlinePreviewWarmFramesForTest() const;
+  std::uint64_t OnlinePreviewWarmSkippedForTest() const;
+  std::uint64_t OnlinePreviewWarmFailuresForTest() const;
+  std::uint64_t OnlinePreviewSeekFallbacksForTest() const;
+  qint64 OnlinePreviewLastSeekKeyframeForTest() const;
+  qint64 OnlinePreviewLastSeekLandingOffsetForTest() const;
+  std::uint64_t OnlinePreviewPrimedFramesForTest() const;
+  bool OnlinePreviewWarmIdleForTest() const;
+  void StopPreviewForTest() { StopPreview(); }
   void ResetPreviewStatsForTest();
   // 自动化模拟“物理键仍按住时收到伪 KeyRelease”；-1 走真实 GetAsyncKeyState。
   void SetStepKeyPhysicalDownForTest(int state) {
@@ -646,11 +658,19 @@ class MainWindow : public QMainWindow {
   void ShowOnlineWaitPrompt(std::int64_t target);
   // T8.6.1b：在线增长会话的独立拖动预览读层。目标只保留最新值；未缓存目标
   // 只显示等待，不在 UI 线程解码/等待。松手先 End 预览，再走精确 seek。
-  void EnsureOnlinePreviewStarted(std::int64_t frame);
+  void EnsureOnlinePreviewStarted(std::int64_t frame,
+                                  bool warm_only = false);
   void MaybeRefreshOnlinePreviewIndex();
   void ApplyOnlinePreviewWaitPrompt(std::int64_t target, bool force);
   void ClearOnlinePreviewWaitPrompt();
   void TickOnlinePreview();
+  // P0：seek 落地/暂停后延迟预热预览解码器；拖动/seek 前取消。
+  void ScheduleOnlinePreviewWarm(std::int64_t frame, int delay_ms = 120);
+  void WarmOnlinePreviewNow();
+  void WarmOnlinePreview(std::int64_t frame);
+  void CancelOnlinePreviewWarm();
+  bool OnlinePreviewWarmAllowed() const;
+  std::int64_t OnlinePreviewDisplayedFrame() const;
   void EndScrubPreview();
   void RequestOnlineSeek(std::int64_t target, lapian::media::FrameCacheMode mode,
                          bool exact_index_covered);
@@ -818,6 +838,10 @@ class MainWindow : public QMainWindow {
   qint64 online_preview_drag_first_delivered_ms_ = -1;
   int online_preview_drag_published_ = 0;
   OnlineDragStatsSnapshot online_drag_stats_;
+  // P0：seek/暂停后的延迟预热（单次定时器，120/200ms 合并）。
+  QTimer* online_preview_warm_timer_ = nullptr;
+  bool online_preview_warm_pending_ = false;
+  std::int64_t online_preview_warm_target_ = -1;
   int preview_presented_count_ = 0;
   // DP-1 本地预览诊断（只 GUI 线程写）：当前目标与最后成功上传的预览帧。
   std::int64_t preview_target_frame_ = -1;

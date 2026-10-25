@@ -111,6 +111,16 @@ class OnlineDragPreviewTestRunner {
     int published_before_release = 0;
     int decoder_published = 0;
     int decoder_delivered = 0;
+    // P0 S3：baseline/预热/seek 落点诊断。
+    qint64 baseline_frame = -1;
+    qint64 warm_ms = -1;
+    qint64 warm_frames = 0;
+    qint64 warm_skipped = 0;
+    qint64 warm_failures = 0;
+    qint64 seek_fallbacks = 0;
+    qint64 seek_keyframe = -1;
+    qint64 seek_offset = 0;
+    qint64 primed_frames = 0;
     int flicker = 0;
     qint64 release_ms = 0;
     qint64 landing_ms = 0;
@@ -131,11 +141,12 @@ class OnlineDragPreviewTestRunner {
   bool EnsureLocalReady(QString* error);
   ParityResult RunParitySequence(const QString& label, qint64 start, qint64 end,
                                  int samples, int duration_ms, bool forward,
-                                 int gap_limit_ms, bool check_snapshot);
+                                 int gap_limit_ms, bool check_snapshot,
+                                 int initial_pump_ms = 80);
   ParityResult RunParityFrames(const QString& label, qint64 start, qint64 end,
                                const std::vector<qint64>& targets,
                                const std::vector<int>& due_ms, bool forward,
-                               int gap_limit_ms);
+                               int gap_limit_ms, int initial_pump_ms = 80);
   ParityResult RunParityZoom(const QString& label, qint64 start, qint64 step,
                              int steps, int step_ms);
   ParityResult RunParityFar(const QString& label, qint64 start, qint64 target,

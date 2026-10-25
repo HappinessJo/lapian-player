@@ -655,6 +655,12 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   cache_fill_timer_->setInterval(0);
   connect(cache_fill_timer_, &QTimer::timeout, this, &MainWindow::FillFrameCacheStep);
 
+  // P0：seek 落地/播放暂停后延迟预热在线预览解码器（单次、可重置）。
+  online_preview_warm_timer_ = new QTimer(this);
+  online_preview_warm_timer_->setSingleShot(true);
+  connect(online_preview_warm_timer_, &QTimer::timeout, this,
+          &MainWindow::WarmOnlinePreviewNow);
+
   connect(timeline_, &TimelineWidget::scrubStarted, this, &MainWindow::OnScrubStarted);
   connect(timeline_, &TimelineWidget::scrubTargetChanged, this,
           &MainWindow::OnScrubTargetChanged);
@@ -3058,6 +3064,13 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
       !session_->growing_source_for_index()) {
     return;
   }
+  // P0：seek 前取消延迟预热，并保证预览 reader 已关闭，不与精确 seek 抢
+  // `.part`；拖动中的预览由 OnScrubFinished 负责停。
+  CancelOnlinePreviewWarm();
+  if (online_preview_ != nullptr && !online_preview_drag_active_ &&
+      !(preview_timer_ != nullptr && preview_timer_->isActive())) {
+    online_preview_->Pause();
+  }
   // 取消上一个 seek：单读者 interrupt 不会取消共享下载源。
   if (online_seek_running_) {
     if (online_seek_cancel_) {
@@ -3266,6 +3279,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                     session_->info().rotation.counterclockwise_degrees;
                 gfx_->SetVideoFrame(result->frame.get(), rotation);
                 RememberDisplayedFrame(result->frame.get(), rotation, target);
+                ScheduleOnlinePreviewWarm(target);
                 info_bar_->SetFrame(static_cast<int>(target));
                 timeline_->SetCurrentFrame(target);
                 if (playback_) {
@@ -3316,6 +3330,7 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (!online_ && !online_mode_) {
     return;
   }
+  CancelOnlinePreviewWarm();
   const bool log = qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG");
   auto mark = [log](const char* step) {
     if (log) {
@@ -5121,6 +5136,41 @@ int MainWindow::OnlinePreviewCachedFramesForTest() const {
   return online_preview_ != nullptr ? online_preview_->cached_frames() : 0;
 }
 
+qint64 MainWindow::OnlinePreviewWarmMsForTest() const {
+  return online_preview_ != nullptr ? online_preview_->warm_ms() : -1;
+}
+
+qint64 MainWindow::OnlinePreviewWarmFramesForTest() const {
+  return online_preview_ != nullptr ? online_preview_->warm_frames() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewWarmSkippedForTest() const {
+  return online_preview_ != nullptr ? online_preview_->warm_skipped() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewWarmFailuresForTest() const {
+  return online_preview_ != nullptr ? online_preview_->warm_failures() : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewSeekFallbacksForTest() const {
+  return online_preview_ != nullptr ? online_preview_->seek_fallbacks() : 0;
+}
+
+qint64 MainWindow::OnlinePreviewLastSeekKeyframeForTest() const {
+  return online_preview_ != nullptr ? online_preview_->last_seek_keyframe()
+                                    : -1;
+}
+
+qint64 MainWindow::OnlinePreviewLastSeekLandingOffsetForTest() const {
+  return online_preview_ != nullptr
+             ? online_preview_->last_seek_landing_offset()
+             : 0;
+}
+
+std::uint64_t MainWindow::OnlinePreviewPrimedFramesForTest() const {
+  return online_preview_ != nullptr ? online_preview_->primed_frames() : 0;
+}
+
 void MainWindow::ResetPreviewStatsForTest() {
   online_preview_target_ = -1;
   online_preview_last_frame_ = -1;
@@ -5625,12 +5675,14 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   }
   if (OnlineStepEligible()) {
     // T8.6.1b：增长会话走独立的 GrowingSource 预览读层；未缓存区只提示等待。
+    CancelOnlinePreviewWarm();
     // P0：本次拖动度量（只读；即使预览器创建失败也记录拖动起点）。
     online_preview_drag_clock_.start();
     online_preview_drag_active_ = true;
     online_preview_drag_first_delivered_ms_ = -1;
     online_preview_drag_published_ = 0;
     online_drag_stats_ = OnlineDragStatsSnapshot{};
+    const std::int64_t displayed = OnlinePreviewDisplayedFrame();
     const bool cached = OnlineFrameCached(frame);
     EnsureOnlinePreviewStarted(frame);
     if (online_preview_ != nullptr) {
@@ -5638,7 +5690,10 @@ void MainWindow::OnScrubStarted(qint64 frame) {
       MaybeRefreshOnlinePreviewIndex();
       // 上一次拖动松手后只 Pause，保留有界帧缓存；这里复用解码器/缓存，
       // 不再从关键帧重解（长 GOP 冷启动空档）。
-      online_preview_->Resume(frame, cached);
+      online_preview_->Resume(frame, cached, displayed);
+      if (displayed_frame_ != nullptr && displayed >= 0) {
+        online_preview_->PrimeFrame(displayed_frame_, displayed);
+      }
       if (preview_timer_ != nullptr) {
         preview_timer_->setInterval(16);
         if (!preview_timer_->isActive()) {
@@ -5736,6 +5791,7 @@ void MainWindow::OnScrubFinished(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
+  CancelOnlinePreviewWarm();
   // P0：松手前保存本次在线拖动度量（只读，不改变 Pause/End 语义）。
   if (preview_ == nullptr && online_preview_drag_active_) {
     OnlineDragStatsSnapshot snapshot;
@@ -5752,6 +5808,7 @@ void MainWindow::OnScrubFinished(qint64 frame) {
       snapshot.first_publish_ms = stats.first_publish_ms;
       snapshot.last_delivered_before_resume =
           stats.last_delivered_before_resume;
+      snapshot.baseline_frame = stats.baseline_frame;
       snapshot.published = static_cast<int>(stats.published);
       snapshot.delivered = static_cast<int>(stats.delivered);
     }
@@ -5805,6 +5862,7 @@ void MainWindow::OnScrubFinished(qint64 frame) {
 }
 
 void MainWindow::EndScrubPreview() {
+  CancelOnlinePreviewWarm();
   online_preview_drag_active_ = false;
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
@@ -5829,7 +5887,8 @@ void MainWindow::EndScrubPreview() {
   ClearOnlinePreviewWaitPrompt();
 }
 
-void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame) {
+void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame,
+                                            bool warm_only) {
   if (online_preview_ != nullptr || !OnlineStepEligible() || session_ == nullptr) {
     return;
   }
@@ -5853,13 +5912,104 @@ void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame) {
   const bool initial_cached = OnlineFrameCached(frame);
   online_preview_->Begin(std::move(source), part_path,
                          session_->video_stream_index(), std::move(snapshot),
-                         frame, initial_cached);
-  if (preview_timer_ != nullptr) {
+                         frame, initial_cached, OnlinePreviewDisplayedFrame(),
+                         warm_only);
+  if (!warm_only && preview_timer_ != nullptr) {
     preview_timer_->setInterval(16);
     if (!preview_timer_->isActive()) {
       preview_timer_->start();
     }
   }
+}
+
+std::int64_t MainWindow::OnlinePreviewDisplayedFrame() const {
+  if (displayed_frame_index_ >= 0) {
+    return displayed_frame_index_;
+  }
+  return current_frame_;
+}
+
+bool MainWindow::OnlinePreviewWarmAllowed() const {
+  if (!OnlineStepEligible() || session_ == nullptr || !session_->IsOpen()) {
+    return false;
+  }
+  if (online_preview_drag_active_) {
+    return false;
+  }
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    return false;
+  }
+  if (online_seek_running_) {
+    return false;
+  }
+  if (playback_ != nullptr && playback_->IsPlaying()) {
+    return false;
+  }
+  return true;
+}
+
+void MainWindow::CancelOnlinePreviewWarm() {
+  online_preview_warm_pending_ = false;
+  online_preview_warm_target_ = -1;
+  if (online_preview_warm_timer_ != nullptr) {
+    online_preview_warm_timer_->stop();
+  }
+}
+
+void MainWindow::ScheduleOnlinePreviewWarm(std::int64_t frame, int delay_ms) {
+  if (online_preview_warm_timer_ == nullptr) {
+    return;
+  }
+  if (!OnlinePreviewWarmAllowed()) {
+    return;
+  }
+  if (frame < 0 || !OnlineFrameCached(frame)) {
+    return;
+  }
+  online_preview_warm_pending_ = true;
+  online_preview_warm_target_ = frame;
+  online_preview_warm_timer_->start(std::max(0, delay_ms));
+}
+
+void MainWindow::WarmOnlinePreviewNow() {
+  if (!online_preview_warm_pending_) {
+    return;
+  }
+  const std::int64_t target = online_preview_warm_target_;
+  online_preview_warm_pending_ = false;
+  online_preview_warm_target_ = -1;
+  if (target < 0 || !OnlinePreviewWarmAllowed() ||
+      !OnlineFrameCached(target)) {
+    return;
+  }
+  WarmOnlinePreview(target);
+}
+
+void MainWindow::WarmOnlinePreview(std::int64_t frame) {
+  CancelOnlinePreviewWarm();
+  if (online_preview_ == nullptr) {
+    // 线程未起过：Begin(warm_only=true) 直接静默预热，不启动 preview_timer。
+    EnsureOnlinePreviewStarted(frame, /*warm_only=*/true);
+    return;
+  }
+  online_preview_->Warm(frame);
+}
+
+bool MainWindow::OnlinePreviewWarmIdleForTest() const {
+  if (online_preview_drag_active_) {
+    return false;
+  }
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    return false;
+  }
+  if (online_preview_warm_pending_) {
+    return false;
+  }
+  if (online_preview_warm_timer_ != nullptr &&
+      online_preview_warm_timer_->isActive()) {
+    return false;
+  }
+  return online_preview_ == nullptr || online_preview_->IsWarmIdle();
 }
 
 void MainWindow::MaybeRefreshOnlinePreviewIndex() {
@@ -6003,6 +6153,7 @@ void MainWindow::EnsurePreviewDecoderDevice() {
 }
 
 void MainWindow::StopPreview() {
+  CancelOnlinePreviewWarm();
   online_preview_drag_active_ = false;
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
@@ -7038,6 +7189,20 @@ void MainWindow::OnPlaybackStateChanged(bool playing) {
     } else {
       audio_->Pause();
     }
+  }
+  // P0：播放时关掉预热 reader（避免与播放抢 `.part`）；暂停后延迟预热，
+  // 让“暂停→第一次拖动”命中缓存。
+  if (playing) {
+    CancelOnlinePreviewWarm();
+    if (online_preview_ != nullptr && !online_preview_drag_active_ &&
+        !(preview_timer_ != nullptr && preview_timer_->isActive())) {
+      online_preview_->Pause();
+    }
+  } else if (OnlineStepEligible() && session_ != nullptr &&
+             session_->IsOpen() && !online_seek_running_ &&
+             !online_preview_drag_active_ &&
+             !(preview_timer_ != nullptr && preview_timer_->isActive())) {
+    ScheduleOnlinePreviewWarm(current_frame_, 200);
   }
 }
 
