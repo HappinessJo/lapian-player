@@ -290,6 +290,8 @@
 | `plan.md` | v0.2 + v2 章节 v0.3 | 2026-10-19 / 2026-10-23 | v1 技术规划（已同步 v0.3）+ v2 在线增量章节（定稿） |
 | `tasks.md` | v0.28 | 2026-10-22 | 任务清单；T7.7 清单/预检、内部预览收口；正式 T7.7/P14 暂缓 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
+| `docs/ui-v2-plan.md` | v1.0 | 2026-10-26 | **UI v2 规划（P1–P8）已批准**：4 项决策按建议通过（去掉画面区 26px 表头 / M4 改为 62-62-55-59 + 每栏 ±2px / 三档密度按客户区高度自动取档 / QSplitter+自定义 handle）；空态隐藏 GfxWidget（实测 HWND 不重建）、TimelineModel 仍是唯一 source of truth、InfoBar 删除、`LAPIAN_UI_V2` 环境变量；零产品代码改动。评审版原型 [plan.html](docs/ui-v2-proto/plan.html)；3A 开工提示词 [next-session-prompt-ui-v2-3a.md](docs/next-session-prompt-ui-v2-3a.md) |
+| `docs/ui-v2-proto/` | — | 2026-10-26 | 可点原型：`index.html`（讨论版，含三档密度/`?hdr=0`）、`plan.html`（评审版，默认即规划形态）、`NOTES.md` |
 | `docs/spec-v0.3-p6p7-proposal.md` | v1.0 | 2026-10-19 | P6/P7 方案 A 提案，已拍板并应用 |
 | `docs/adr/ADR-001`–`006` | v1 | 2026-10-19 | 已接受 |
 | `docs/handoff-2026-10-19.md` | v2 | 2026-10-19 | 历史交接（已由 2026-10-20 交接取代） |
