@@ -1,9 +1,12 @@
 # 新会话提示词：拉片软件 UI v2（定义阶段）
 
-- **状态**：**定义阶段已完成（2026-10-25），待用户批准**。产物：
+- **状态**：**定义阶段已收口（2026-10-25）**。产物：
   [ui-v2-definition.md](ui-v2-definition.md)（范围/原则/指标/状态/风险）、
   [ui-v2-wireframes.md](ui-v2-wireframes.md)（3 张低保真）、
-  `build/ui-baseline/`（真实截屏 + INDEX，不入库）。规划阶段仍待另开会话。
+  [ui-v2-proto/index.html](ui-v2-proto/index.html)（可点原型，已入库）、
+  [ui-v2-feedback-2026-10-25.md](ui-v2-feedback-2026-10-25.md)（四轮反馈 + 收口口径）。
+  **规划阶段见 [next-session-prompt-ui-v2-plan.md](next-session-prompt-ui-v2-plan.md) 与
+  [交接单](handoff-2026-10-25-ui-v2-planning.md)。**
 - **用途**：UI 全面重做的第一阶段。**只做定义，不写产品代码。**
 - **基线**：代码 HEAD `352b29f`，安装版 0.1.0；P0 发布收口完成（parity 61/0、
   cold first_publish 26ms、post 46ms、稳态 56.7–56.9fps；`ctest` 37/37、
