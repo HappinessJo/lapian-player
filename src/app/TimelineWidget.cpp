@@ -1,4 +1,6 @@
-#include "app/TimelineWidget.h"
+﻿#include "app/TimelineWidget.h"
+
+#include "app/ui/Tokens.h"
 
 #include <QColor>
 #include <QFont>
@@ -196,17 +198,57 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 int TimelineWidget::RulerHeight() const {
+  if (height_policy_ == HeightPolicy::kFill) {
+    const int available = std::max(0, height() - kScrollBarHeight);
+    return std::max(0, available - WaveformHeight());
+  }
   return std::max(0, height() - kScrollBarHeight - WaveformHeight());
 }
 
 int TimelineWidget::WaveformHeight() const {
-  return waveform_active_ && waveform_visible_ ? kWaveformHeight : 0;
+  if (!(waveform_active_ && waveform_visible_)) {
+    return 0;
+  }
+  if (height_policy_ == HeightPolicy::kFill) {
+    // Fill（v2 壳层）：波形跟着面板高度走，但**封顶 96**、下限 8
+    // （规划 §4.5：拉到 340 时波形不跟着变成巨大色块）。
+    const int available = std::max(0, height() - kScrollBarHeight);
+    const int target = static_cast<int>(available * 0.62);
+    return std::clamp(target, 8, lapian::ui::TokensFor(
+                                     lapian::ui::Density::kRegular)
+                                     .waveform_cap);
+  }
+  return kWaveformHeight;
 }
 
 void TimelineWidget::UpdateHeight() {
+  if (height_policy_ == HeightPolicy::kFill) {
+    // Fill：高度由外层面板决定（v2 的 TimelinePanel），这里不再 setFixedHeight。
+    setMinimumHeight(0);
+    setMaximumHeight(QWIDGETSIZE_MAX);
+    updateGeometry();
+    update();
+    return;
+  }
   setFixedHeight(kTimelineBaseHeight + WaveformHeight());
   updateGeometry();
   update();
+}
+
+void TimelineWidget::SetHeightPolicy(HeightPolicy policy) {
+  if (height_policy_ == policy) {
+    return;
+  }
+  height_policy_ = policy;
+  if (height_policy_ == HeightPolicy::kFill) {
+    setMinimumHeight(0);
+    setMaximumHeight(QWIDGETSIZE_MAX);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  } else {
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    UpdateHeight();
+  }
+  UpdateHeight();
 }
 
 void TimelineWidget::SetWaveformSource(WaveformCountFn count,

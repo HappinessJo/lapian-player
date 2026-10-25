@@ -25,6 +25,17 @@ class TimelineWidget : public QWidget {
  public:
   explicit TimelineWidget(QWidget* parent = nullptr);
 
+  // 高度策略（规划附录 A.6）：
+  //  kFixed = 现状（72 + 波形 56，setFixedHeight）——tests/timeline_test.cpp 的
+  //           128/72 断言依赖它，**默认不变**。
+  //  kFill  = v2 壳层用：高度跟随外层面板（96–340），波形按高度算并封顶 96。
+  enum class HeightPolicy {
+    kFixed = 0,
+    kFill = 1,
+  };
+  void SetHeightPolicy(HeightPolicy policy);
+  HeightPolicy height_policy() const { return height_policy_; }
+
   void Clear();
   void SetFrameCount(std::int64_t count);
   void SetCurrentFrame(std::int64_t frame);
@@ -106,6 +117,7 @@ class TimelineWidget : public QWidget {
 
   lapian::core::TimelineModel model_;
   QScrollBar* scroll_bar_ = nullptr;
+  HeightPolicy height_policy_ = HeightPolicy::kFixed;
   std::int64_t current_frame_ = 0;
   std::int64_t drag_target_frame_ = 0;
   bool fit_mode_ = true;

@@ -1,4 +1,4 @@
-#include <QAbstractButton>
+﻿#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
@@ -62,6 +62,7 @@
 #include "app/OnlineQrTestRunner.h"
 #include "app/OnlineResolveTestRunner.h"
 #include "app/RobustTestRunner.h"
+#include "app/ui/Theme.h"
 
 namespace {
 
@@ -529,6 +530,28 @@ int main(int argc, char* argv[]) {
   QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
   QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
   QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+
+  // UI v2（3A）：开关在构造 MainWindow 之前**只读一次**；两套布局互斥构建，
+  // 不做运行期切换（规划 §7.3/Q5）。环境变量 LAPIAN_UI_V2 或命令行 --ui-v2。
+  auto env_flag_enabled = [](const char* name) {
+    if (!qEnvironmentVariableIsSet(name)) {
+      return false;
+    }
+    const QString value = qEnvironmentVariable(name).trimmed().toLower();
+    return value == QStringLiteral("1") || value == QStringLiteral("true") ||
+           value == QStringLiteral("on") || value == QStringLiteral("yes");
+  };
+  const bool ui_v2 =
+      HasArgument(argc, argv, "--ui-v2") || env_flag_enabled("LAPIAN_UI_V2");
+  if (ui_v2) {
+    // 主题只在 v2 下应用：旧壳外观必须与 352b29f 完全一致（回滚要求）。
+    QElapsedTimer theme_timer;
+    theme_timer.start();
+    lapian::ui::ApplyTheme(app);
+    std::fprintf(stderr, "ui_v2 enabled=1 theme=applied theme_ms=%.2f\n",
+                 static_cast<double>(theme_timer.nsecsElapsed()) / 1.0e6);
+    std::fflush(stderr);
+  }
 
   // T1.4：支持 --file <path> 与系统文件关联传入的第一个本地路径。
   QString file_path;
@@ -1300,7 +1323,7 @@ int main(int argc, char* argv[]) {
       break;
     }
   }
-  MainWindow window(nullptr, settings_root, !running_test_mode);
+  MainWindow window(nullptr, settings_root, !running_test_mode, ui_v2);
   if (online_m2_force_durl &&
       (online_m1_test || online_longpress_test || online_drag_preview_test ||
        online_quality_test)) {
@@ -1838,10 +1861,16 @@ int main(int argc, char* argv[]) {
 
   // 事件循环第一次派发：窗口已 show 且能处理事件（P1 的“可交互”口径）。
   QTimer::singleShot(0, &window, [&app, &window, startup_test, startup_log, startup_ms,
-                                  file_path]() {
+                                  file_path, ui_v2]() {
     if (startup_log) {
       std::fprintf(stderr, "T7.1 startup stage=ui_ready t_ms=%.2f\n",
                    startup_ms(std::chrono::steady_clock::now()));
+      // A.8：d3d_init_at_startup=0 表示"空态隐藏 GfxWidget 生效"——即 D3D11
+      // 不是在窗口 show 时就创建，而是被首次打开媒体触发（P1 因此更快）。
+      std::fprintf(stderr,
+                   "T7.1 startup d3d_init_at_startup=%d ui_v2=%d density=%s\n",
+                   window.D3dInitAtStartupForTest() ? 1 : 0, ui_v2 ? 1 : 0,
+                   window.DensityNameForTest().toUtf8().constData());
       std::fflush(stderr);
     }
     if (startup_test && file_path.isEmpty()) {
@@ -2800,6 +2829,22 @@ int main(int argc, char* argv[]) {
           check("frame-100", window.CurrentFrameForTest() == 100);
           check("display-1920x1080",
                 window.SnapshotDisplaySizeForTest() == QSize(1920, 1080));
+          // A.8：全屏 chrome 断言。旧壳返回 v2=0（没有顶栏/横幅，状态栏与
+          // 检查器在全屏下保留），所以隐藏类断言只在 v2 壳里检查。
+          const QString chrome = window.FullScreenChromeForTest();
+          std::fprintf(stderr, "T6.1 fullscreen_chrome chrome=%s\n",
+                       chrome.toUtf8().constData());
+          std::fflush(stderr);
+          check("chrome-appbar", chrome.contains(QStringLiteral("appbar=0")));
+          check("chrome-timeline", chrome.contains(QStringLiteral("timeline=1")));
+          if (chrome.contains(QStringLiteral("v2=1"))) {
+            check("chrome-banner", chrome.contains(QStringLiteral("banner=0")));
+            check("chrome-status", chrome.contains(QStringLiteral("status=0")));
+            check("chrome-inspector",
+                  chrome.contains(QStringLiteral("inspector=0")));
+            check("chrome-transport",
+                  chrome.contains(QStringLiteral("transport=1")));
+          }
           // 全屏布局截图：视频区是原生 HWND，grab() 只能拿到黑底；截图只用于
           // 证明时间轴/信息栏/侧栏没有被全屏裁掉（已知限制，见交接）。
           const QString shot =

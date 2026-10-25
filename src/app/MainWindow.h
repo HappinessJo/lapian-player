@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QPointer>
+#include <QRect>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -46,7 +47,9 @@ class MarkPanel;
 class OnlineResolveDialog;
 class CacheSettingsDialog;
 class PlaybackController;
+class PlayerShell;
 class SnapshotService;
+class StageStack;
 class TimelineWidget;
 
 namespace lapian::core {
@@ -156,8 +159,29 @@ class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(QWidget* parent = nullptr,
                       const QString& settings_root = QString(),
-                      bool enable_cache_maintenance = true);
+                      bool enable_cache_maintenance = true,
+                      bool ui_v2 = false);
   ~MainWindow() override;
+
+  // UI v2（3A）：壳层开关与视图根。旧壳（false）行为与 352b29f 完全一致。
+  bool UiV2ForTest() const { return ui_v2_enabled_; }
+  PlayerShell* ShellForTest() const { return shell_; }
+  // §7.8 测试缝（全部只读/无副作用，除 SetSplitSizes/DragSplitter）。
+  QString ShellStateForTest() const;
+  QString DensityNameForTest() const;
+  int GfxVisibleForTest() const;
+  QString StagePageForTest() const;
+  int BannerSlotHeightForTest() const;
+  QRect BannerSlotGeometryForTest() const;
+  QString SplitterStateForTest() const;
+  void SetSplitSizesForTest(int timeline, int inspector);
+  void DragSplitterForTest(bool vertical, int delta);
+  bool InspectorCollapsedForTest() const;
+  QString FullScreenChromeForTest() const;
+  QString ReadoutTextForTest() const;
+  QRect ReadoutGeometryForTest() const;
+  // T7.1：D3D11 是否在"没有媒体打开请求"时就初始化（旧壳=1，v2 空态隐藏=0）。
+  bool D3dInitAtStartupForTest() const { return d3d_init_at_startup_; }
 
   // T8.1 在线解析：Ctrl+U 打开的模型对话框；测试入口走同一路径。
   void OpenOnlineDialogForTest();
@@ -587,6 +611,17 @@ class MainWindow : public QMainWindow {
   };
 
   void ShowEmptyState();
+  // UI v2 壳层：构造视图根并"搬不换"地把既有控件 reparent 进新区。
+  void BuildShellUi();
+  void AdoptShellWidgets();
+  void UpdateDensity();
+  void UpdateShellStage();
+  void UpdateShellModeChip();
+  void ShowShellHelp();
+  QStringList LayoutProblemsLegacy() const;
+  QStringList LayoutProblemsV2() const;
+  QString LayoutStateLegacy() const;
+  QString LayoutStateV2() const;
   void ShowOnlineDialog();
   bool LookupOnlineCacheForDialog(const QString& bvid,
                                   OnlineCacheSummary* summary, QString* error);
@@ -751,6 +786,15 @@ class MainWindow : public QMainWindow {
 
   GfxWidget* gfx_ = nullptr;
   QWidget* stage_ = nullptr;
+  // UI v2（3A）：视图根与画面区栈；旧壳下为 nullptr。
+  bool ui_v2_enabled_ = false;
+  PlayerShell* shell_ = nullptr;
+  StageStack* stage_stack_ = nullptr;
+  bool media_open_requested_ = false;
+  bool d3d_init_at_startup_ = false;
+  bool d3d_init_seen_ = false;
+  bool inspector_auto_decided_ = false;
+  bool updating_layout_ = false;
   TimelineWidget* timeline_ = nullptr;
   InfoBar* info_bar_ = nullptr;
   MarkPanel* mark_panel_ = nullptr;

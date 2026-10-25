@@ -201,7 +201,9 @@ target_include_directories(lapian_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # T8.6：AudioEngine/WaveformGenerator 增加可增长读层入口（GrowingFormat）。
 target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt)
 
-# 产品可执行程序（T0.1：空窗口 + D3D11 清屏）
+# UI v2 壳层（2026-10-26，3A）：Tokens/Theme/PlayerShell/PlayerSplitter/TopBar/
+# BannerSlot/StageStack/TransportBar。只在 LAPIAN_UI_V2/--ui-v2 打开时构建，
+# 旧壳路径保持原样（可回退，规划 §7.3）。
 qt_add_executable(lapian WIN32
   app/main.cpp
   app/MainWindow.cpp
@@ -210,6 +212,21 @@ qt_add_executable(lapian WIN32
   app/GfxWidget.h
   app/InfoBar.cpp
   app/InfoBar.h
+  app/ui/Tokens.h
+  app/ui/Theme.h
+  app/ui/Theme.cpp
+  app/ui/PlayerSplitter.h
+  app/ui/PlayerSplitter.cpp
+  app/ui/TopBar.h
+  app/ui/TopBar.cpp
+  app/ui/BannerSlot.h
+  app/ui/BannerSlot.cpp
+  app/ui/StageStack.h
+  app/ui/StageStack.cpp
+  app/ui/TransportBar.h
+  app/ui/TransportBar.cpp
+  app/ui/PlayerShell.h
+  app/ui/PlayerShell.cpp
   app/CacheSettingsDialog.cpp
   app/CacheSettingsDialog.h
   app/DragTestRunner.cpp
