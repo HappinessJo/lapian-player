@@ -190,6 +190,36 @@ struct OnlinePreviewDecoder::Impl {
   std::chrono::steady_clock::time_point drag_stats_start{};
   bool drag_stats_started = false;
 
+  // P0 seek 诊断（只读）：strict 关键帧 seek 失败回退、最近一次 seek 落点。
+  std::uint64_t seek_fallbacks = 0;
+  std::int64_t last_seek_keyframe = -1;
+  std::int64_t last_seek_landing_frame = -1;
+  std::int64_t last_seek_landing_offset = 0;
+  bool seek_landing_pending = false;
+
+  // P0 预热（Warm）：静默、低优先级；完成后线程/decoder/reader 保持 idle。
+  bool warm_requested = false;
+  bool warming = false;
+  bool warm_idle = true;
+  std::uint64_t warm_epoch = 0;
+  std::int64_t warm_origin = -1;
+  std::int64_t warm_target = -1;
+  std::chrono::steady_clock::time_point warm_start{};
+  bool warm_started = false;
+  std::int64_t warm_ms = -1;
+  std::int64_t warm_frames = 0;
+  std::uint64_t warm_skipped = 0;
+  std::uint64_t warm_failures = 0;
+
+  // P0 PrimeFrame：线程未启动时暂存，Run 打开解码器后处理。
+  struct PendingPrime {
+    AVFrame* frame = nullptr;
+    std::int64_t frame_index = -1;
+  };
+  std::deque<PendingPrime> pending_primes;
+  bool prime_requested = false;
+  std::uint64_t primed_frames = 0;
+
   ~Impl() { Close(); }
 
   void ResetDragStatsLocked() {
@@ -205,6 +235,266 @@ struct OnlinePreviewDecoder::Impl {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - drag_stats_start)
         .count();
+  }
+
+  // P0：seek 到 frame 之前最近关键帧的 PTS。必须 strict 钉住关键帧；
+  // fMP4 的宽松 av_seek_frame 会落到前一个 GOP（S1 实测早 150 帧）。
+  bool SeekToPreviewKeyframe(VideoDecoder& decoder,
+                             const FrameIndex& frame_index,
+                             std::int64_t frame, std::string* error_text,
+                             bool record_landing) {
+    std::int64_t keyframe = frame_index.KeyframeAtOrBeforeFrame(frame);
+    if (keyframe < 0) {
+      keyframe = 0;
+    }
+    const std::int64_t pts = frame_index.PtsOfFrame(keyframe);
+    bool strict = true;
+    if (!decoder.SeekToKeyframePts(pts, error_text)) {
+      strict = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++seek_fallbacks;
+      }
+      if (!decoder.SeekToPts(pts, error_text)) {
+        return false;
+      }
+      // strict 失败的错误文本不能残留给后续 DecodeNextFrame 失败路径。
+      if (error_text != nullptr) {
+        error_text->clear();
+      }
+    }
+    if (record_landing) {
+      std::lock_guard<std::mutex> lock(mutex);
+      last_seek_keyframe = keyframe;
+      last_seek_landing_frame = -1;
+      last_seek_landing_offset = 0;
+      seek_landing_pending = true;
+    }
+    Log("seek keyframe=%lld pts=%lld strict=%d",
+        static_cast<long long>(keyframe), static_cast<long long>(pts),
+        strict ? 1 : 0);
+    return true;
+  }
+
+  void RecordSeekLanding(std::int64_t decoded_frame) {
+    std::int64_t keyframe = -1;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!seek_landing_pending) {
+        return;
+      }
+      seek_landing_pending = false;
+      last_seek_landing_frame = decoded_frame;
+      last_seek_landing_offset = decoded_frame - last_seek_keyframe;
+      keyframe = last_seek_keyframe;
+    }
+    Log("seek_landing keyframe=%lld frame=%lld offset=%lld",
+        static_cast<long long>(keyframe),
+        static_cast<long long>(decoded_frame),
+        static_cast<long long>(decoded_frame - keyframe));
+  }
+
+  std::int64_t ChooseBaselineLocked(std::int64_t displayed,
+                                    std::int64_t fallback) const {
+    if (displayed >= 0 && index != nullptr &&
+        static_cast<std::size_t>(displayed) < index->size()) {
+      return displayed;
+    }
+    return fallback >= 0 ? fallback : 0;
+  }
+
+  void ClearPendingPrimesLocked() {
+    for (PendingPrime& pending : pending_primes) {
+      if (pending.frame != nullptr) {
+        av_frame_free(&pending.frame);
+      }
+    }
+    pending_primes.clear();
+    prime_requested = false;
+  }
+
+  void FinishWarmLocked(bool success) {
+    if (warm_started) {
+      warm_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - warm_start)
+                    .count();
+    }
+    warming = false;
+    warm_requested = false;
+    warm_idle = true;
+    warm_started = false;
+    if (!success) {
+      ++warm_failures;
+    }
+    condition.notify_all();
+    Log("warm_done success=%d frames=%lld skipped=%llu failures=%llu ms=%lld",
+        success ? 1 : 0, static_cast<long long>(warm_frames),
+        static_cast<unsigned long long>(warm_skipped),
+        static_cast<unsigned long long>(warm_failures),
+        static_cast<long long>(warm_ms));
+  }
+
+  void DrainPendingPrimes() {
+    for (;;) {
+      AVFrame* frame = nullptr;
+      std::int64_t frame_index = -1;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (pending_primes.empty()) {
+          prime_requested = false;
+          return;
+        }
+        PendingPrime pending = pending_primes.front();
+        pending_primes.pop_front();
+        frame = pending.frame;
+        frame_index = pending.frame_index;
+      }
+      if (frame == nullptr) {
+        continue;
+      }
+      if (frame->hw_frames_ctx != nullptr) {
+        av_frame_free(&frame);
+        continue;
+      }
+      AVFrame* preview = ScaleToNv12(frame, kPreviewMaxSide, &sws);
+      av_frame_free(&frame);
+      if (preview == nullptr) {
+        continue;
+      }
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop) {
+        av_frame_free(&preview);
+        return;
+      }
+      const std::int64_t pts =
+          index != nullptr ? index->PtsOfFrame(frame_index) : 0;
+      CacheFrameLocked(preview, pts, frame_index, target_frame);
+      ++primed_frames;
+    }
+  }
+
+  void ProcessWarm(VideoDecoder& decoder) {
+    std::int64_t origin = 0;
+    std::int64_t target = 0;
+    std::uint64_t epoch = 0;
+    std::shared_ptr<const FrameIndex> current_index;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!warm_requested || active || stop) {
+        return;
+      }
+      origin = warm_origin;
+      target = warm_target;
+      epoch = warm_epoch;
+      current_index = index;
+      warming = true;
+      warm_idle = false;
+      if (!warm_started) {
+        warm_start = std::chrono::steady_clock::now();
+        warm_started = true;
+      }
+    }
+    if (!current_index || origin < 0 || target < origin) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (warm_epoch == epoch && warm_requested) {
+        FinishWarmLocked(false);
+      }
+      return;
+    }
+    // 已有缓存窗口且解码位置已到 target：不重复解码。
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (warm_epoch == epoch && warm_requested && position_valid &&
+          last_decoded_frame >= target &&
+          RangeCachedLocked(target - 71, target)) {
+        ++warm_skipped;
+        FinishWarmLocked(true);
+        return;
+      }
+      // 预热窗口 [target-71,target] 要完整；旧缓存若在窗口外会挤掉新帧。
+      PruneCacheOutsideLocked(target - 71, target);
+    }
+    std::string error_text;
+    if (!SeekToPreviewKeyframe(decoder, *current_index, origin, &error_text,
+                               true)) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (warm_epoch == epoch && warm_requested) {
+        FinishWarmLocked(false);
+      }
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      position_valid = false;
+    }
+    bool landing_recorded = false;
+    int guard = 0;
+    auto slice_start = std::chrono::steady_clock::now();
+    for (;;) {
+      if (++guard > 100000) {
+        std::lock_guard<std::mutex> lock(mutex);
+        position_valid = false;
+        if (warm_epoch == epoch && warm_requested) {
+          FinishWarmLocked(false);
+        }
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (stop || pause_requested || !warm_requested ||
+            warm_epoch != epoch || active) {
+          return;
+        }
+      }
+      DecodedFrameInfo info;
+      if (!decoder.DecodeNextFrame(&info, &error_text)) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (warm_epoch == epoch && warm_requested) {
+          position_valid = false;
+          FinishWarmLocked(false);
+        }
+        return;
+      }
+      std::int64_t decoded_frame = current_index->FrameOfPts(info.pts_us);
+      if (decoded_frame < 0) {
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        last_pts_us = info.pts_us;
+        last_decoded_frame = decoded_frame;
+        position_valid = true;
+        ++warm_frames;
+      }
+      if (!landing_recorded) {
+        RecordSeekLanding(decoded_frame);
+        landing_recorded = true;
+      }
+      // 只对 [target-71, target] 做缩放/入缓存；更早的帧只解码不缓存。
+      if (decoded_frame >= target - 71) {
+        AVFrame* preview = ScaleToNv12(info.av_frame, kPreviewMaxSide, &sws);
+        if (preview != nullptr) {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (stop || !warm_requested || warm_epoch != epoch) {
+            av_frame_free(&preview);
+            return;
+          }
+          CacheFrameLocked(preview, info.pts_us, decoded_frame, target);
+        }
+      }
+      if (decoded_frame >= target) {
+        break;
+      }
+      if (std::chrono::steady_clock::now() - slice_start >
+          std::chrono::milliseconds(15)) {
+        slice_start = std::chrono::steady_clock::now();
+        std::this_thread::yield();
+      }
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (warm_epoch == epoch && warm_requested) {
+      FinishWarmLocked(true);
+    }
   }
 
   bool IsActive() {
@@ -231,6 +521,24 @@ struct OnlinePreviewDecoder::Impl {
     }
     cache.clear();
     cache_bytes = 0;
+  }
+
+  // 预热前清掉窗口外的旧帧，保证 72 帧预算全部留给 [from,to]。
+  void PruneCacheOutsideLocked(std::int64_t from, std::int64_t to) {
+    for (auto it = cache.begin(); it != cache.end();) {
+      const bool outside = it->frame_index >= 0 &&
+                           (it->frame_index < from || it->frame_index > to);
+      if (outside) {
+        cache_bytes -= FrameBytes(it->frame);
+        if (it->frame != nullptr) {
+          av_frame_free(&it->frame);
+        }
+        it = cache.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    UpdateCachePeakLocked();
   }
 
   static std::size_t FrameBytes(const AVFrame* frame) {
@@ -409,8 +717,10 @@ struct OnlinePreviewDecoder::Impl {
     if (frame_index == target) {
       return true;
     }
+    // baseline 保证 last>=0；兜底允许首帧，方向/不越过目标规则仍由下面
+    // reference 分支约束（reference<0 时无方向可言，只放行一张）。
     if (last_delivered_frame < 0) {
-      return false;
+      return true;
     }
     std::int64_t reference = last_delivered_frame;
     if (latest != nullptr && !latest_coarse) {
@@ -662,7 +972,9 @@ struct OnlinePreviewDecoder::Impl {
         std::lock_guard<std::mutex> lock(mutex);
         ++seek_count;
       }
-      if (!decoder.SeekToPts(frame_index.PtsOfFrame(keyframe), error_text)) {
+      // P0：strict 关键帧 seek（fMP4 宽松 seek 会落到前一 GOP）。
+      if (!SeekToPreviewKeyframe(decoder, frame_index, pursue_target,
+                                 error_text, true)) {
         std::lock_guard<std::mutex> lock(mutex);
         position_valid = false;
         return false;
@@ -767,6 +1079,9 @@ struct OnlinePreviewDecoder::Impl {
       }
       if (decoded_frame < 0) {
         decoded_frame = pursue_target;
+      } else {
+        // P0：首个解码帧相对请求关键帧的偏差（负=落到更早 GOP）。
+        RecordSeekLanding(decoded_frame);
       }
       AVFrame* preview = ScaleToNv12(info.av_frame, kPreviewMaxSide, &sws);
       if (preview == nullptr) {
@@ -889,14 +1204,24 @@ struct OnlinePreviewDecoder::Impl {
       }
       should_stop = stop;
       if (!opened) {
-        if (open_error.isEmpty()) {
-          open_error = QStringLiteral("在线预览解码器打开失败");
+        if (warm_requested && !active) {
+          // P0：预热失败静默（不置 error/active），只记失败数，避免把
+          // “后台预热失败”显示成拖动预览不可用。
+          ++warm_failures;
+          warm_requested = false;
+          warming = false;
+          warm_idle = true;
+          warm_started = false;
+        } else {
+          if (open_error.isEmpty()) {
+            open_error = QStringLiteral("在线预览解码器打开失败");
+          }
+          error = open_error.toStdString();
+          active = false;
+          waiting = false;
+          ++generation;
+          condition.notify_all();
         }
-        error = open_error.toStdString();
-        active = false;
-        waiting = false;
-        ++generation;
-        condition.notify_all();
       }
     }
     if (!opened || should_stop) {
@@ -909,15 +1234,25 @@ struct OnlinePreviewDecoder::Impl {
       std::unique_lock<std::mutex> lock(mutex);
       condition.wait(lock, [this] {
         return stop || pause_requested ||
-               (active && generation != handled_generation);
+               (active && generation != handled_generation) || warm_requested ||
+               prime_requested;
       });
       if (stop || pause_requested) {
         break;
       }
       const std::uint64_t observed_generation = generation;
+      const bool do_process = active && generation != handled_generation;
+      const bool do_warm = warm_requested && !active;
+      const bool do_primes = prime_requested;
       lock.unlock();
 
-      if (active) {
+      if (do_primes) {
+        DrainPendingPrimes();
+      }
+      if (do_warm) {
+        ProcessWarm(decoder);
+      }
+      if (do_process) {
         std::string error_text;
         Process(decoder, &error_text);
         // 正向由需求解码直接续解；不再额外预解 30 帧（会和需求解码/UI
@@ -925,7 +1260,9 @@ struct OnlinePreviewDecoder::Impl {
       }
 
       lock.lock();
-      handled_generation = observed_generation;
+      if (do_process) {
+        handled_generation = observed_generation;
+      }
     }
 
     decoder.Close();
@@ -1063,9 +1400,10 @@ struct OnlinePreviewDecoder::Impl {
         opened = true;
       }
       std::string error_text;
-      // SeekToPts 落到 request_from 之前最近关键帧；随后跳过 < from 的帧。
-      if (!decoder.SeekToPts(current_index->PtsOfFrame(request_from),
-                             &error_text)) {
+      // P0：strict seek 到 request_from 之前最近关键帧（不能用任意 frame 的
+      // PTS 做 strict seek）；随后跳过 < from 的帧。
+      if (!SeekToPreviewKeyframe(decoder, *current_index, request_from,
+                                 &error_text, false)) {
         decoder.Close();
         format.Close();
         opened = false;
@@ -1150,6 +1488,11 @@ struct OnlinePreviewDecoder::Impl {
       pause_requested = true;
       active = false;
       waiting = false;
+      // 预热随 Pause 取消；缓存保留。
+      warm_requested = false;
+      warming = false;
+      warm_idle = false;
+      ++warm_epoch;
       ++generation;
       if (interrupt != nullptr) {
         interrupt->store(true, std::memory_order_relaxed);
@@ -1171,12 +1514,17 @@ struct OnlinePreviewDecoder::Impl {
     position_valid = false;
     last_pts_us = 0;
     last_decoded_frame = -1;
+    warm_started = false;
+    warm_idle = false;
+    seek_landing_pending = false;
     FreeLatestLocked();
     Log("pause cache_frames=%d", static_cast<int>(cache.size()));
   }
 
-  void Resume(std::int64_t frame, bool cached) {
+  void Resume(std::int64_t frame, bool cached,
+              std::int64_t displayed_frame) {
     bool start_threads = false;
+    bool join_stale = false;
     {
       std::lock_guard<std::mutex> lock(mutex);
       if (stop) {
@@ -1185,37 +1533,80 @@ struct OnlinePreviewDecoder::Impl {
       const bool covered =
           index != nullptr && frame >= 0 &&
           static_cast<std::size_t>(frame) < index->size();
-      start_threads = !thread.joinable();
-      // P0 度量：记录 Resume 前的发布基准（S1 不改 -1 行为）。
+      if (!thread.joinable()) {
+        start_threads = true;
+      } else if (!running) {
+        // 上次预热/打开失败后线程已返回但未 join；先回收再重启。
+        start_threads = true;
+        join_stale = true;
+      }
+      // P0 度量：记录 Resume 前旧值与本拖动 baseline。
+      const std::int64_t previous_delivered = last_delivered_frame;
       ResetDragStatsLocked();
-      drag_stats.last_delivered_before_resume = last_delivered_frame;
+      drag_stats.last_delivered_before_resume = previous_delivered;
+      const std::int64_t baseline =
+          ChooseBaselineLocked(displayed_frame, frame);
+      drag_stats.baseline_frame = baseline;
       if (!start_threads && open_ok) {
         drag_stats.open_ms = 0;
       }
+      // 新拖动优先于预热：取消在途 warm，保留已有缓存/位置（线程复用时）。
+      warm_requested = false;
+      warming = false;
+      warm_idle = true;
+      ++warm_epoch;
+      seek_landing_pending = false;
       active = true;
       target_frame = frame;
       target_cached = cached && covered;
       target_direction = 0;
       waiting = !target_cached;
-      last_delivered_frame = -1;
+      last_delivered_frame = baseline;
       last_delivered_coarse = false;
-      position_valid = false;
-      last_pts_us = 0;
-      last_decoded_frame = -1;
       FreeLatestLocked();
       prefetch_from = -1;
       prefetch_to = -1;
+      if (join_stale) {
+        // 打开失败时 Run 已返回，但 prefetch_thread 仍可能停在 wait；
+        // 先唤醒并确保两个线程都 join，绝不能给 joinable 的 std::thread 赋值。
+        prefetch_stop = true;
+        prefetch_condition.notify_all();
+      } else {
+        prefetch_stop = false;
+      }
       ++prefetch_epoch;
-      // 新线程使用新的中断标志；旧 reader 已在 Pause 关闭。
-      interrupt = std::make_shared<std::atomic<bool>>(false);
-      generation = 1;
-      handled_generation = 0;
+      if (start_threads) {
+        // 只有线程确实重启时才重置解码位置；warm idle 复用保留位置。
+        position_valid = false;
+        last_pts_us = 0;
+        last_decoded_frame = -1;
+        interrupt = std::make_shared<std::atomic<bool>>(false);
+        generation = 1;
+        handled_generation = 0;
+      } else {
+        if (interrupt == nullptr) {
+          interrupt = std::make_shared<std::atomic<bool>>(false);
+        } else {
+          interrupt->store(false, std::memory_order_relaxed);
+        }
+        ++generation;
+      }
       running = true;
       condition.notify_all();
       prefetch_condition.notify_all();
-      Log("resume target=%lld cached=%d cache_frames=%d start=%d",
+      Log("resume target=%lld cached=%d cache_frames=%d start=%d "
+          "baseline=%lld",
           static_cast<long long>(frame), target_cached ? 1 : 0,
-          static_cast<int>(cache.size()), start_threads ? 1 : 0);
+          static_cast<int>(cache.size()), start_threads ? 1 : 0,
+          static_cast<long long>(baseline));
+    }
+    if (join_stale) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+      if (prefetch_thread.joinable()) {
+        prefetch_thread.join();
+      }
     }
     if (start_threads) {
       StartThreads();
@@ -1223,6 +1614,15 @@ struct OnlinePreviewDecoder::Impl {
   }
 
   void StartThreads() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (thread.joinable() || prefetch_thread.joinable()) {
+        // 防御：给 joinable 的 std::thread 赋值会 std::terminate。
+        Log("start_threads skipped stale joinable thread");
+        return;
+      }
+      prefetch_stop = false;
+    }
     thread = std::thread([this] { Run(); });
     prefetch_thread = std::thread([this] { RunPrefetch(); });
   }
@@ -1233,6 +1633,10 @@ struct OnlinePreviewDecoder::Impl {
       stop = true;
       active = false;
       waiting = false;
+      warm_requested = false;
+      warming = false;
+      warm_idle = false;
+      ++warm_epoch;
       ++generation;
       if (interrupt != nullptr) {
         interrupt->store(true, std::memory_order_relaxed);
@@ -1253,6 +1657,8 @@ struct OnlinePreviewDecoder::Impl {
       pause_requested = false;
       FreeLatestLocked();
       ClearCacheLocked();
+      ClearPendingPrimesLocked();
+      primed_frames = 0;
       if (sws != nullptr) {
         sws_freeContext(sws);
         sws = nullptr;
@@ -1279,6 +1685,10 @@ struct OnlinePreviewDecoder::Impl {
       prefetch_served_to = -1;
       last_delivered_frame = -1;
       last_delivered_coarse = false;
+      seek_landing_pending = false;
+      warm_started = false;
+      warm_ms = -1;
+      warm_frames = 0;
     }
   }
 
@@ -1302,7 +1712,7 @@ void OnlinePreviewDecoder::Begin(
     std::shared_ptr<lapian::online::GrowingSource> source,
     const std::string& part_path_utf8, int video_stream_index,
     std::shared_ptr<const FrameIndex> index, std::int64_t initial_frame,
-    bool initial_cached) {
+    bool initial_cached, std::int64_t displayed_frame, bool warm_only) {
   impl_->Close();
   if (!source || part_path_utf8.empty() || video_stream_index < 0 || !index) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -1316,6 +1726,11 @@ void OnlinePreviewDecoder::Begin(
   if (initial_covered) {
     initial_keyframe = index->KeyframeAtOrBeforeFrame(initial_frame);
   }
+  const std::int64_t baseline =
+      displayed_frame >= 0 &&
+              static_cast<std::size_t>(displayed_frame) < index->size()
+          ? displayed_frame
+          : (initial_frame >= 0 ? initial_frame : 0);
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->source = std::move(source);
@@ -1324,16 +1739,17 @@ void OnlinePreviewDecoder::Begin(
     impl_->index = std::move(index);
     impl_->interrupt = std::make_shared<std::atomic<bool>>(false);
     impl_->stop = false;
-    impl_->active = true;
+    impl_->active = !warm_only;
     impl_->running = true;
     impl_->pause_requested = false;
-    impl_->waiting = !(initial_cached && initial_covered);
+    impl_->waiting =
+        warm_only ? false : !(initial_cached && initial_covered);
     // generation 从 1 起步，保证 worker 立即处理初始目标（不必等第一次
     // UpdateTarget）。
     impl_->generation = 1;
     impl_->handled_generation = 0;
     impl_->target_frame = initial_frame;
-    impl_->target_cached = initial_cached && initial_covered;
+    impl_->target_cached = !warm_only && initial_cached && initial_covered;
     impl_->target_direction = 0;
     impl_->open_attempted = false;
     impl_->open_ok = false;
@@ -1349,11 +1765,12 @@ void OnlinePreviewDecoder::Begin(
     impl_->cache_bytes = 0;
     impl_->cache_peak_bytes = 0;
     impl_->last_published_frame = -1;
-    // P0 度量：Begin 也记录上一次 UI 取走帧（Close 后通常为 -1），只读统计。
+    // P0 度量：Begin 记录覆盖前旧值与本拖动 baseline（只读统计）。
     impl_->ResetDragStatsLocked();
     impl_->drag_stats.last_delivered_before_resume =
         impl_->last_delivered_frame;
-    impl_->last_delivered_frame = -1;
+    impl_->drag_stats.baseline_frame = baseline;
+    impl_->last_delivered_frame = baseline;
     impl_->last_delivered_coarse = false;
     impl_->last_pts_us = 0;
     impl_->last_decoded_frame = -1;
@@ -1363,13 +1780,40 @@ void OnlinePreviewDecoder::Begin(
     impl_->prefetch_to = -1;
     impl_->prefetch_epoch = 0;
     impl_->prefetch_served_to = -1;
+    impl_->seek_landing_pending = false;
+    impl_->ClearPendingPrimesLocked();
+    impl_->primed_frames = 0;
+    if (warm_only) {
+      impl_->warm_requested = true;
+      impl_->warming = false;
+      impl_->warm_idle = false;
+      ++impl_->warm_epoch;
+      const std::int64_t last_frame =
+          static_cast<std::int64_t>(impl_->index->size()) - 1;
+      const std::int64_t origin =
+          std::max<std::int64_t>(0, std::min(initial_frame, last_frame));
+      impl_->warm_origin = origin;
+      impl_->warm_target =
+          std::min<std::int64_t>(last_frame, origin + 10);
+      impl_->warm_start = std::chrono::steady_clock::now();
+      impl_->warm_started = true;
+      impl_->warm_ms = -1;
+      impl_->warm_frames = 0;
+    } else {
+      impl_->warm_requested = false;
+      impl_->warming = false;
+      impl_->warm_idle = true;
+      impl_->warm_started = false;
+      ++impl_->warm_epoch;
+    }
   }
   impl_->thread = std::thread([impl = impl_.get()] { impl->Run(); });
   impl_->prefetch_thread =
       std::thread([impl = impl_.get()] { impl->RunPrefetch(); });
-  Log("begin target=%lld cached=%d keyframe=%lld",
+  Log("begin target=%lld cached=%d keyframe=%lld baseline=%lld warm_only=%d",
       static_cast<long long>(initial_frame), initial_cached ? 1 : 0,
-      static_cast<long long>(initial_keyframe));
+      static_cast<long long>(initial_keyframe),
+      static_cast<long long>(baseline), warm_only ? 1 : 0);
 }
 
 void OnlinePreviewDecoder::UpdateIndex(
@@ -1443,6 +1887,16 @@ void OnlinePreviewDecoder::UpdateTarget(std::int64_t frame, bool cached) {
         }
       }
     }
+  } else {
+    // P0：未缓存目标也发“last 与 target 之间最近”的缓存帧，waiting 保持 true；
+    // 远跳也允许（没有可用帧时不发）。
+    std::int64_t closest = -1;
+    if (AVFrame* close = impl_->CloneClosestLocked(frame, &closest)) {
+      const std::int64_t pts = impl_->index != nullptr
+                                   ? impl_->index->PtsOfFrame(closest)
+                                   : 0;
+      impl_->PublishLocked(close, pts, closest, impl_->generation, false, true);
+    }
   }
   // 反向：保证“缓存窗口下沿之前的 30 帧”进缓存，目标拖到边界时已经解好；
   // 正向：取消反向预取，由需求解码向前续解。+-1 振荡反复请求同一区间时
@@ -1488,8 +1942,118 @@ void OnlinePreviewDecoder::Close() { impl_->Close(); }
 
 void OnlinePreviewDecoder::Pause() { impl_->Pause(); }
 
-void OnlinePreviewDecoder::Resume(std::int64_t frame, bool cached) {
-  impl_->Resume(frame, cached);
+void OnlinePreviewDecoder::Resume(std::int64_t frame, bool cached,
+                                  std::int64_t displayed_frame) {
+  impl_->Resume(frame, cached, displayed_frame);
+}
+
+void OnlinePreviewDecoder::Warm(std::int64_t frame) {
+  bool start_threads = false;
+  bool join_stale = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->stop || frame < 0 || impl_->index == nullptr ||
+        impl_->index->empty()) {
+      return;
+    }
+    if (impl_->active) {
+      // 拖动进行中不预热；Resume 会取消在途 warm。
+      return;
+    }
+    const std::int64_t limit =
+        static_cast<std::int64_t>(impl_->index->size()) - 1;
+    const std::int64_t origin = std::min(frame, limit);
+    const std::int64_t target =
+        std::min<std::int64_t>(limit, origin + 10);
+    impl_->warm_origin = origin;
+    impl_->warm_target = target;
+    ++impl_->warm_epoch;
+    impl_->warm_start = std::chrono::steady_clock::now();
+    impl_->warm_started = true;
+    impl_->warm_ms = -1;
+    impl_->warm_frames = 0;
+    // 已有缓存窗口且解码位置已到 target：直接 idle，不重复解码。
+    if (impl_->position_valid && impl_->last_decoded_frame >= target &&
+        impl_->RangeCachedLocked(target - 71, target)) {
+      ++impl_->warm_skipped;
+      impl_->warm_requested = false;
+      impl_->warming = false;
+      impl_->warm_idle = true;
+      impl_->warm_started = false;
+      impl_->warm_ms = 0;
+      Log("warm_skip target=%lld cache=%d",
+          static_cast<long long>(target),
+          static_cast<int>(impl_->cache.size()));
+      return;
+    }
+    impl_->warm_requested = true;
+    impl_->warming = true;
+    impl_->warm_idle = false;
+    if (!impl_->thread.joinable()) {
+      start_threads = true;
+    } else if (!impl_->running) {
+      start_threads = true;
+      join_stale = true;
+    }
+    if (start_threads) {
+      impl_->position_valid = false;
+      impl_->last_pts_us = 0;
+      impl_->last_decoded_frame = -1;
+      impl_->interrupt = std::make_shared<std::atomic<bool>>(false);
+      impl_->generation = 1;
+      impl_->handled_generation = 0;
+      impl_->pause_requested = false;
+      impl_->stop = false;
+      if (join_stale) {
+        // 先唤醒 wait 中的 prefetch_thread；unlock 后 join 两个线程。
+        impl_->prefetch_stop = true;
+        impl_->prefetch_condition.notify_all();
+      } else {
+        impl_->prefetch_stop = false;
+      }
+      impl_->running = true;
+    }
+    impl_->condition.notify_all();
+    Log("warm target=%lld origin=%lld cache=%d start=%d",
+        static_cast<long long>(target), static_cast<long long>(origin),
+        static_cast<int>(impl_->cache.size()), start_threads ? 1 : 0);
+  }
+  if (join_stale) {
+    if (impl_->thread.joinable()) {
+      impl_->thread.join();
+    }
+    if (impl_->prefetch_thread.joinable()) {
+      impl_->prefetch_thread.join();
+    }
+  }
+  if (start_threads) {
+    impl_->StartThreads();
+  }
+}
+
+void OnlinePreviewDecoder::PrimeFrame(const AVFrame* frame,
+                                      std::int64_t frame_index) {
+  if (frame == nullptr || frame_index < 0 ||
+      frame->hw_frames_ctx != nullptr) {
+    return;
+  }
+  AVFrame* clone = av_frame_clone(frame);
+  if (clone == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->stop) {
+      av_frame_free(&clone);
+      return;
+    }
+    impl_->pending_primes.push_back(
+        Impl::PendingPrime{clone, frame_index});
+    impl_->prime_requested = true;
+    if (impl_->thread.joinable()) {
+      impl_->condition.notify_all();
+    }
+  }
 }
 
 PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
@@ -1521,7 +2085,8 @@ PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
     if (latest_frame == target) {
       accept = true;
     } else if (last < 0) {
-      accept = false;
+      // baseline 正常不会走到这里；兜底允许首帧，方向规则无法判断。
+      accept = latest_frame >= 0;
     } else if (target > last) {
       accept = latest_frame > last && latest_frame < target;
     } else if (target < last) {
@@ -1576,6 +2141,16 @@ bool OnlinePreviewDecoder::IsWaiting() const {
 bool OnlinePreviewDecoder::IsThreadRunning() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->running;
+}
+
+bool OnlinePreviewDecoder::IsWarmIdle() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warm_idle;
+}
+
+bool OnlinePreviewDecoder::IsWarming() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warming;
 }
 
 std::string OnlinePreviewDecoder::last_error() const {
@@ -1646,6 +2221,56 @@ std::uint64_t OnlinePreviewDecoder::decoded_frames() const {
 OnlinePreviewDecoder::DragStats OnlinePreviewDecoder::drag_stats() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->drag_stats;
+}
+
+std::uint64_t OnlinePreviewDecoder::seek_fallbacks() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->seek_fallbacks;
+}
+
+std::int64_t OnlinePreviewDecoder::last_seek_keyframe() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->last_seek_keyframe;
+}
+
+std::int64_t OnlinePreviewDecoder::last_seek_landing_frame() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->last_seek_landing_frame;
+}
+
+std::int64_t OnlinePreviewDecoder::last_seek_landing_offset() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->last_seek_landing_offset;
+}
+
+std::int64_t OnlinePreviewDecoder::warm_ms() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warm_ms;
+}
+
+std::int64_t OnlinePreviewDecoder::warm_frames() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warm_frames;
+}
+
+std::uint64_t OnlinePreviewDecoder::warm_skipped() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warm_skipped;
+}
+
+std::uint64_t OnlinePreviewDecoder::warm_failures() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->warm_failures;
+}
+
+std::uint64_t OnlinePreviewDecoder::primed_frames() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->primed_frames;
+}
+
+bool OnlinePreviewDecoder::IsFrameCached(std::int64_t frame) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->HasExactLocked(frame);
 }
 
 }  // namespace lapian::media

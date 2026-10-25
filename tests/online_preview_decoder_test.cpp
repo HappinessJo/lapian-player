@@ -111,7 +111,8 @@ int main(int argc, char** argv) {
   source->Publish(static_cast<std::int64_t>(file_size));
 
   lapian::media::OnlinePreviewDecoder preview;
-  preview.Begin(source, path, stream_index, index, 600, true);
+  // baseline=599：起点目标 600 比显示帧新一帧，可正常取到。
+  preview.Begin(source, path, stream_index, index, 600, true, 599);
   const auto open_start = std::chrono::steady_clock::now();
   bool ready = false;
   for (int i = 0; i < 500; ++i) {
@@ -144,6 +145,24 @@ int main(int argc, char** argv) {
           "预览帧降采样到最长边 ≤1024（64MiB 预算内可缓存 72 帧）");
     Check(first.frame_index == 600, "起点预览帧号 == 目标帧");
     av_frame_free(&first.frame);
+  }
+  Check(preview.drag_stats().baseline_frame == 599,
+        "Begin 记录 displayed baseline");
+  Check(preview.drag_stats().last_delivered_before_resume == -1,
+        "Begin 记录覆盖前旧值 -1");
+  Check(preview.last_seek_keyframe() >= 0 &&
+            preview.last_seek_landing_offset() == 0,
+        "strict seek 落点 offset=0（不再前一个 GOP）");
+
+  // P0 baseline：目标 650 时先发布 baseline(600) 与 target 之间的中间帧，
+  // 不再只等精确目标。
+  preview.UpdateTarget(650, true);
+  lapian::media::PreviewFrame intermediate = PollLatest(&preview, 3000);
+  Check(intermediate.frame != nullptr, "baseline 下首帧中间帧可发布");
+  if (intermediate.frame != nullptr) {
+    Check(intermediate.frame_index > 600 && intermediate.frame_index < 650,
+          "首张中间帧在 baseline 与 target 之间且非 target");
+    av_frame_free(&intermediate.frame);
   }
 
   // 正向拖动 2s：每 16ms 更新目标（目标推进 1 帧），统计实际取走的预览帧。
@@ -272,31 +291,123 @@ int main(int argc, char** argv) {
   Check(cached_before_pause > 0 && preview.cached_frames() == cached_before_pause,
         "Pause 保留有界缓存");
   Check(!preview.IsWaiting(), "Pause 后不处于 waiting");
-  preview.Resume(540, true);
+  Check(!preview.IsThreadRunning(), "Pause 后预览线程已退出");
+  Check(!preview.IsWarmIdle(), "Pause 后 warm_idle=false");
+  preview.Resume(540, true, 539);
   const auto resume_start = std::chrono::steady_clock::now();
   lapian::media::PreviewFrame resumed = PollTarget(&preview, 540, 2000);
   const double resume_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - resume_start)
                                .count();
   Check(resumed.frame != nullptr, "Resume 后目标帧可立即命中缓存");
+  AVFrame* prime_source = nullptr;
   if (resumed.frame != nullptr) {
     Check(resumed.from_cache, "Resume 目标帧来自缓存（from_cache=true）");
+    prime_source = av_frame_clone(resumed.frame);
   }
   std::printf("[perf] online_preview_resume=%.2fms\n", resume_ms);
   if (resumed.frame != nullptr) {
     av_frame_free(&resumed.frame);
   }
   Check(resume_ms <= 200.0, "Resume 命中缓存首帧 ≤200ms");
+  Check(preview.drag_stats().baseline_frame == 539,
+        "Resume 记录 displayed baseline");
+  Check(preview.drag_stats().last_delivered_before_resume >= 0,
+        "Resume 记录覆盖前旧值");
 
-  // 未缓存目标：只进入 waiting，不阻塞、不产生新帧。
+  // P0 PrimeFrame：暂停后暂存，下一次 Resume 打开解码器时异步入缓存；
+  // 目标精确命中 from_cache。
+  preview.Pause();
+  if (prime_source != nullptr) {
+    preview.PrimeFrame(prime_source, 650);
+    preview.Resume(650, true, 640);
+    const auto prime_start = std::chrono::steady_clock::now();
+    lapian::media::PreviewFrame primed = PollTarget(&preview, 650, 2000);
+    const double prime_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - prime_start)
+                                .count();
+    Check(primed.frame != nullptr, "PrimeFrame 后目标帧可发布");
+    if (primed.frame != nullptr) {
+      Check(primed.from_cache, "PrimeFrame 后目标精确命中 from_cache");
+      av_frame_free(&primed.frame);
+    }
+    Check(prime_ms <= 200.0, "PrimeFrame 后目标命中 ≤200ms");
+    std::printf("[perf] online_preview_prime=%.2fms primed=%llu\n", prime_ms,
+                static_cast<unsigned long long>(preview.primed_frames()));
+    Check(preview.primed_frames() > 0, "PrimeFrame 计数 >0");
+    av_frame_free(&prime_source);
+  } else {
+    preview.Resume(650, true, 640);
+    Check(false, "保留一张帧用于 PrimeFrame");
+  }
+
+  // P0 Warm：静默解到 frame+10，缓存窗口覆盖 [frame-61, frame+10]；
+  // 完成后线程/decoder/reader 保持 idle，Resume 复用并命中缓存。
+  preview.Pause();
+  const auto warm_start = std::chrono::steady_clock::now();
+  preview.Warm(600);
+  bool warm_idle = false;
+  for (int i = 0; i < 1500; ++i) {
+    if (preview.IsWarmIdle() && !preview.IsWarming()) {
+      warm_idle = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const double warm_wait_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - warm_start)
+                                  .count();
+  std::printf("[perf] online_preview_warm=%.2fms reported=%lld frames=%lld\n",
+              warm_wait_ms, static_cast<long long>(preview.warm_ms()),
+              static_cast<long long>(preview.warm_frames()));
+  Check(warm_idle, "Warm 完成后 IsWarmIdle");
+  Check(preview.warm_ms() >= 0, "Warm 记录 warm_ms");
+  Check(preview.warm_frames() > 0, "Warm 解码帧数 >0");
+  Check(preview.IsFrameCached(539) && preview.IsFrameCached(610),
+        "Warm 缓存覆盖 [frame-61, frame+10]");
+  // 已覆盖时再次 Warm 应直接 idle 并记 warm_skipped。
+  const std::uint64_t skipped_before = preview.warm_skipped();
+  preview.Warm(600);
+  Check(preview.IsWarmIdle() && !preview.IsWarming(),
+        "Warm 已覆盖时直接 idle");
+  Check(preview.warm_skipped() == skipped_before + 1,
+        "Warm 已覆盖时记 warm_skipped");
+  lapian::media::PreviewFrame warm_silent = preview.TakeLatestFrame();
+  Check(warm_silent.frame == nullptr, "Warm 静默不发布帧");
+  if (warm_silent.frame != nullptr) {
+    av_frame_free(&warm_silent.frame);
+  }
+  preview.Resume(601, true, 600);
+  const auto warm_hit_start = std::chrono::steady_clock::now();
+  lapian::media::PreviewFrame warm_hit = PollTarget(&preview, 601, 2000);
+  const double warm_hit_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() -
+                                 warm_hit_start)
+                                 .count();
+  Check(warm_hit.frame != nullptr, "Warm 后 Resume 目标帧可发布");
+  if (warm_hit.frame != nullptr) {
+    Check(warm_hit.from_cache, "Warm 后 Resume 目标命中 from_cache");
+    av_frame_free(&warm_hit.frame);
+  }
+  std::printf("[perf] online_preview_warm_hit=%.2fms\n", warm_hit_ms);
+  Check(warm_hit_ms <= 100.0, "Warm 后 Resume 命中缓存 ≤100ms");
+  Check(preview.drag_stats().open_ms == 0,
+        "Warm idle 复用线程 open_ms=0");
+  Check(preview.drag_stats().baseline_frame == 600,
+        "Warm 后 Resume baseline 正确");
+
+  // 未缓存目标：发 last 与 target 之间最近缓存帧，waiting 保持 true。
   preview.UpdateTarget(650, false);
   Check(preview.IsWaiting(), "未缓存目标标记 waiting");
-  std::this_thread::sleep_for(std::chrono::milliseconds(120));
-  lapian::media::PreviewFrame waiting_frame = preview.TakeLatestFrame();
-  Check(waiting_frame.frame == nullptr, "未缓存目标不发布预览帧");
+  lapian::media::PreviewFrame waiting_frame = PollLatest(&preview, 1000);
+  Check(waiting_frame.frame != nullptr, "未缓存目标发布最近缓存帧");
   if (waiting_frame.frame != nullptr) {
+    Check(waiting_frame.frame_index > 601 && waiting_frame.frame_index < 650,
+          "最近缓存帧在 last 与 target 之间");
+    Check(waiting_frame.from_cache, "未缓存目标最近帧来自缓存");
     av_frame_free(&waiting_frame.frame);
   }
+  Check(preview.IsWaiting(), "未缓存 waiting 保持 true");
 
   // 请求未缓存目标后立即取消（End），线程必须有界退出。
   preview.UpdateTarget(5000, false);
@@ -312,6 +423,80 @@ int main(int argc, char** argv) {
   Check(preview.cache_bytes() == 0, "End 释放缓存字节");
   Check(end_ms <= 1000.0, "End 有界（≤1000ms）");
   preview.Close();
+
+  // 追加 API：Begin(warm_only=true) 直接创建预热器；不发布、不 waiting，
+  // 完成后 idle，Resume 复用并命中缓存。
+  {
+    lapian::media::OnlinePreviewDecoder warm_preview;
+    warm_preview.Begin(source, path, stream_index, index, 600, true, 600,
+                       /*warm_only=*/true);
+    bool begin_warm_idle = false;
+    for (int i = 0; i < 1500; ++i) {
+      if (warm_preview.IsReady() && warm_preview.IsWarmIdle() &&
+          !warm_preview.IsWarming()) {
+        begin_warm_idle = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Check(begin_warm_idle, "warm_only Begin 完成后 IsWarmIdle");
+    Check(!warm_preview.IsWaiting(), "warm_only Begin 不 waiting");
+    Check(warm_preview.IsFrameCached(539) && warm_preview.IsFrameCached(610),
+          "warm_only Begin 缓存覆盖 [frame-61, frame+10]");
+    lapian::media::PreviewFrame silent = warm_preview.TakeLatestFrame();
+    Check(silent.frame == nullptr, "warm_only Begin 静默不发布");
+    if (silent.frame != nullptr) {
+      av_frame_free(&silent.frame);
+    }
+    warm_preview.Resume(601, true, 600);
+    const auto begin_hit_start = std::chrono::steady_clock::now();
+    lapian::media::PreviewFrame begin_hit =
+        PollTarget(&warm_preview, 601, 2000);
+    const double begin_hit_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin_hit_start)
+            .count();
+    Check(begin_hit.frame != nullptr, "warm_only 后 Resume 目标帧可发布");
+    if (begin_hit.frame != nullptr) {
+      Check(begin_hit.from_cache, "warm_only 后 Resume 命中 from_cache");
+      av_frame_free(&begin_hit.frame);
+    }
+    std::printf("[perf] online_preview_warm_only_hit=%.2fms\n",
+                begin_hit_ms);
+    Check(begin_hit_ms <= 100.0, "warm_only 后命中 ≤100ms");
+    Check(warm_preview.drag_stats().open_ms == 0,
+          "warm_only 后 Resume 复用线程 open_ms=0");
+    warm_preview.End();
+    Check(!warm_preview.IsThreadRunning(),
+          "warm_only End 后线程已退出");
+    Check(warm_preview.cached_frames() == 0,
+          "warm_only End 释放缓存");
+  }
+
+  // P0 线程生命周期回归：open 失败后 Run 返回，但 prefetch_thread 仍在 wait；
+  // 旧代码在 Resume/Warm 重启时对 joinable 的 prefetch_thread 赋值会
+  // std::terminate。这里要求不崩、End 后线程退出。
+  {
+    auto failing_source = std::make_shared<lapian::online::GrowingSource>(0);
+    failing_source->Publish(0);
+    lapian::media::OnlinePreviewDecoder broken;
+    broken.Begin(failing_source, "media/p0-does-not-exist.mp4", stream_index,
+                 index, 600, true, 599);
+    bool run_exited = false;
+    for (int i = 0; i < 300; ++i) {
+      if (!broken.IsThreadRunning()) {
+        run_exited = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Check(run_exited, "open 失败后 Run 线程退出");
+    broken.Resume(600, true, 599);
+    broken.Warm(600);
+    broken.End();
+    Check(!broken.IsThreadRunning(),
+          "open 失败后 Resume/Warm/End 不崩溃且线程退出");
+  }
 
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);

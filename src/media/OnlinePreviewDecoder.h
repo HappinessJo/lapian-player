@@ -58,10 +58,14 @@ class OnlinePreviewDecoder {
 
   // source/part_path 必须对应同一个 `.part`；index 是稳定的只读快照。
   // 调用后立即返回；打开/首帧在后台线程。
+  // displayed_frame 是拖动开始时屏幕上真正显示的帧，用作发布基准；-1 时
+  // 退回 initial_frame。warm_only=true 时只做一次静默预热（不发布、不等待），
+  // 供“seek 落地/暂停但用户还没拖过”的场景创建预热器。
   void Begin(std::shared_ptr<lapian::online::GrowingSource> source,
              const std::string& part_path_utf8, int video_stream_index,
              std::shared_ptr<const FrameIndex> index,
-             std::int64_t initial_frame, bool initial_cached);
+             std::int64_t initial_frame, bool initial_cached,
+             std::int64_t displayed_frame = -1, bool warm_only = false);
   // 索引增长时替换快照（GUI 线程拷贝，worker 只持有 shared_ptr）。
   void UpdateIndex(std::shared_ptr<const FrameIndex> index);
   // frame 是拖动目标；cached=false 表示未缓存/未索引，只显示等待，不解码。
@@ -74,8 +78,16 @@ class OnlinePreviewDecoder {
   // 拖动松手后暂停（保留解码器位置与有界帧缓存，下一次拖动直接命中）；
   // 会话关闭/切换文件仍走 End/Close 释放缓存。
   void Pause();
-  // 复用暂停中的解码器开始下一次拖动；不重新打开解码器。
-  void Resume(std::int64_t frame, bool cached);
+  // 复用暂停/预热后的解码器开始下一次拖动；displayed_frame 同 Begin。
+  void Resume(std::int64_t frame, bool cached,
+              std::int64_t displayed_frame = -1);
+  // 静默预热：从 frame 之前最近关键帧解到 min(last, frame+10)，只缓存
+  // [target-71, target] 区间；不发布、不改 waiting。完成后线程/decoder/reader
+  // 保持 idle，下一次 Resume 复用；Resume/End 会取消在途预热。
+  void Warm(std::int64_t frame);
+  // 把当前显示帧（clone 后异步降采样）放进预览缓存；不发布。硬解帧跳过。
+  // 线程未启动时暂存，下一次 Run 处理。
+  void PrimeFrame(const AVFrame* frame, std::int64_t frame_index);
 
   // 取走最新预览帧；没有可用的新帧时 frame == nullptr。
   // 只返回“比上一张更接近当前目标且不越过目标”的帧与精确目标；粗帧按
@@ -85,6 +97,8 @@ class OnlinePreviewDecoder {
   bool IsReady() const;
   bool IsWaiting() const;
   bool IsThreadRunning() const;
+  bool IsWarmIdle() const;
+  bool IsWarming() const;
   std::string last_error() const;
 
   // P0 度量（只读，不参与任何发布/解码判定）：每次 Begin/Resume 重置。
@@ -98,9 +112,18 @@ class OnlinePreviewDecoder {
     std::int64_t first_publish_ms = -1;
     std::uint64_t published = 0;
     std::uint64_t delivered = 0;
+    // Begin/Resume 之前最后一次 UI 取走帧（旧值）与本拖动采用的发布基准。
     std::int64_t last_delivered_before_resume = -1;
+    std::int64_t baseline_frame = -1;
   };
   DragStats drag_stats() const;
+  // 预热/PrimeFrame 诊断（只读）。
+  std::int64_t warm_ms() const;
+  std::int64_t warm_frames() const;
+  std::uint64_t warm_skipped() const;
+  std::uint64_t warm_failures() const;
+  std::uint64_t primed_frames() const;
+  bool IsFrameCached(std::int64_t frame) const;
 
   // 诊断/探针：发布帧数、丢弃的过期帧、seek 次数、缓存帧数/字节。
   std::uint64_t frames_published() const;
@@ -116,6 +139,12 @@ class OnlinePreviewDecoder {
   std::uint64_t coarse_published() const;
   std::uint64_t prefetched_frames() const;
   std::uint64_t decoded_frames() const;
+  // P0 seek 诊断：strict 关键帧 seek 失败回退次数；最近一次 seek 的关键帧、
+  // 首个解码帧与偏差（负=落到更早的 GOP，正是 S1 发现的 fMP4 落前一 GOP）。
+  std::uint64_t seek_fallbacks() const;
+  std::int64_t last_seek_keyframe() const;
+  std::int64_t last_seek_landing_frame() const;
+  std::int64_t last_seek_landing_offset() const;
 
  private:
   struct Impl;
