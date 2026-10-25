@@ -78,14 +78,8 @@ void OnlineDiag(const char* format, ...) {
 }
 
 // T8.10：DASH 不返回总字节，用 `Range: bytes=0-0` 探测 Content-Range 总长。
-// 服务端忽略 Range（200）时读第一个数据块后立即中止，用 Content-Length 兜底；
-// 不接受“猜”的大小。
-class FirstChunkSink final : public lapian::online::IDownloadSink {
- public:
-  bool Write(const std::uint8_t*, std::size_t, QString*) override {
-    return false;  // 只要响应头，不落盘
-  }
-};
+// P0 收口：请求走 headers_only，只读响应头，不读 body、不写盘；服务端忽略
+// Range（200）时用 Content-Length 兜底。不接受“猜”的大小。
 
 struct TotalProbe {
   bool ok = false;
@@ -112,10 +106,10 @@ TotalProbe ProbeDashTotal(lapian::online::IDownloadTransport* transport,
       request.url = urls[i];
       request.offset = 0;
       request.range_end = 0;
+      request.headers_only = true;
       request.timeout_ms = timeout_ms;
-      FirstChunkSink sink;
       const lapian::online::DownloadTransportResult result =
-          transport->GetRange(request, &sink, cancel);
+          transport->GetRange(request, nullptr, cancel);
       TotalProbe probe;
       probe.http_status = result.http_status;
       probe.elapsed_ms = result.elapsed_ms;
@@ -126,18 +120,6 @@ TotalProbe ProbeDashTotal(lapian::online::IDownloadTransport* transport,
         probe.total = result.content_range_total;
         probe.range_supported = true;
       } else if (result.http_status == 200 && result.content_length > 0) {
-        probe.ok = true;
-        probe.total = result.content_length;
-        probe.range_supported = false;
-      } else if (result.status ==
-                     lapian::online::DownloadTransportStatus::kSinkError &&
-                 result.content_range_total > 0) {
-        probe.ok = true;
-        probe.total = result.content_range_total;
-        probe.range_supported = true;
-      } else if (result.status ==
-                     lapian::online::DownloadTransportStatus::kSinkError &&
-                 result.content_length > 0) {
         probe.ok = true;
         probe.total = result.content_length;
         probe.range_supported = false;

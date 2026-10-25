@@ -33,7 +33,7 @@ enum class DownloadTransportStatus {
   kRangeStartMismatch,  // 206 但 Content-Range 起点 != offset
   kTotalMismatch,     // Content-Range/Content-Length 总长与已知总大小不一致
   kInvalidUrl,
-  kSinkError,         // 写 .part 失败（磁盘满/IO）
+  kSinkError,         // 写 .part 失败（磁盘满/IO；headers_only 探测不会产生）
 };
 
 QString DownloadTransportStatusName(DownloadTransportStatus status);
@@ -52,6 +52,10 @@ struct DownloadRequest {
   // T8.10：闭区间结束偏移；-1 表示“取到文件末尾”（T8.5 行为不变）。
   // 只用于 DASH 总字节探测（bytes=offset-end），下载仍用 -1。
   std::int64_t range_end = -1;
+  // P0 收口：只要响应头（DASH 总字节探测）。置位后不读 body、不写 sink，
+  // 校验完 Content-Length/Content-Range 即成功返回；避免把“探测端主动停止”
+  // 误报成 `kSinkError` 的“写入缓存文件失败”。下载路径必须保持 false。
+  bool headers_only = false;
   // 已知总字节（playurl size）；<=0 表示未知。>0 时 transport 会对账。
   std::int64_t expected_total = -1;
   // 单次尝试的总上限（DNS/连接/读取共享）。

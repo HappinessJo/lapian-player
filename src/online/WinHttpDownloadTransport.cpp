@@ -149,6 +149,7 @@ struct TransferState {
   std::int64_t offset = 0;
   std::int64_t expected_total = -1;
   std::int64_t bytes_written = 0;
+  bool headers_only = false;
   std::int64_t first_byte_ns = 0;
   std::int64_t start_ns = 0;
   bool range_ignored = false;
@@ -300,6 +301,11 @@ void OnHeaders(TransferState* state, HINTERNET request) {
                     QStringLiteral("下载总大小与取流信息不一致"), 0);
       return;
     }
+    if (state->headers_only) {
+      // DASH 总字节探测：Content-Length 已在响应头里，不读 body、不写盘。
+      state->Finish(true, DownloadTransportStatus::kOk, QString(), 0);
+      return;
+    }
     StartRead(state, request);
     return;
   }
@@ -322,6 +328,11 @@ void OnHeaders(TransferState* state, HINTERNET request) {
                     QStringLiteral("续传文件总大小与取流信息不一致"), 0);
       return;
     }
+    if (state->headers_only) {
+      // DASH 总字节探测：Content-Range 已给出总长，不读 body、不写盘。
+      state->Finish(true, DownloadTransportStatus::kOk, QString(), 0);
+      return;
+    }
     StartRead(state, request);
     return;
   }
@@ -333,6 +344,11 @@ void OnHeaders(TransferState* state, HINTERNET request) {
 
 void OnRead(TransferState* state, HINTERNET request, DWORD length) {
   state->reading = false;
+  if (state->headers_only) {
+    // 探测走“只读响应头”路径，不应发起读取；防御性收尾，绝不碰 sink。
+    state->Finish(true, DownloadTransportStatus::kOk, QString(), 0);
+    return;
+  }
   if (length == 0) {
     state->Finish(true, DownloadTransportStatus::kOk, QString(), 0);
     return;
@@ -478,7 +494,8 @@ DownloadTransportResult WinHttpDownloadTransport::GetRange(
     result.elapsed_ms = timer.elapsed();
     return result;
   }
-  if (request.offset < 0 || request.url.isEmpty() || sink == nullptr) {
+  if (request.offset < 0 || request.url.isEmpty() ||
+      (sink == nullptr && !request.headers_only)) {
     result.status = DownloadTransportStatus::kInvalidUrl;
     result.error = QStringLiteral("下载请求参数无效");
     result.elapsed_ms = timer.elapsed();
@@ -512,6 +529,7 @@ DownloadTransportResult WinHttpDownloadTransport::GetRange(
   auto* state = new TransferState();
   state->offset = request.offset;
   state->expected_total = request.expected_total;
+  state->headers_only = request.headers_only;
   state->sink = sink;
   state->start_ns = NowNs();
 
@@ -716,12 +734,13 @@ DownloadTransportResult WinHttpDownloadTransport::GetRange(
   if (OnlineLogEnabled()) {
     std::fprintf(stderr,
                  "T8.5 cdn_done host=%s path=%s status=%d elapsed_ms=%lld "
-                 "bytes=%lld range_ignored=%d error=%s\n",
+                 "bytes=%lld range_ignored=%d headers_only=%d error=%s\n",
                  parsed.host.toUtf8().constData(),
                  parsed.log_path.toUtf8().constData(), result.http_status,
                  static_cast<long long>(result.elapsed_ms),
                  static_cast<long long>(result.bytes_written),
                  result.range_ignored ? 1 : 0,
+                 request.headers_only ? 1 : 0,
                  result.error.toUtf8().constData());
     std::fflush(stderr);
   }
