@@ -2,6 +2,9 @@
 
 - **状态**：**partial（部分通过）**。A 清晰度切换 **pass**、B 前后一致 **pass**、
   C 丝滑流畅**稳态 pass、首次拖动冷启动未达门槛**；按任务 §8 不写“完成/丝滑通过”。
+  **后续（2026-10-25）**：P0 首次拖动修复后 C **pass（P0 门禁）**，见
+  [handoff-2026-10-25-p0.md](handoff-2026-10-25-p0.md) 与
+  [tasks-online-parity-fix.md](tasks-online-parity-fix.md) §9；本文件保留当时判定。
 - **性质**：验收/文档轮；**本轮不改代码**、不改 M1/M2/P4/P6/P7 门、OB 样本、
   `lapian-cache-1` schema、默认 AVC≤1080p、本地 `PreviewDecoder`/`DragStrategy` 语义。
 - **实现提交**：`e1a89c6`（清晰度切换）、`4d89683`（在线拖动前后一致 + 丝滑）；HEAD `4d89683`。

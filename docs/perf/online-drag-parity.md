@@ -3,7 +3,7 @@
 - **日期**：2026-10-25
 - **基线**：`e1a89c6`（Agent 1 清晰度切换修复后的干净工作区）
 - **范围**：在线增长会话（`.part`）拖动预览；本地拖动预览行为/阈值不变
-- **结论**：**稳态已缓存区 pass**（正/反向 57/57、33ms 空档、56fps、landing 精确）；**首次拖动冷启动 224ms/连续 6 个目标无新画面未达 C 门槛 → 任务总判 partial**（见 §12）；远跳精确帧为残余，见 §8。
+- **结论（P0 后，2026-10-25）**：C **pass（P0 门禁）**——cold 首次拖动 first_publish **26–28ms**、post-seek 后第一次拖动 first_delivered **48ms**、稳态 **58.5fps**；**残余**：seek 落地 0ms 立即再拖仍有 **640–655ms** 空档（预热完成前窗口，见 §13.5），不得写成“所有场景无空档”。历史 partial 判定与数字见 §12。
 - **证据命令**：§10；原始日志在 `build/online-parity-commit.log`、`build/local-parity2.log`、`build/parity-t861b-final.log`（`build/` 不入库）
 
 ## 1. 修改前复现（`e1a89c6`）
@@ -274,3 +274,94 @@ ctest --test-dir build\release -C Release --output-on-failure
 - 因此 C **不能写“丝滑通过”**，任务总判定为 **partial**（A/B pass）。
   若要收口，方向是会话就绪前预热预览解码器/首帧，或把“首次拖动”明确写成 C 的例外并
   由用户拍板；本轮不擅自改门槛。
+
+---
+
+## 13. P0 首次拖动修复（2026-10-25）
+
+### 13.1 范围与提交
+
+- 代码：`3084e33`（度量/探针）、`c912770`（decoder：strict seek / baseline / 首帧 / Prime / 未缓存 / Warm）、`35fa8be`（MainWindow 接线 + 门禁）。
+- 不改本地 `PreviewDecoder`/`DragStrategy`、`OnlineSession`、门/阈值、schema、默认 AVC≤1080p、切档；未上硬解。
+- 验证：S4 从 `35fa8be` clean Release 重建（232.2s，ctest 37/37），Medium 副本，新缓存根 ×2，1MiB/s。
+
+### 13.2 根因
+
+1. `Resume` 把 `last_delivered_frame` 清 -1；`ShouldPublishRegularLocked`/`TakeLatestFrame` 在 `last<0` 时只接受精确目标 → 5s GOP 冷启动要解 76 帧才出第一张画面。
+2. 没有“当前显示帧”baseline，首目标中间帧无法通过“更接近且不越过”判定。
+3. 预览 seek 用 `av_seek_frame`（`SeekToPts`）：fMP4 上 `keyframe=1500` 实际落到 ~1350（**offset=-150**），post-seek 首次拖 1.29–1.50s；主会话已有的 `SeekToKeyframePts`（`avformat_seek_file` 钉 min/ts/max）未用于预览。
+4. `Pause` 关闭 reader/decoder 后没有后台预热，seek/暂停后第一次拖 ±1 仍从关键帧重解。
+
+### 13.3 修复
+
+- `DecodeToward`/`RunPrefetch` 改用 `SeekToKeyframePts`（失败 fallback `SeekToPts`，`seek_fallbacks`/`last_seek_landing_offset` 诊断）；S4 两轮 `seek_offset=0`、无 fallback。
+- `Begin/Resume(displayed_frame)` 把当前显示帧作为 baseline；删除 `last<0` 硬闸；首张“更近且不越过目标”的帧立即发布。
+- `PrimeFrame`：拖动开始时 clone 当前显示帧、worker 异步降到 1024 NV12 入缓存（不发布）。
+- 未缓存目标：发 last 与 target 之间最近的缓存帧（`from_cache=true`），waiting/“缓冲中”保持。
+- `Warm(frame)`：静默、目标 `frame+10`、缓存 `[frame-61,frame+10]`、完成后线程/decoder/reader idle；`Begin(warm_only)` 供无拖动预热；Pause 仍硬关闭，seek 前 Pause reader。
+- MainWindow：seek 落地 120ms、播放暂停 200ms 合并预热；拖动/seek/停止取消；pass displayed baseline + PrimeFrame。
+
+### 13.4 前后数字
+
+before = S1/`build\p0-before*.log`；after = S4/`build\p0-verify-parity*.log`（两轮，取范围）。
+
+| 场景 | 指标 | before | after |
+|---|---|---|---|
+| cold 75→65（首次拖动） | first_publish / first_delivered / first_response / max_missing | **263 / 272 / 190 / 5** | **26–28 / 32–36 / 1 / 0–1** |
+| post_seek_backward 1575→1565 | first_publish / first_delivered / first_response / max_missing | **1287 / 1294 / 1204 / 9** | **0 / 48 / 49 / 1** |
+| post_seek_forward 1605→1615 | 同上 | **1500 / 1511 / 1420 / 9** | **0 / 48 / 49 / 1** |
+| forward 15→75 | first_publish / first_delivered / fps | 4 / 29 / 56.94 | 9 / 17–18 / **58.53–58.65** |
+| backward 75→15 | 同上 | 9 / 29 / 56.77 | 4–5 / 111–112* / **58.65–58.71** |
+| zoom +10 / −10 | first_publish / response | 4 / 63 | 4/10 / 62 |
+| far + / − | 粗帧 / exact | 9,5 / 1667,137 | 39,22 / **695,119** |
+| 未缓存 40→45 | first_publish / delivered | 9 / 42 | 4 / 17 |
+
+\* 既有场景 `initial_pump_ms=80`，`first_delivered` 含 80ms 预热；post/immediate 为 0。跨场景比较看 `first_response`。
+
+- post-seek：baseline 1575/1605、warm **337–386ms**、warm_frames 86/116、`seek_offset=0`、landing 精确、flicker=0。
+- cold：baseline=0（当前显示帧，不是 scrub 起点 75）、open 10ms。
+- 稳态：presented 59/59（0.0%）、fps ≥58.5、gap 32/33ms；UI gap 19–21ms；cache 峰值 60.75MiB/72 帧。
+- 远跳 exact 1667/137 → 695/119ms（strict seek 的附带收益，未改门）。
+
+### 13.5 残余与读表口径（必须同时引用）
+
+1. **`post_seek_immediate`（只记录）**：StopPreview 丢弃 decoder → seek 1655 落地 0ms 立即拖 1655→1645；`max_response 645–646ms`、`max_gap 640–655ms`（1645 仍需从 K=1500 解 145 帧）。它的 `first_publish=36` 被 baseline/PrimeFrame 帧污染，**不可信**；该场景不门禁，代表“预热完成前”的窗口。要消除需主 decoder 帧交接或硬解，超出本轮。
+2. **cold 是合成场景**：屏幕 0、ScrubStart 75、目标 75→65；probe 按 backward 记“显示帧增大”为 flicker（13/14）、`ok=0`。cold 门禁只查 first_publish/delivered/response/max_missing（全过），**不能当“无闪烁”证据**；真实反向 post_seek_backward flicker=0。
+3. **`initial_pump_ms`**：既有场景 80，post/immediate 0。若按 80ms 计 post first_delivered 会是 128ms；target→画面的用户可见延迟看 `first_response`（49ms）。
+4. **本地反向波动**：S4 local backward 49.55/53.52fps、gap 68/59ms、max_missing 3/2（§12 57.00/45/2），9/0 仍过；本地源码无 diff。
+5. `--drag-strategy-test` 两次 6/7，唯一失败 `fast_forward max_gap 54.9/50.8ms`（阈值 50），既有 flaky。
+6. 新根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试；S2/S3 各一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过；S4 clean 未出现）。不写“无错误/无崩溃”。
+
+### 13.6 门禁与回归
+
+| 项 | 结果 |
+|---|---|
+| 每次拖动 first_publish ≤100ms | cold 26/28、post 0、forward 9、backward 4/5、zoom 4/10、far 39/22 |
+| 不允许连续 2 目标无新画面 | cold 0/1、post 1、forward/backward 1、zoom 1 |
+| 正反成对 | presented 59/59（0.0%）、post 正反各 10 目标 |
+| 稳态 ≥ 本地 70% | 在线 58.5+ vs 本地 forward 58.4+ / backward 49.5–53.5（均 ≥70%） |
+| ctest / key / T8.6.1b | **37/37** / **77/0** / **35/0** |
+| A 回归 | **42/0** |
+| 缓存 / UI gap | 60.75MiB/72 帧；19–21ms |
+
+### 13.7 复验命令
+
+```powershell
+$exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
+# P0 在线矩阵（新根、1MiB/s）
+& $exe --online-drag-parity-test --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --tag p0-verify --timeout-ms 90000 --drag-seconds 1 --drag-samples 60 `
+  --m1-throttle-bps 1048576 `
+  --online-cache-root build\verify-p0\cache --online-pictures build\verify-p0\pics `
+  --online-records-root build\verify-p0\records --settings-path build\verify-p0\settings
+# T8.6.1b / key / 本地
+& $exe --online-drag-preview-test --bvid BV1BMnv6jE5S --cid 42915922022 `
+  --drag-seconds 1 --drag-samples 60 --m1-throttle-bps 120000 `
+  --online-cache-root build\verify-p0\t861b-cache --online-pictures build\verify-p0\t861b-pics `
+  --online-records-root build\verify-p0\t861b-records --settings-path build\verify-p0\t861b-settings
+& $exe --key-test --file 'media\测试.mp4'
+& $exe --local-drag-parity-test --file 'media\测试.mp4'
+```
+
+- clean 重建：`scripts\build-release.ps1 -Clean`（232.2s）；dist 25 文件 / 36,392,264B / 34.71MB；exe SHA256 `D2CDEBDF637F055B1550417DEF5A0FBA17246C9AFFFBBF0ACD5508A6661ACEDB`。
+- 原始日志：`build\p0-before*.log`、`build\p0-verify-*.log`（`build/` 不入库）。

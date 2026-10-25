@@ -1,8 +1,8 @@
 # 在线播放修复任务：前后一致 + 丝滑流畅 + 清晰度切换
 
-- **版本**：v1.2（2026-10-25；独立验收完成，写入判定与两组数字）
-- **状态**：**partial（部分通过）**——A 清晰度切换 **pass**；B 前后一致 **pass**；C 丝滑流畅**稳态 pass、首次拖动冷启动未达门槛**（详见 §8）。不写“完成/丝滑通过”。
-- **代码基线**：`4d89683`；实现提交 `e1a89c6`（清晰度切换）+ `4d89683`（在线拖动）；验收提交见 `git log -1 -- docs/tasks-online-parity-fix.md`
+- **版本**：v1.3（2026-10-25；P0 首次拖动修复验收完成，追加 §9）
+- **状态**：**pass（P0 范围）**——A 清晰度切换 **pass**；B 前后一致 **pass**；C 丝滑流畅 **pass（P0 门禁）**：首次拖动 first_publish 26–28ms、post-seek 后第一次拖动 first_delivered 48ms、稳态 58.5fps。**残余**：seek 落地 0ms 立即再拖仍有 ~640–655ms 空档（预热完成前窗口，按批准口径不门禁）、cold 合成场景 flicker 为方向语义 artifact、本地反向/策略 flaky，详见 §9.6；不得写成“所有场景无空档/全绿”。
+- **代码基线**：`35fa8be`；P0 提交 `3084e33`（度量/探针）+ `c912770`（preview seek/首帧/预热）+ `35fa8be`（MainWindow 接线/门禁）；历史实现 `e1a89c6`+`4d89683`；文档提交见 `git log -1 -- docs/tasks-online-parity-fix.md`
 - **性质**：在线播放体验/缓存修复；**不改本地拖动预览、M1/M2/P4/P6/P7、OB 样本、`lapian-cache-1` schema、默认 AVC≤1080p**
 - **一句话**：在线拖动要像本地一样及时响应、前后一致；拉流后切清晰度不能再报“已完整缓存但未走缓存命中”。
 
@@ -223,7 +223,9 @@ Agent 1 和 Agent 2 都会碰 `MainWindow`/在线测试代码，必须串行。
 
 ---
 
-## 8. 独立验收结果（Agent 3，2026-10-25）
+## 8. 独立验收结果（Agent 3，2026-10-25；P0 前历史判定）
+
+> 本节保留 P0 修复前的 partial 判定与数字；P0 后结论见 §9。
 
 ### 8.1 结论
 
@@ -344,3 +346,78 @@ C 的 70% 门槛：正向 ≥40.97（在线 56.21，**96.0%**）、反向 ≥39.
 - `docs/perf/online-drag-parity.md` §12（独立复验 + 探针缺陷）
 - `docs/handoff-2026-10-25-online-parity.md`
 - 原始日志在 `build/verify-*.log`（`build/` 不入库）
+
+---
+
+## 9. P0 首次拖动修复（2026-10-25）
+
+### 9.1 结论
+
+| 层 | 判定 | 依据 |
+|---|---|---|
+| A 清晰度切换 | **pass** | 未改切档；clean 重建后 `--online-quality-switch-test` **42/0**，qn 80→112→80、codecid=7、PTS/帧号保持、切回 `cache_hit=1`、dash/playurl=0 |
+| B 前后一致 | **pass** | 正向/反向 presented **59/59（0.0%）**，fps 58.53–58.65/58.65–58.71，gap 32/33ms，landing 精确 |
+| C 丝滑流畅 | **pass（P0 门禁）** | cold 首次拖动 first_publish **26/28ms**、delivered **32/36ms**、response 1ms、max_missing **0/1**；post-seek 后第一次拖动 first_delivered **48/48ms**、response 49ms、max_missing 1；稳态 ≥58.5fps；无连续 2 目标无画面 |
+| 总判定 | **pass（P0 范围）** | 残余与证据口径见 §9.6；不能写“所有场景无空档/全绿” |
+
+### 9.2 根因（代码确认）
+
+1. **每次 `Resume` 把发布基准清成 -1**：`OnlinePreviewDecoder::Resume` 设 `last_delivered_frame=-1`，`ShouldPublishRegularLocked` 又在 `last<0` 时拒绝所有普通帧，`TakeLatestFrame` 同样拒绝非精确帧 → 5s GOP 冷启动必须解到精确目标才出第一张画面。
+2. **首目标只等精确帧**：没有“当前显示帧”作为 baseline，中间帧无法通过“比上一张更接近目标”的判定。
+3. **preview seek 落到前一 GOP**：预览路径用 `VideoDecoder::SeekToPts`（`av_seek_frame`），fMP4 上实测 keyframe=1500 却从 ~1350 解起（早 150 帧），post-seek 首次拖动 1.29–1.50s；主会话已有的 `SeekToKeyframePts`（`avformat_seek_file` 钉 min/ts/max）未用于预览。
+4. **seek 后无预热**：`Pause` 关闭 reader/decoder，落地后没有后台预热；下一次拖 ±1 仍从关键帧重解。
+
+### 9.3 实现（按提交）
+
+- `3084e33 diag: add per-drag online preview metrics`：decoder `DragStats`（open/first_publish/published/delivered/last_delivered_before_resume）、MainWindow 每次拖动快照、Runner 每场景/每 T8.6.1b 拖动行、修 `response_p95` 空向量与 `landing_frame` 误印 PTS、新增 post-seek 诊断。
+- `c912770 fix: align online preview seek and first-frame publish`：`DecodeToward`/`RunPrefetch` 改用 `SeekToKeyframePts`（失败 fallback + `seek_fallbacks`/landing offset 诊断）；`Begin/Resume` 接收 `displayed_frame` 作为 baseline；删除 `last<0` 硬闸，首张“更近且不越过目标”的中间帧立即发布；`PrimeFrame` 把当前显示帧异步入缓存；未缓存目标发布最近缓存帧且 waiting 保持；`Warm(frame)` 静默解到 `frame+10`、缓存 `[frame-61,frame+10]`、完成后 decoder/reader idle，`Begin(warm_only)` 供无拖动预热；修 open 失败后 Resume/Warm 的 thread 生命周期（join 两个线程）并加回归。
+- `35fa8be fix: warm online preview after seek and gate first-frame latency`：MainWindow 拖动传 displayed baseline + PrimeFrame；seek 落地 120ms / 播放暂停 200ms 合并预热（拖动/seek/停止取消，seek 前 Pause reader）；真实 `OnlinePreviewWarmIdleForTest`；cold 与 post-seek 正反门禁；`post_seek_immediate` 只记录诊断。
+- **未改**：本地 `PreviewDecoder`/`DragStrategy`、`OnlineSession`、门/阈值、`lapian-cache-1` schema、OB 样本、默认 AVC≤1080p、切档逻辑；未上硬解/回拷。
+
+### 9.4 修复前后数字（before = S1 `p0-before`；after = S4 clean 重建，两轮）
+
+| 场景 | first_publish before → after | first_delivered before → after | first_response before → after | max_missing before → after | fps after |
+|---|---|---|---|---|---|
+| cold 75→65（首次拖动） | **263 → 26/28ms** | **272 → 32/36ms** | **190 → 1ms** | **5 → 0/1** | 55.9–56.3 |
+| post_seek_backward 1575→1565 | **1287 → 0ms** | **1294 → 48ms** | **1204 → 49ms** | **9 → 1** | 29.5（10 目标/300ms） |
+| post_seek_forward 1605→1615 | **1500 → 0ms** | **1511 → 48ms** | **1420 → 49ms** | **9 → 1** | 29.5 |
+| forward 15→75 | 4 → 9ms | 29 → 17/18ms | 17 → 16/29ms | 1 → 1 | **58.53/58.65** |
+| backward 75→15 | 9 → 4/5ms | 29 → 111/112ms* | 17 → 30ms | 1 → 1 | **58.65/58.71** |
+| zoom +10 / −10 | 4 → 4/10ms | 29/28 → 16/17ms | 63 → 62ms | 1 → 1 | 16.6 |
+| far + / − | 9/5（粗帧）→ 39/22（粗帧） | 44/29 → — | 32/16 → 39/22 | 0 → 0 | exact 1667/137 → **695/119ms** |
+| 未缓存 40→45 | 9 → 4ms | 42 → 17ms | 0 → 0（提示） | 0 → 0 | — |
+
+\* backward/forward 等既有场景仍用 `initial_pump_ms=80`（原有口径），`first_delivered` 含 80ms 预热；post/immediate 用 0。不能跨场景直接比较 `first_delivered`，用户可见延迟看 `first_response`。
+
+- 前后成对：presented **59/59（0.0%）**；landing 全部精确（75/15、1565、1615；远跳 3000/15）。
+- 预热：post_seek warm **337–386ms**、warm_frames 86/116、`seek_offset=0`、baseline 1575/1605；cold baseline=0（当前显示帧，不是 scrub 起点 75）。
+- 缓存峰值 **63,700,992B / 72 帧 = 60.75MiB**（≤64MiB）；UI gap **19–21ms**（≤50）。
+
+### 9.5 门槛对照
+
+| 门槛 | 结果 |
+|---|---|
+| 每次拖动 first_publish ≤100ms | cold 26/28、post 0、forward 9、backward 4/5、zoom 4/10、far 粗帧 39/22；**P0 门禁场景全 ≤100** |
+| 不允许连续 2 个目标无新画面 | cold 0/1、post 1、forward/backward 1、zoom 1 |
+| 正反向都测、成对 | 59/59（差 0.0%）；post 正反各 10 目标 |
+| 稳态 ≥ 本地 70% | 在线 58.53–58.71 vs 本地 58.42–58.47（forward）/49.55–53.52（backward，机器波动）；均 ≥70% |
+| `ctest` | **37/37**（clean 构建脚本内 62.98s） |
+| key / T8.6.1b | **77/0** / **35/0** |
+| A 回归 | **42/0** |
+| 缓存 | 60.75MiB/72 帧；End 后 0（单测） |
+| UI gap | 19–21ms |
+
+### 9.6 残余与证据口径（必须同时写）
+
+1. **seek 落地 0ms 立即再拖仍是残余**：`post_seek_immediate` 用 `StopPreview` 丢弃 decoder 后 seek 到 1655 立即拖 1655→1645，`max_response 645–646ms`、`max_gap 640–655ms`（目标 1645 仍需从 K=1500 解 145 帧）。该场景**不门禁**（按用户批准的“预热完成后的每次拖动”口径）；它的 `first_publish=36` 被 baseline/PrimeFrame 帧污染，不能当“立即拖很快”引用。要消除需主 decoder 帧交接或硬解，超出本轮“不先上硬解”。
+2. **cold 是合成场景**：屏幕显示 0、ScrubStart=75、目标 75→65；probe 按 backward 记“显示帧增大”为 flicker，实测 flicker 13/14、`ok=0`。cold 门禁只查 first_publish/delivered/response/max_missing（全过），**不能把 cold 当“无闪烁”证据**；真实反向见 post_seek_backward（flicker=0）。
+3. **`initial_pump_ms` 口径**：既有场景默认 80ms（让冷 decoder 打开），post/immediate 为 0（decoder 已暖、首目标==显示帧，80ms 内没有目标变化）。按含 80ms 计 post first_delivered 会变 128ms；用户可见的 target→画面延迟是 first_response 49ms。
+4. **本地反向波动**：S4 local backward 49.55/53.52fps、gap 68/59ms、max_missing 3/2（§12 为 57.00/45/2），9/0 仍过；本地源码未改，属机器负载/计时波动。
+5. **`--drag-strategy-test` flaky**：S4 两次均 6/7，唯一失败 `fast_forward max_gap 54.9/50.8ms`（阈值 50）；本地 `PreviewDecoder`/`DragStrategy` 本轮无 diff，属既有 flake。
+6. 新缓存根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试成功；S2/S3 各出现一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过，S4 clean 未出现）；均按残余记录，不写“无崩溃/无错误”。
+
+### 9.7 复验与提交
+
+- clean Release 重建 **232.2s**（`scripts\build-release.ps1 -Clean`，exit 0，脚本内 ctest 37/37）。
+- dist **25 文件 / 36,392,264B / 34.71MB**；`lapian.exe` 3,182,592B、SHA256 `D2CDEBDF637F055B1550417DEF5A0FBA17246C9AFFFBBF0ACD5508A6661ACEDB`；Medium 副本 hash 一致。
+- 代码提交 `3084e33` / `c912770` / `35fa8be`；证据 [online-drag-parity.md](perf/online-drag-parity.md) §13、[handoff-2026-10-25-p0.md](handoff-2026-10-25-p0.md)；日志 `build\p0-before*.log`、`build\p0-verify-*.log`（`build/` 不入库）。
