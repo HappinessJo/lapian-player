@@ -152,6 +152,41 @@ QSplitter）已经能跑真实的打开/播放/步进/时间轴/标记/全屏；
 
 ---
 
+---
+
+## 4.4 3A.5 视觉对齐（2026-10-26，用户拍板"按原型来"）
+
+第一版 3A 只按规划正文的数字搭了骨架（栏位高度/M4 全对），但**观感朴素**：无图标、无按钮分组、
+无面板卡片、无面板头。用户看过原型后要求"按原型的来"，于是补了 **3A.5 视觉对齐**，
+并把"原型 = 视觉基准"写进 [ui-v2-visual-reference.md](ui-v2-visual-reference.md)（AGENTS §11 已加规则）。
+
+**这一轮做了什么**
+
+| 项 | 内容 |
+|---|---|
+| 新增 `ui/Glyph.{h,cpp}` | 30 个 QPainter 矢量图标（play/pause/首末帧/A-B/音量/静音/循环/波形/旗标/相机/全屏/面板/打开/在线/?/齿轮/时钟/±/箭头/勾/漏斗），2×DPR 自适应，**不引入 qrc/PNG/Qt6Svg/图标字体** |
+| `Theme` 重写 | 单份 QSS 改为原型的容器层级：应用底 `#0e0e10`、面板卡片 `#17171a + 1px #2b2b33 + 4px 圆角`、chip 胶囊（radius 10）、按钮 26px/radius 3、`text-mute` 只做禁用 |
+| `TopBar` 重写 | 文件图标+文件名、规格 chip（漏斗图标 + 胶囊）、模式 chip（勾/在线/时钟图标 + 语义色胶囊）、`打开 [Ctrl+O]`、`在线 [Ctrl+U]`（**带键位角标**）、`?`、齿轮；设置按钮改成图标（objectName 保留 `cacheSettingsButton`） |
+| `TransportBar` 重写 | 左组 首/±1/播放(实心 accent)/末 │ A/B │ 速度/静音/音量；中间 **26px 等宽时间码 + 帧号/总帧**；右组 缓冲槽 │ 循环/波形/标记/截图/全屏/检查器；分组用 1px 分隔符；按钮全部绑既有 QAction |
+| 新增 `ui/TimelinePanel` | 面板头 26px（dense 无头）：`◷ 时间轴` … `工作区 … · 循环开` / `视图 … · 适应窗口` / `− + 适配`（缩放绑既有 action，适配信号回 MainWindow） |
+| `PlayerShell` | 画面/时间轴/检查器三块改为**面板卡片**（边框+圆角），工作区底色 `#0e0e10` |
+| 状态栏 | 速度读数搬到 Transport（对象/getter 不变），状态栏只留仍在它里面的控件 |
+
+**必须知道的一个 Qt 坑**：`QToolButton::setDefaultAction()` 会在 action 每次 `changed()` 时
+把按钮 icon 重设成 `action->icon()`（我们的 action 没有 icon）→ 自绘图标消失、按钮退化成"…"。
+所以 Transport/面板头的按钮改用 `Glyph::BindToolAction()`（单向同步 enabled/checked + clicked→trigger）。
+规划 §7.1 写的是 `setDefaultAction`，**这里是有意的实现偏差**：口径（QAction 是唯一真源）没变。
+
+**3A.5 的门禁**
+
+- `--banner-test` 74/0（narrow 相位新增的宽度降级生效：<700 收速度、<640 收 A/B、<520 收次读数）。
+- `--dpi-test` 4 DPI × 3 相位 problems 全空；M4 **仍是 64.2 / 64.2 / 64.4 / 56.6 / 60.8%**，
+  `tl=132/112/96`、`ins=304`（200% 折叠 44）——视觉改动没有动预算。
+- `--key-test` 77/0、`--mark-test`/`--note-test` 0、`--startup-test`、`--fullscreen-test` 全过（新旧壳各一遍）。
+- M2 截屏采样（新皮肤）：顶栏 14.66 / 规格 chip 14.20 / 模式 chip 13.68 / 时间码 14.66 /
+  检查器 12.47 / 状态栏 14.66 / 时间轴面板头 **6.72**，全部 ≥4.5:1。
+- 遗留观感差距见 [ui-v2-visual-reference.md](ui-v2-visual-reference.md) §5（时间轴两条滑块=3B、
+  检查器 tab=3C、状态栏压缩与横幅配色=3D）。
 ## 5. 与规划的偏差（逐条，都可回退）
 
 | # | 规划 | 3A 实际 | 理由 |
