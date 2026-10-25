@@ -28,20 +28,40 @@
     --h-transport: 46px;
     --h-timeline: 132px;
     --h-status: 24px;
+    --h-panelhead: 26px;
     --w-inspector: 304px;
     --fs-sm: 11px;
     --fs-md: 12px;
   }
 
+  /* 三档密度（规划 P3）：按**客户区高度**取档，不按 DPI。
+     regular ≥640 / compact 520–639 / dense <520（200% DPI=452、窄窗口=500 落 dense）。 */
   #app.density-compact {
-    --h-appbar: 32px;
+    --h-appbar: 34px;
     --h-banner: 24px;
-    --h-transport: 38px;
+    --h-transport: 40px;
     --h-timeline: 112px;
     --h-status: 22px;
+    --h-panelhead: 24px;
     --fs-sm: 10px;
     --fs-md: 11px;
   }
+  #app.density-dense {
+    --h-appbar: 30px;
+    --h-banner: 22px;
+    --h-transport: 36px;
+    --h-timeline: 96px;
+    --h-status: 20px;
+    --h-panelhead: 22px;
+    --fs-sm: 10px;
+    --fs-md: 11px;
+  }
+  /* dense：26px 表头让位给画面/时间轴；文件与规格只在顶栏，工作区数值移到状态栏 */
+  #app.density-dense .panel.video > .panelhead,
+  #app.density-dense .panel.timeline > .panelhead { display: none; }
+  #app.density-dense .panelhead { height: var(--h-panelhead); flex: 0 0 var(--h-panelhead); }
+  #app.density-dense .ins-head,
+  #app.density-dense .ins-tab { height: var(--h-panelhead); }
 
   #app.accent-amber { --accent: #e0a54a; --wave: #d9a45e; }
   #app.accent-teal  { --accent: #3fbfa8; --wave: #5ac2b4; }
@@ -116,6 +136,8 @@
   .btn .txt { font-size: var(--fs-md); }
   .btn:disabled, .disabled .btn { opacity: .38; pointer-events: none; }
   .transport.disabled .looppill,
+  .transport.disabled .playbtn,
+  .transport.disabled .tgroup,
   .transport.disabled .readout,
   .transport.disabled .vol { opacity: .4; }
 
@@ -142,7 +164,7 @@
   .banner .btn { height: 20px; }
 
   /* ── 工作区 ─────────────────────────────────────────────────────── */
-  .workspace { flex: 1; display: flex; min-height: 0; padding: 6px; gap: 0; }
+  .workspace { flex: 1; display: flex; min-height: 0; padding: 6px; gap: 0; overflow: hidden; }
   .stagecol { flex: 1; display: flex; flex-direction: column; min-width: 0; gap: 0; }
 
   /* 可拖动分隔条：光标变双向箭头，拖拽调整相邻版块尺寸 */
@@ -176,11 +198,11 @@
 
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); display: flex; flex-direction: column; min-height: 0; }
   .panelhead {
-    height: 26px; flex: 0 0 26px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    height: var(--h-panelhead); flex: 0 0 var(--h-panelhead); display: flex; align-items: center; gap: 6px; padding: 0 8px;
     background: var(--panel-2); border-bottom: 1px solid var(--line); border-radius: var(--radius) var(--radius) 0 0;
     font-size: var(--fs-sm); color: var(--text-dim); user-select: none;
   }
-  .panelhead .tab { display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; color: var(--text-dim); border-right: 1px solid var(--line); }
+  .panelhead .tab { display: flex; align-items: center; gap: 5px; height: var(--h-panelhead); padding: 0 8px; color: var(--text-dim); border-right: 1px solid var(--line); }
   .panelhead .tab.active { color: #fff; background: var(--panel); box-shadow: inset 0 2px 0 var(--accent); }
   .panelhead .grow { flex: 1; }
   .panelhead .meta { color: var(--text-mute); font-size: var(--fs-sm); }
@@ -342,14 +364,18 @@
   #app.inspector-collapsed .inspector { width: 44px; flex-basis: 44px; }
   #app.inspector-collapsed .inspector .ins-body,
   #app.inspector-collapsed .inspector .head-tabs,
-  #app.inspector-collapsed .inspector .head-actions { display: none; }
+  #app.inspector-collapsed .inspector .head-actions,
+  #app.inspector-collapsed .inspector .ins-foot { display: none; }
   #app.inspector-collapsed .inspector .rail { display: flex; }
-  .inspector .rail { display: none; flex-direction: column; align-items: center; gap: 10px; padding: 10px 0; color: var(--text-dim); }
-  .inspector .rail .vert { writing-mode: vertical-rl; font-size: 10px; letter-spacing: .18em; color: var(--text-mute); }
+  .inspector .rail { display: none; flex: 1; min-height: 0; flex-direction: column; align-items: center; gap: 10px; padding: 10px 0; color: var(--text-dim); }
+  .inspector .rail .vert { font-size: 10px; line-height: 1.5; text-align: center; color: var(--text-mute); }
 
-  .ins-head { height: 26px; flex: 0 0 26px; display: flex; align-items: center; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+  #app.no-stage-head .panel.video > .panelhead { display: none; }
+  /* ?hdr=0：画面区不设表头（规划 P1 推荐变体；文件名/规格只在顶栏） */
+
+  .ins-head { height: var(--h-panelhead); flex: 0 0 var(--h-panelhead); display: flex; align-items: center; background: var(--panel-2); border-bottom: 1px solid var(--line); }
   .head-tabs { display: flex; height: 100%; }
-  .ins-tab { padding: 0 10px; height: 26px; display: flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--text-mute); border-right: 1px solid var(--line); }
+  .ins-tab { padding: 0 10px; height: var(--h-panelhead); display: flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--text-mute); border-right: 1px solid var(--line); }
   .ins-tab.active { color: #fff; background: var(--panel); box-shadow: inset 0 2px 0 var(--accent); }
   .ins-tab .n { font-size: 10px; color: var(--text-mute); }
   .head-actions { margin-left: auto; display: flex; gap: 2px; padding-right: 4px; }
@@ -687,7 +713,7 @@
     <aside class="inspector region" id="inspector" data-region="检查器">
       <div class="rail">
         <button class="btn" id="railToggle" data-tip="展开检查器"><svg class="i"><use href="#i-chev-left"/></svg></button>
-        <span class="vert">标记 6 · 截图 3</span>
+        <span class="vert">标记<br>6<br>截图<br>3</span>
       </div>
       <div class="ins-head">
         <div class="head-tabs">
@@ -791,9 +817,11 @@
     <div class="grp">
       <div class="t">密度</div>
       <div class="seg" id="segDensity">
-        <button data-v="comfortable" class="on">舒适</button>
-        <button data-v="compact">紧凑（200% DPI 用）</button>
+        <button data-v="comfortable" class="on">常规（≥640 高）</button>
+        <button data-v="compact">紧凑（520–639）</button>
+        <button data-v="dense">密集（&lt;520，200% DPI / 窄窗口）</button>
       </div>
+      <div class="note">原型按窗口高度自动取档；点这里可手动锁定。dense 档会收起画面区与时间轴的表头，把高度让给画面。</div>
     </div>
 
     <div class="grp">
@@ -868,6 +896,7 @@
     mode: "paused",
     format: "tc",
     density: "comfortable",
+    densityManual: false,
     accent: "blue",
     zoomStyle: "ae",
     btnStyle: "icon",
@@ -878,6 +907,7 @@
     muted: false,
     tab: "marks",
     inspectorOpen: true,
+    inspectorAuto: false,
     selected: "m1",
     marks: [
       { id: "m1", frame: 100, label: "卡点", note: "鼓点重音落在切点上，比画面切点早 1 帧" },
@@ -981,7 +1011,7 @@
     if (state.format === "frames") {
       $("#subMain").innerHTML = tcLong(f);
     } else {
-      $("#subMain").innerHTML = "帧 <b>" + pad(f, 4) + "</b>";
+      $("#subMain").innerHTML = "帧 <b>" + f + "</b>";
     }
     $("#frameTotal").textContent = String(TOTAL);
     $("#zPlay").style.left = (f / (TOTAL - 1)) * 100 + "%";
@@ -1040,7 +1070,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    const compact = state.density === "compact";
+    const compact = state.density !== "comfortable";
     const rulerH = compact ? 18 : 22;
     const stripH = compact ? 10 : 12;
     const waveTop = rulerH + stripH;
@@ -1235,7 +1265,9 @@
   }
 
   function setView(start, end) {
-    const minSpan = 8;
+    /* spec F2：最大缩放 = 1 帧 ≥8px → 可见跨度下限 = 画布宽/8（不再固定 8 帧）。
+       原型早期用 8 帧，等于 150px/帧，超出 spec 上限，这里按规格收紧。 */
+    const minSpan = Math.max(8, Math.round((canvas.clientWidth || 0) / 8));
     let s = Math.round(start), e = Math.round(end);
     if (e - s < minSpan) { const mid = (s + e) / 2; s = mid - minSpan / 2; e = mid + minSpan / 2; }
     if (s < 0) { e -= s; s = 0; }
@@ -1524,6 +1556,19 @@
       showBanner(null);
       $("#topMode").className = "chip ok";
     }
+    /* 检查器默认：无媒体（空/加载/错误）折叠成 44；首次进入有媒体的状态时自动展开一次。
+       之后完全听用户的（规划 §3.1）。 */
+    if (!hasMedia() && !state.inspectorAuto) {
+      state.inspectorAuto = true;
+      state.inspectorOpen = false;
+      app.classList.add("inspector-collapsed");
+      $("#inspBtn").classList.remove("on");
+    } else if (hasMedia() && state.inspectorAuto) {
+      state.inspectorAuto = false;
+      state.inspectorOpen = true;
+      app.classList.remove("inspector-collapsed");
+      $("#inspBtn").classList.add("on");
+    }
     renderStatus();
     renderReadout();
     renderChips();
@@ -1561,7 +1606,7 @@
     }
     list.innerHTML = ms.map((m) =>
       '<div class="mrow' + (m.id === state.selected ? " sel" : "") + '" data-id="' + m.id + '">' +
-        '<span class="fno">' + String(m.frame).padStart(4, "0") + "</span>" +
+        '<span class="fno">' + String(m.frame) + "</span>" +
         '<span style="min-width:0"><div class="mlabel">' + esc(m.label) + "</div>" +
         '<div class="mnote">' + esc(m.note || "—") + "</div></span>" +
         '<button class="del" data-del="' + m.id + '" data-tip="删除标记"><svg class="i" style="width:13px;height:13px"><use href="#i-trash"/></svg></button>' +
@@ -1821,12 +1866,26 @@
   $("#segDensity").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-v]");
     if (!b) return;
-    state.density = b.dataset.v;
-    app.classList.toggle("density-comfortable", state.density === "comfortable");
-    app.classList.toggle("density-compact", state.density === "compact");
-    setSeg("#segDensity", state.density);
-    drawTimeline(); renderZoomWindow();
+    setDensity(b.dataset.v, true);
   });
+  /* 三档密度：comfortable / compact / dense。auto=1 表示跟随窗口高度取档（默认行为），
+     用户一旦手动选档就固定下来，直到刷新。 */
+  function setDensity(v, manual) {
+    state.density = v;
+    app.classList.remove("density-comfortable", "density-compact", "density-dense");
+    app.classList.add("density-" + v);
+    setSeg("#segDensity", v);
+    if (manual) { state.densityManual = true; }
+    drawTimeline();
+    renderZoomWindow();
+  }
+  function autoDensity() {
+    if (state.densityManual) return;
+    const h = window.innerHeight || 0;
+    /* 与规划 P3 的分档一致：<520 dense，520–639 compact，≥640 regular */
+    const want = h < 520 ? "dense" : (h < 640 ? "compact" : "comfortable");
+    if (want !== state.density) { setDensity(want, false); }
+  }
   $("#segAccent").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-v]");
     if (!b) return;
@@ -1938,8 +1997,10 @@
   renderStatus();
   applyModeVisual();
   renderZoomWindow();
+  /* 首帧时 window.innerHeight 可能还没定（headless/冷启动），下一帧再取一次档 */
+  requestAnimationFrame(() => { autoDensity(); drawTimeline(); renderZoomWindow(); });
   drawTimeline();
-  window.addEventListener("resize", () => { drawTimeline(); renderZoomWindow(); });
+  window.addEventListener("resize", () => { autoDensity(); drawTimeline(); renderZoomWindow(); });
   /* 折叠检查器时有宽度过渡：用 ResizeObserver 重画，避免画布被拉伸/播放头消失 */
   if (window.ResizeObserver) {
     const body = canvas.parentElement;
@@ -1970,11 +2031,13 @@
       const b = document.querySelector('#segAux [data-v="annotate"]');
       if (b) b.classList.add("on");
     }
-    if (q.get("density") === "compact") {
-      state.density = "compact";
-      app.classList.remove("density-comfortable");
-      app.classList.add("density-compact");
-      setSeg("#segDensity", "compact");
+    if (q.get("density")) {
+      setDensity(q.get("density"), true);
+    }
+    if (q.get("hdr") === "0") {
+      /* 规划 P1 推荐变体：画面区不设 26px 表头（文件/规格只在顶栏），
+         在 1280×720 下把画面从 412 提到 438（+3.6pp）。 */
+      app.classList.add("no-stage-head");
     }
     if (q.get("tl")) {
       app.style.setProperty("--h-timeline", Math.max(96, Math.min(340, +q.get("tl"))) + "px");

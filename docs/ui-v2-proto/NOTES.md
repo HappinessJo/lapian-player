@@ -25,13 +25,30 @@
 
 ## URL 参数（截图/分享用）
 
-`index.html?mode=loading&drawer=1&annotate=1&density=compact&format=sec&view=150,420&work=1000,2600&tl=220&ins=430&split=1&smoke=1`
+`index.html?mode=loading&drawer=1&annotate=1&density=dense&format=sec&view=150,420&work=1000,2600&tl=220&ins=430&split=1&hdr=0&smoke=1`
 
 - `mode`：empty / paused / playing / loop / loading / buffering / error / fullscreen
 - `view`：视图窗 start,end（帧）；`work`：工作区 A,B（帧）
 - `tl` / `ins`：时间轴高度 / 检查器宽度（px）
+- `density`：comfortable / compact / dense（不传则按窗口高度自动取档：<520 dense、520–639 compact、≥640 comfortable）
+- `hdr`：`0` = 隐藏画面区 26px 表头（规划 P1 推荐变体：文件名/规格只在顶栏，省 3.6pp 高度）
 - `format`：tc / sec / frames；`drawer=1` 开讨论面板；`annotate=1` 区域标注
 - `split=1`：让分隔条常亮（截图用）；`smoke=1`：跑一遍自检并把结果写进 DOM（`#smoke`）
+
+## 规划阶段的改动（2026-10-25 → 2026-10-26）
+
+对应 [../ui-v2-plan.md](../ui-v2-plan.md) §5，原型被改造成"能演示三档密度 + 无表头"的参考稿：
+
+1. 三档密度（`density-compact` 34/40/112/22、`density-dense` 30/36/96/20 + 收起画面/时间轴表头）；
+2. 按窗口高度自动取档（可手动锁定）；
+3. `hdr=0` 无表头变体；
+4. 视图窗缩放下限改为 `画布宽/8`（1 帧 8px，spec F2）；
+5. `.workspace` 溢出修复（原来 928×452 下画面只有 19px）；
+6. 帧号不补零（读数与标记列表）；
+7. 空/加载/错误态折叠检查器（含 rail 文案与页脚）；
+8. 空态播放按钮也置灰。
+
+**仍未实现（只在产品里做）**：按窗口宽度 <1000 自动折叠检查器；窄宽度降级用显式隐藏而不是 `overflow:hidden` 裁剪。
 
 ## 原型 ≠ 产品（规划阶段必须记住）
 
@@ -40,4 +57,8 @@
 3. **波形是合成占位**：按"静音→主段→收尾"包络生成。
 4. **假按钮**：打开/在线/设置/帮助/截图保存只弹提示条。
 5. **数值是示例**：4573 帧 / 30fps / 第 203 帧 / 在线 BV 与清晰度都不是接口结果。
-6. 窄宽度会隐藏次要控件（循环数值、音量、A/B 按钮）——这是待规划的取舍。
+6. 窄宽度会隐藏次要控件（循环数值、音量、A/B 按钮）——取舍已写进 [规划 §3.3](../ui-v2-plan.md)；
+   原型是靠 `overflow:hidden` 裁掉的，产品必须按优先级**显式隐藏**。
+7. 截图模式与 dump-dom 模式的浏览器外框不一致：`--screenshot` 的 `--window-size` 是内容尺寸；
+   `--dump-dom` 会被本机浏览器外框吃掉约 24×151，同一参数下视口更小。
+   比较几何时先看 `#debug` 里的 `.panel.video`，不要拿两种模式的数字互相换算。
