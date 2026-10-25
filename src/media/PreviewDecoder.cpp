@@ -916,7 +916,15 @@ struct PreviewDecoder::Impl {
         (last_target_step >= kCoarseMinForwardJump ||
          -last_target_step >= kCoarseMinForwardJump);
     // DP-2：目标精确命中缓存时直接发布，不再 seek；正向、反向都查。
-    if (AVFrame* cached = CloneExactLocked(target, requested_session)) {
+    // 注意：CloneExactLocked 要求持锁（会遍历热缓存 deque / 环缓存 list，
+    // 而 UI 线程 Begin/End 与预取线程会并发增删）；裸调会和 av_frame_clone/
+    // eviction 竞争，是本轮 0xC0000374/0xC0000005 的首要嫌疑。
+    AVFrame* cached = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      cached = CloneExactLocked(target, requested_session);
+    }
+    if (cached != nullptr) {
       Publish(cached, target_pts, target, requested_session, false, true, false);
       return true;
     }
@@ -1474,7 +1482,14 @@ struct PreviewDecoder::Impl {
       return;
     }
     if (!prefetch_seeked) {
-      if (AVFrame* cached = CloneExactLocked(cursor, requested_session)) {
+      // 与 Process 的缓存命中一样：CloneExactLocked 必须持锁；裸调会和 UI/
+      // 预取线程的 eviction 竞争（同上的堆/AVFrame 竞争窗口）。
+      AVFrame* cached = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        cached = CloneExactLocked(cursor, requested_session);
+      }
+      if (cached != nullptr) {
         av_frame_free(&cached);
         prefetch_cursor = cursor + 1;
         return;
