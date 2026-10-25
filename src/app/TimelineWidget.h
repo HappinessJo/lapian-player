@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QWidget>
 
@@ -51,6 +51,11 @@ class TimelineWidget : public QWidget {
   // 直接指定比例，主要供测试/后续缩放档位使用；仍受 fit/8px 上下限约束。
   void SetPixelsPerFrame(double pixels_per_frame);
   double pixels_per_frame() const { return model_.pixels_per_frame(); }
+  // UI v2（3A）：时间轴面板头要显示"视图 0–4572 · 适应窗口"。只读投影，
+  // 不新增视图状态（规划 Q3：唯一 source of truth 仍是 TimelineModel）。
+  std::int64_t frame_count() const { return model_.frame_count(); }
+  double scroll_px() const { return model_.scroll(); }
+  bool fit_mode() const { return fit_mode_; }
 
   // 指针命中：第 N 帧占据 [N, N+1)，按物理像素对齐后 floor。
   // T2.8 的鼠标事件与 T2.9/T2.10 的拖动路径共用这一入口。

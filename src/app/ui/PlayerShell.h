@@ -9,6 +9,7 @@ class BannerSlot;
 class PlayerSplitter;
 class QResizeEvent;
 class StageStack;
+class TimelinePanel;
 class TopBar;
 class TransportBar;
 class QToolButton;
@@ -31,7 +32,9 @@ class PlayerShell : public QWidget {
   QWidget* videoColumn() const { return video_column_; }
   QSize videoColumnMin() const { return video_column_ == nullptr ? QSize() : video_column_->minimumSize(); }
   QSize videoColumnSizeHint() const { return video_column_ == nullptr ? QSize() : video_column_->sizeHint(); }
-  QWidget* timelineHost() const { return timeline_host_; }
+  TimelinePanel* timelinePanel() const { return timeline_panel_; }
+  // 兼容 3A 之前的调用点：返回时间轴画布容器（TimelineWidget 放这里）。
+  QWidget* timelineHost() const;
   QWidget* inspectorHost() const { return inspector_host_; }
   QWidget* inspectorContentHost() const { return inspector_content_; }
   PlayerSplitter* vSplit() const { return v_split_; }
@@ -64,6 +67,10 @@ class PlayerShell : public QWidget {
   int BannerHeight() const;
   QString DensityName() const { return QString::fromLatin1(tokens_.name); }
 
+ signals:
+  // 时间轴"适配"按钮：MainWindow 调 timeline_->FitToWindow() 并刷新面板头。
+  void fitTimelineRequested();
+
  protected:
   void resizeEvent(QResizeEvent* event) override;
   bool eventFilter(QObject* watched, QEvent* event) override;
@@ -80,7 +87,7 @@ class PlayerShell : public QWidget {
   StageStack* stage_ = nullptr;
   TransportBar* transport_ = nullptr;
   QWidget* video_column_ = nullptr;
-  QWidget* timeline_host_ = nullptr;
+  TimelinePanel* timeline_panel_ = nullptr;
   QWidget* inspector_host_ = nullptr;
   QWidget* inspector_rail_ = nullptr;
   QWidget* inspector_content_ = nullptr;

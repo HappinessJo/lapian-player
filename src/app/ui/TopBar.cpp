@@ -1,27 +1,116 @@
 ﻿#include "app/ui/TopBar.h"
 
 #include <QAction>
+#include <QEnterEvent>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QStyle>
 #include <QToolButton>
 
 #include <algorithm>
-#include <cstdio>
 
+#include "app/ui/Glyph.h"
 #include "app/ui/Theme.h"
 
 namespace {
 
 // 顶栏窄模式：<1000 逻辑像素时收起规格 chip（空出宽度给文件名与模式 chip）。
-// 旧壳 InfoBar 的窄模式判据是"自身宽度 <760"，在 v2 里顶栏是全宽，所以
-// 阈值为窗口宽度（规划 §3.1 的 1000 与检查器自动折叠同源）。
 constexpr int kNarrowWidth = 1000;
 
+QColor DimColor() { return lapian::ui::Color(lapian::ui::kColorTextDim); }
+
 }  // namespace
+
+namespace lapian::ui {
+
+TopActionChip::TopActionChip(GlyphId glyph, const QString& text,
+                             const QString& kbd, QWidget* parent)
+    : QWidget(parent) {
+  setObjectName(text == QStringLiteral("打开") ? QStringLiteral("v2OpenButton")
+                                               : QStringLiteral("v2OnlineButton"));
+  setCursor(Qt::PointingHandCursor);
+  setFocusPolicy(Qt::NoFocus);
+  lapian::ui::SetStyledBackground(this);
+
+  auto* row = new QHBoxLayout(this);
+  row->setContentsMargins(6, 0, 6, 0);
+  row->setSpacing(5);
+
+  icon_ = new QLabel(this);
+  icon_->setObjectName(QStringLiteral("v2ActionIcon"));
+  icon_->setFixedSize(16, 16);
+  icon_->setPixmap(lapian::ui::GlyphPixmap(glyph, 16, DimColor()));
+  row->addWidget(icon_, 0, Qt::AlignVCenter);
+
+  text_ = new QLabel(text, this);
+  text_->setFont(lapian::ui::UiFont(12.0));
+  row->addWidget(text_, 0, Qt::AlignVCenter);
+
+  if (!kbd.isEmpty()) {
+    kbd_ = new QLabel(kbd, this);
+    kbd_->setObjectName(QStringLiteral("v2KbdBadge"));
+    kbd_->setFont(lapian::ui::MonoFont(9.0));
+    kbd_->setContentsMargins(3, 2, 3, 2);
+    lapian::ui::SetStyledBackground(kbd_);
+    row->addWidget(kbd_, 0, Qt::AlignVCenter);
+  }
+  setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+}
+
+void TopActionChip::SetAction(QAction* action) {
+  action_ = action;
+  if (action_ != nullptr) {
+    connect(action_, &QAction::changed, this, [this]() { RefreshEnabled(); });
+  }
+  RefreshEnabled();
+}
+
+void TopActionChip::RefreshEnabled() {
+  const bool enabled = action_ == nullptr || action_->isEnabled();
+  if (isEnabled() != enabled) {
+    setEnabled(enabled);
+    setCursor(enabled ? Qt::PointingHandCursor : Qt::ArrowCursor);
+  }
+}
+
+void TopActionChip::mousePressEvent(QMouseEvent* event) {
+  if (event != nullptr && event->button() == Qt::LeftButton && isEnabled()) {
+    pressed_ = true;
+    event->accept();
+    return;
+  }
+  QWidget::mousePressEvent(event);
+}
+
+void TopActionChip::mouseReleaseEvent(QMouseEvent* event) {
+  if (event != nullptr && event->button() == Qt::LeftButton && pressed_) {
+    pressed_ = false;
+    if (rect().contains(event->position().toPoint()) && action_ != nullptr &&
+        action_->isEnabled()) {
+      action_->trigger();
+      event->accept();
+      return;
+    }
+  }
+  QWidget::mouseReleaseEvent(event);
+}
+
+void TopActionChip::enterEvent(QEnterEvent* event) {
+  QWidget::enterEvent(event);
+  update();
+}
+
+void TopActionChip::leaveEvent(QEvent* event) {
+  QWidget::leaveEvent(event);
+  update();
+}
+
+}  // namespace lapian::ui
 
 TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   setObjectName(QStringLiteral("v2TopBar"));
@@ -31,11 +120,12 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   row->setContentsMargins(8, 0, 8, 0);
   row->setSpacing(6);
 
-  file_icon_ = new QLabel(QStringLiteral("▣"), this);
+  // 文件：小图标 + 文件名（13px 半粗）。不设品牌区（规划 D2）。
+  file_icon_ = new QLabel(this);
   file_icon_->setObjectName(QStringLiteral("v2FileIcon"));
-
-  file_icon_->setFixedWidth(16);
-  file_icon_->setAlignment(Qt::AlignCenter);
+  file_icon_->setFixedSize(16, 16);
+  file_icon_->setPixmap(lapian::ui::GlyphPixmap(lapian::ui::GlyphId::kPanel, 15,
+                                                DimColor()));
   row->addWidget(file_icon_, 0, Qt::AlignVCenter);
 
   // 占位：真正的 infoFile 标签由 AdoptFileLabel 塞进 v2FileLabel 容器。
@@ -48,23 +138,41 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   row->addWidget(file_holder, 1, Qt::AlignVCenter);
   file_label_ = file_holder;
 
+  // 规格 chip：icon + 「1920×1080 · h264 · 30.000fps」，胶囊形。
   auto* spec_chip = new QWidget(this);
   spec_chip->setObjectName(QStringLiteral("v2SpecChip"));
   lapian::ui::SetStyledBackground(spec_chip);
   spec_chip->setVisible(false);
   auto* spec_layout = new QHBoxLayout(spec_chip);
-  spec_layout->setContentsMargins(6, 1, 6, 1);
-  spec_layout->setSpacing(0);
+  spec_layout->setContentsMargins(7, 0, 7, 0);
+  spec_layout->setSpacing(4);
+  auto* spec_icon = new QLabel(spec_chip);
+  spec_icon->setObjectName(QStringLiteral("v2SpecIcon"));
+  spec_icon->setFixedSize(12, 12);
+  spec_icon->setPixmap(
+      lapian::ui::GlyphPixmap(lapian::ui::GlyphId::kFilter, 12, DimColor()));
+  spec_layout->addWidget(spec_icon, 0, Qt::AlignVCenter);
   row->addWidget(spec_chip, 0, Qt::AlignVCenter);
   spec_chip_ = spec_chip;
+  spec_icon_ = spec_icon;
 
-  mode_chip_ = new QLabel(QStringLiteral("未打开"), this);
-  mode_chip_->setObjectName(QStringLiteral("v2ModeChip"));
-
-  mode_chip_->setContentsMargins(6, 1, 6, 1);
-  lapian::ui::SetStyledBackground(mode_chip_);
-  mode_chip_->setVisible(true);
-  row->addWidget(mode_chip_, 0, Qt::AlignVCenter);
+  // 模式 chip：icon + 文字，颜色+文字双编码（P6）。
+  auto* mode_chip = new QWidget(this);
+  mode_chip->setObjectName(QStringLiteral("v2ModeChip"));
+  lapian::ui::SetStyledBackground(mode_chip);
+  auto* mode_layout = new QHBoxLayout(mode_chip);
+  mode_layout->setContentsMargins(7, 0, 8, 0);
+  mode_layout->setSpacing(4);
+  mode_icon_ = new QLabel(mode_chip);
+  mode_icon_->setObjectName(QStringLiteral("v2ModeIcon"));
+  mode_icon_->setFixedSize(12, 12);
+  mode_layout->addWidget(mode_icon_, 0, Qt::AlignVCenter);
+  mode_text_ = new QLabel(QStringLiteral("未打开"), mode_chip);
+  mode_text_->setObjectName(QStringLiteral("v2ModeText"));
+  mode_text_->setFont(lapian::ui::UiFont(11.0));
+  mode_layout->addWidget(mode_text_, 0, Qt::AlignVCenter);
+  row->addWidget(mode_chip, 0, Qt::AlignVCenter);
+  mode_chip_ = mode_chip;
 
   // 在线清晰度入口（T8.9/T8.12 的原对象，默认隐藏）；放在模式 chip 右侧。
   auto* quality_holder = new QWidget(this);
@@ -77,36 +185,27 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
 
   row->addStretch(0);
 
-  open_button_ = new QToolButton(this);
-  open_button_->setObjectName(QStringLiteral("v2OpenButton"));
-  open_button_->setText(QStringLiteral("打开"));
-  open_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  open_button_->setFocusPolicy(Qt::NoFocus);
-  open_button_->setAutoRaise(true);
-  open_button_->setToolTip(QStringLiteral("打开本地文件（Ctrl+O）"));
-  open_button_->setCursor(Qt::ArrowCursor);
+  open_chip_ = new lapian::ui::TopActionChip(
+      lapian::ui::GlyphId::kOpen, QStringLiteral("打开"),
+      QStringLiteral("Ctrl+O"), this);
+  open_chip_->setToolTip(QStringLiteral("打开本地文件（Ctrl+O）"));
+  row->addWidget(open_chip_, 0, Qt::AlignVCenter);
 
-  row->addWidget(open_button_, 0, Qt::AlignVCenter);
-
-  online_button_ = new QToolButton(this);
-  online_button_->setObjectName(QStringLiteral("v2OnlineButton"));
-  online_button_->setText(QStringLiteral("在线"));
-  online_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  online_button_->setFocusPolicy(Qt::NoFocus);
-  online_button_->setAutoRaise(true);
-  online_button_->setToolTip(QStringLiteral("在线打开（Ctrl+U）"));
-
-  row->addWidget(online_button_, 0, Qt::AlignVCenter);
+  online_chip_ = new lapian::ui::TopActionChip(
+      lapian::ui::GlyphId::kOnline, QStringLiteral("在线"),
+      QStringLiteral("Ctrl+U"), this);
+  online_chip_->setToolTip(QStringLiteral("在线打开（Ctrl+U）"));
+  row->addWidget(online_chip_, 0, Qt::AlignVCenter);
 
   help_button_ = new QToolButton(this);
   help_button_->setObjectName(QStringLiteral("v2HelpButton"));
-  help_button_->setText(QStringLiteral("?"));
-  help_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  help_button_->setToolButtonStyle(Qt::ToolButtonIconOnly);
   help_button_->setFocusPolicy(Qt::NoFocus);
   help_button_->setAutoRaise(true);
   help_button_->setToolTip(QStringLiteral("键位一览"));
-
-  help_button_->setFixedWidth(26);
+  lapian::ui::BindGlyph(help_button_, lapian::ui::GlyphId::kHelp, DimColor(),
+                        DimColor(), 16);
+  help_button_->setFixedSize(26, 26);
   row->addWidget(help_button_, 0, Qt::AlignVCenter);
   connect(help_button_, &QToolButton::clicked, this, &TopBar::helpRequested);
 
@@ -118,26 +217,16 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   settings_layout->setSpacing(0);
   row->addWidget(settings_holder, 0, Qt::AlignVCenter);
   settings_button_ = settings_holder;
+
+  SetMode(QStringLiteral("未打开"), ModeKind::kNeutral);
 }
 
 void TopBar::BindActions(QAction* open, QAction* online) {
-  if (open_button_ != nullptr && open != nullptr) {
-    open_button_->setDefaultAction(open);
-    // setDefaultAction 会覆盖 text/tooltip/enabled；重新补上按钮自身语义。
-    open_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    open_button_->setFocusPolicy(Qt::NoFocus);
-    open_button_->setAutoRaise(true);
-    // 动作 text 是"打开视频..."；按钮文案按规划 §2.2 用紧凑的"打开"。
-    open_button_->setText(QStringLiteral("打开"));
-    open_button_->setToolTip(QStringLiteral("打开本地文件（Ctrl+O）"));
+  if (open_chip_ != nullptr) {
+    open_chip_->SetAction(open);
   }
-  if (online_button_ != nullptr && online != nullptr) {
-    online_button_->setDefaultAction(online);
-    online_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    online_button_->setFocusPolicy(Qt::NoFocus);
-    online_button_->setAutoRaise(true);
-    online_button_->setText(QStringLiteral("在线"));
-    online_button_->setToolTip(QStringLiteral("在线打开（Ctrl+U）"));
+  if (online_chip_ != nullptr) {
+    online_chip_->SetAction(online);
   }
 }
 
@@ -167,7 +256,7 @@ void TopBar::AdoptSpecLabel(QWidget* label) {
   }
   layout->addWidget(label);
   if (auto* qlabel = qobject_cast<QLabel*>(label)) {
-
+    qlabel->setFont(lapian::ui::UiFont(11.0));
     qlabel->setContentsMargins(0, 0, 0, 0);
   }
   spec_label_ = label;
@@ -178,12 +267,12 @@ void TopBar::AdoptFpsBadge(QWidget* badge) {
   if (badge == nullptr) {
     return;
   }
-  // 角标跟着模式 chip（DEC-4：帧号旁的常驻角标），3A 直接挂在顶栏左组末尾。
   auto* row = qobject_cast<QHBoxLayout*>(layout());
   if (row == nullptr) {
     return;
   }
-  row->insertWidget(4, badge, 0, Qt::AlignVCenter);
+  // 角标跟着模式 chip（DEC-4），插在模式 chip 之后。
+  row->insertWidget(5, badge, 0, Qt::AlignVCenter);
   fps_badge_ = badge;
 }
 
@@ -197,8 +286,16 @@ void TopBar::AdoptSettingsButton(QWidget* button) {
   }
   layout->addWidget(button);
   if (auto* qbutton = qobject_cast<QAbstractButton*>(button)) {
+    // 原型顶栏最右是齿轮图标按钮；文案让位给图标（tooltip 保留"设置"）。
     qbutton->setFocusPolicy(Qt::NoFocus);
-
+    qbutton->setToolTip(QStringLiteral("设置 / 在线缓存（Ctrl+,）"));
+    if (auto* push = qobject_cast<QPushButton*>(button)) {
+      push->setText(QString());
+      push->setIcon(QIcon(lapian::ui::GlyphPixmap(
+          lapian::ui::GlyphId::kSettings, 16, DimColor())));
+      push->setIconSize(QSize(16, 16));
+      push->setFixedSize(26, 26);
+    }
   }
 }
 
@@ -213,7 +310,7 @@ void TopBar::AdoptQualityButton(QWidget* button) {
   layout->addWidget(button);
   if (auto* qbutton = qobject_cast<QAbstractButton*>(button)) {
     qbutton->setFocusPolicy(Qt::NoFocus);
-
+    qbutton->setFont(lapian::ui::UiFont(11.0));
   }
 }
 
@@ -225,8 +322,9 @@ void TopBar::SetFileName(const QString& file_name) {
           file_label_ == nullptr ? nullptr
                                  : file_label_->findChild<QLabel*>(
                                        QStringLiteral("infoFile")))) {
-    label->setToolTip(file_name_.isEmpty() ? QString()
-                                           : QStringLiteral("当前文件：%1").arg(file_name_));
+    label->setToolTip(file_name_.isEmpty()
+                          ? QString()
+                          : QStringLiteral("当前文件：%1").arg(file_name_));
   }
 }
 
@@ -252,33 +350,56 @@ void TopBar::SetMode(const QString& text, ModeKind kind) {
   if (mode_chip_ == nullptr) {
     return;
   }
-  mode_chip_->setText(text);
+  if (mode_text_ != nullptr) {
+    mode_text_->setText(text);
+  }
   const char* kind_name = "neutral";
+  lapian::ui::GlyphId glyph = lapian::ui::GlyphId::kInfo;
+  QColor icon_color = lapian::ui::Color(lapian::ui::kColorTextMeta);
   switch (kind) {
     case ModeKind::kNeutral:
       kind_name = "neutral";
+      glyph = lapian::ui::GlyphId::kInfo;
+      icon_color = lapian::ui::Color(lapian::ui::kColorTextMeta);
       break;
     case ModeKind::kLocal:
-      kind_name = "local";
+      kind_name = "ok";
+      glyph = lapian::ui::GlyphId::kCheck;
+      icon_color = lapian::ui::Color(lapian::ui::kColorOk);
       break;
     case ModeKind::kOnline:
-      kind_name = "online";
+      kind_name = "cache";
+      glyph = lapian::ui::GlyphId::kOnline;
+      icon_color = lapian::ui::Color(lapian::ui::kColorCache);
       break;
     case ModeKind::kWarn:
       kind_name = "warn";
+      glyph = lapian::ui::GlyphId::kClock;
+      icon_color = lapian::ui::Color(lapian::ui::kColorWarn);
       break;
     case ModeKind::kError:
       kind_name = "error";
+      glyph = lapian::ui::GlyphId::kInfo;
+      icon_color = lapian::ui::Color(lapian::ui::kColorErr);
       break;
   }
+  if (mode_icon_ != nullptr) {
+    mode_icon_->setPixmap(lapian::ui::GlyphPixmap(glyph, 12, icon_color));
+  }
   // 语义色走 QSS 的属性选择器（不做 per-widget setStyleSheet；规划 §7.2 铁律）。
-  mode_chip_->setProperty("kind", QString::fromLatin1(kind_name));
-  mode_chip_->style()->unpolish(mode_chip_);
-  mode_chip_->style()->polish(mode_chip_);
+  for (QWidget* chip : {static_cast<QWidget*>(mode_chip_),
+                        static_cast<QWidget*>(mode_text_)}) {
+    if (chip == nullptr) {
+      continue;
+    }
+    chip->setProperty("kind", QString::fromLatin1(kind_name));
+    chip->style()->unpolish(chip);
+    chip->style()->polish(chip);
+  }
 }
 
 QString TopBar::ModeText() const {
-  return mode_chip_ == nullptr ? QString() : mode_chip_->text();
+  return mode_text_ == nullptr ? QString() : mode_text_->text();
 }
 
 QString TopBar::ModeKindName() const {
@@ -299,25 +420,26 @@ QString TopBar::ModeKindName() const {
 
 void TopBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
   setFixedHeight(tokens.appbar);
-  if (open_button_ != nullptr) {
-    open_button_->setMinimumHeight(tokens.btn);
-    open_button_->setMaximumHeight(tokens.btn);
+  if (open_chip_ != nullptr) {
+    open_chip_->setFixedHeight(tokens.btn);
   }
-  if (online_button_ != nullptr) {
-    online_button_->setMinimumHeight(tokens.btn);
-    online_button_->setMaximumHeight(tokens.btn);
+  if (online_chip_ != nullptr) {
+    online_chip_->setFixedHeight(tokens.btn);
   }
   if (help_button_ != nullptr) {
-    help_button_->setFixedHeight(tokens.btn);
+    help_button_->setFixedSize(tokens.btn, tokens.btn);
   }
   for (QWidget* chip : {static_cast<QWidget*>(spec_chip_),
                         static_cast<QWidget*>(mode_chip_)}) {
     if (chip != nullptr) {
-      chip->setMinimumHeight(tokens.chip);
-      chip->setMaximumHeight(tokens.chip);
+      chip->setFixedHeight(tokens.chip);
     }
   }
   UpdateFileElide();
+}
+
+QSize TopBar::minimumSizeHint() const {
+  return QSize(240, height());
 }
 
 void TopBar::resizeEvent(QResizeEvent* event) {
@@ -350,8 +472,9 @@ void TopBar::UpdateFileElide() {
     label->setText(shown);
   }
   if (label->toolTip().isEmpty() || file_name_.isEmpty()) {
-    label->setToolTip(file_name_.isEmpty() ? QString()
-                                           : QStringLiteral("当前文件：%1").arg(file_name_));
+    label->setToolTip(file_name_.isEmpty()
+                          ? QString()
+                          : QStringLiteral("当前文件：%1").arg(file_name_));
   }
 }
 

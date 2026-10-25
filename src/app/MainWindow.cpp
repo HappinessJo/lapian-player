@@ -83,6 +83,7 @@ extern "C" {
 #include "app/ui/PlayerShell.h"
 #include "app/ui/PlayerSplitter.h"
 #include "app/ui/StageStack.h"
+#include "app/ui/TimelinePanel.h"
 #include "app/ui/Theme.h"
 #include "app/ui/Tokens.h"
 #include "app/ui/TopBar.h"
@@ -474,7 +475,10 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   speed_label_ = new QLabel(QStringLiteral("1x"), this);
   speed_label_->setObjectName(QStringLiteral("speedInfo"));
   speed_label_->setToolTip(QStringLiteral("播放速度（[ / ] 调整）"));
-  statusBar()->addPermanentWidget(speed_label_);
+  // UI v2：速度读数搬到 Transport（对象不变）；旧壳留在状态栏。
+  if (!ui_v2_enabled_) {
+    statusBar()->addPermanentWidget(speed_label_);
+  }
 
   loop_label_ = new QLabel(QStringLiteral("循环：关"), this);
   loop_label_->setObjectName(QStringLiteral("loopInfo"));
@@ -746,6 +750,12 @@ void MainWindow::BuildShellUi() {
   connect(stage_stack_, &StageStack::fileDropped, this, &MainWindow::OpenFile);
   connect(shell_->topBar(), &TopBar::helpRequested, this,
           &MainWindow::ShowShellHelp);
+  connect(shell_, &PlayerShell::fitTimelineRequested, this, [this]() {
+    if (timeline_ != nullptr) {
+      timeline_->FitToWindow();
+      UpdateTimelineMeta();
+    }
+  });
 }
 
 void MainWindow::AdoptShellWidgets() {
@@ -766,6 +776,19 @@ void MainWindow::AdoptShellWidgets() {
   top->BindActions(open_action_, online_action_);
 
   TransportBar* transport = shell_->transport();
+  transport->BindActions(play_action_, prev_action_, next_action_,
+                         loop_in_action_, loop_out_action_, loop_toggle_action_,
+                         waveform_action_, mark_action_, snapshot_action_,
+                         fullscreen_action_, mute_action_);
+  if (shell_->timelinePanel() != nullptr) {
+    shell_->timelinePanel()->BindActions(zoom_in_action_, zoom_out_action_);
+  }
+  connect(transport, &TransportBar::firstFrameRequested, this,
+          [this]() { JumpToEdgeFrame(false); });
+  connect(transport, &TransportBar::lastFrameRequested, this,
+          [this]() { JumpToEdgeFrame(true); });
+  connect(transport, &TransportBar::inspectorToggled, this,
+          [this](bool collapsed) { shell_->SetInspectorCollapsed(collapsed); });
   if (info_bar_ != nullptr) {
     transport->AdoptTimecode(
         info_bar_->findChild<QWidget*>(QStringLiteral("infoTimecode")));
@@ -775,6 +798,7 @@ void MainWindow::AdoptShellWidgets() {
         info_bar_->findChild<QWidget*>(QStringLiteral("infoTotal")));
   }
   transport->AdoptVolume(volume_slider_);
+  transport->AdoptSpeedLabel(speed_label_);
 
   if (info_bar_ != nullptr) {
     // 横幅：把 InfoBar 内部的 infoBannerRow（label + 关闭按钮）原对象搬进槽里，
@@ -789,6 +813,15 @@ void MainWindow::AdoptShellWidgets() {
             &MainWindow::UpdateShellModeChip);
   }
   top->SetFileName(QString());
+  UpdateShellModeChip();
+  shell_->ApplyClientHeight(height());
+  // 时间轴面板头 / 循环按钮 / 检查器开关的轻量同步（250ms）。
+  // 3B 把时间轴面板换成自己的信号后可以删掉这个定时器。
+  ui_meta_timer_ = new QTimer(this);
+  ui_meta_timer_->setInterval(250);
+  connect(ui_meta_timer_, &QTimer::timeout, this, &MainWindow::SyncShellChrome);
+  ui_meta_timer_->start();
+  SyncShellChrome();
   UpdateShellModeChip();
   shell_->ApplyClientHeight(height());
 }
@@ -840,6 +873,72 @@ void MainWindow::UpdateShellModeChip() {
     return;
   }
   top->SetMode(QStringLiteral("未打开"), TopBar::ModeKind::kNeutral);
+}
+
+void MainWindow::JumpToEdgeFrame(bool to_end) {
+  if (session_ == nullptr || IsTextInputFocused()) {
+    return;
+  }
+  const std::int64_t last =
+      static_cast<std::int64_t>(session_->index().size()) - 1;
+  if (last < 0) {
+    return;
+  }
+  GoToFrame(to_end ? last : 0);
+}
+
+void MainWindow::UpdateTimelineMeta() {
+  if (shell_ == nullptr || shell_->timelinePanel() == nullptr ||
+      timeline_ == nullptr) {
+    return;
+  }
+  const std::int64_t count = timeline_->frame_count();
+  QString work;
+  if (count <= 0) {
+    work = QStringLiteral("工作区 ——");
+  } else if (loop_.has_in() && loop_.has_out()) {
+    work = QStringLiteral("工作区 %1–%2 · %3")
+               .arg(loop_.in())
+               .arg(loop_.out())
+               .arg(loop_.enabled() ? QStringLiteral("循环开")
+                                    : QStringLiteral("循环关"));
+  } else {
+    work = QStringLiteral("工作区 全片 · %1")
+               .arg(loop_.enabled() ? QStringLiteral("循环开")
+                                    : QStringLiteral("循环关"));
+  }
+  QString view;
+  if (count <= 0 || timeline_->width() <= 0) {
+    view = QStringLiteral("视图 ——");
+  } else {
+    const double ppf = std::max(0.001, timeline_->pixels_per_frame());
+    const double start = timeline_->scroll_px();
+    const double width = timeline_->width();
+    std::int64_t first =
+        static_cast<std::int64_t>(std::floor(start / ppf));
+    std::int64_t last =
+        static_cast<std::int64_t>(std::floor((start + width) / ppf));
+    first = std::clamp<std::int64_t>(first, 0, count - 1);
+    last = std::clamp<std::int64_t>(last, first, count - 1);
+    view = QStringLiteral("视图 %1–%2 · %3")
+               .arg(first)
+               .arg(last)
+               .arg(timeline_->fit_mode()
+                        ? QStringLiteral("适应窗口")
+                        : QStringLiteral("%1 px/帧").arg(ppf, 0, 'f', 2));
+  }
+  shell_->timelinePanel()->UpdateMeta(work, view);
+}
+
+void MainWindow::SyncShellChrome() {
+  if (shell_ == nullptr) {
+    return;
+  }
+  UpdateTimelineMeta();
+  if (shell_->transport() != nullptr) {
+    shell_->transport()->SetLoopEnabled(loop_.enabled());
+    shell_->transport()->SetInspectorCollapsed(shell_->inspector_collapsed());
+  }
 }
 
 void MainWindow::ShowShellHelp() {
@@ -1193,7 +1292,8 @@ QString MainWindow::LayoutStateLegacy() const {
                             static_cast<QWidget*>(waveform_label_),
                             static_cast<QWidget*>(volume_slider_),
                             static_cast<QWidget*>(status_label_)}) {
-      if (widget != nullptr && widget->isVisible()) {
+      if (widget != nullptr && widget->isVisible() &&
+          widget->parentWidget() == statusBar()) {
         parts << QStringLiteral("status_%1=%2")
                      .arg(widget->objectName(), rect_text(widget->geometry()));
       }
@@ -1399,7 +1499,7 @@ QString MainWindow::LayoutStateV2() const {
   parts << QStringLiteral("transport=%1").arg(rect_text(shell_->transport()->geometry()));
   parts << QStringLiteral("stage=%1").arg(rect_text(stage_->geometry()));
   parts << QStringLiteral("gfx=%1").arg(rect_text(gfx_->geometry()));
-  parts << QStringLiteral("timeline=%1").arg(rect_text(shell_->timelineHost()->geometry()));
+  parts << QStringLiteral("timeline=%1").arg(rect_text(shell_->timelinePanel()->geometry()));
   parts << QStringLiteral("inspector=%1").arg(rect_text(shell_->inspectorHost()->geometry()));
   if (mark_panel_ != nullptr) {
     parts << QStringLiteral("panel=%1").arg(rect_text(mark_panel_->geometry()));
@@ -1412,7 +1512,8 @@ QString MainWindow::LayoutStateV2() const {
                             static_cast<QWidget*>(loop_label_),
                             static_cast<QWidget*>(waveform_label_),
                             static_cast<QWidget*>(status_label_)}) {
-      if (widget != nullptr && widget->isVisible()) {
+      if (widget != nullptr && widget->isVisible() &&
+          widget->parentWidget() == statusBar()) {
         parts << QStringLiteral("status_%1=%2")
                      .arg(widget->objectName(), rect_text(widget->geometry()));
       }
@@ -1607,20 +1708,21 @@ QStringList MainWindow::LayoutProblemsV2() const {
     }
   }
 
-  // 状态栏次级控件：v2 的 4 个指标（notice/audio/waveform/status）+ loop/speed。
+  // 状态栏次级控件：v2 的指标（notice/audio/waveform/status + loop）；
+  // 速度读数已搬进 Transport，只检查仍挂在状态栏上的控件。
   if (statusBar() != nullptr && status_visible) {
     const std::vector<QWidget*> status_widgets = {
         notice_label_, audio_label_, speed_label_, loop_label_,
         waveform_label_, status_label_};
     for (QWidget* widget : status_widgets) {
-      if (widget == nullptr || !widget->isVisible()) {
+      if (widget == nullptr || !widget->isVisible() ||
+          widget->parentWidget() != statusBar()) {
         continue;
       }
       if (!statusBar()->rect().contains(widget->geometry())) {
         problems << QStringLiteral("status-widget-outside");
       }
-      const int minimum_width = 10;
-      if (widget->width() < minimum_width) {
+      if (widget->width() < 10) {
         problems << QStringLiteral("status-widget-narrow");
       }
     }
@@ -1629,7 +1731,8 @@ QStringList MainWindow::LayoutProblemsV2() const {
         QWidget* first = status_widgets[i];
         QWidget* second = status_widgets[j];
         if (first != nullptr && second != nullptr && first->isVisible() &&
-            second->isVisible() &&
+            second->isVisible() && first->parentWidget() == statusBar() &&
+            second->parentWidget() == statusBar() &&
             first->geometry().intersects(second->geometry())) {
           problems << QStringLiteral("status-widget-overlap");
         }

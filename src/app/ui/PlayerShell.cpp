@@ -14,6 +14,7 @@
 #include "app/ui/PlayerSplitter.h"
 #include "app/ui/StageStack.h"
 #include "app/ui/Theme.h"
+#include "app/ui/TimelinePanel.h"
 #include "app/ui/TopBar.h"
 #include "app/ui/TransportBar.h"
 
@@ -60,7 +61,8 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
   h_split_->addWidget(v_split_);
 
   video_column_ = new QWidget();
-  video_column_->setObjectName(QStringLiteral("v2VideoColumn"));
+  video_column_->setObjectName(QStringLiteral("v2VideoCard"));
+  lapian::ui::SetStyledBackground(video_column_);
   auto* video_layout = new QVBoxLayout(video_column_);
   video_layout->setContentsMargins(0, 0, 0, 0);
   video_layout->setSpacing(0);
@@ -72,14 +74,8 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
   transport_ = new TransportBar(video_column_);
   video_layout->addWidget(transport_, 0);
 
-  timeline_host_ = new QWidget();
-  timeline_host_->setObjectName(QStringLiteral("v2TimelinePanel"));
-  lapian::ui::SetStyledBackground(timeline_host_);
-  ApplyTimelineConstraints();
-  auto* timeline_layout = new QVBoxLayout(timeline_host_);
-  timeline_layout->setContentsMargins(0, 0, 0, 0);
-  timeline_layout->setSpacing(0);
-  v_split_->addWidget(timeline_host_);
+  timeline_panel_ = new TimelinePanel();
+  v_split_->addWidget(timeline_panel_);
   if (QSplitterHandle* vhandle = v_split_->handle(1)) {
     vhandle->installEventFilter(this);
   }
@@ -121,6 +117,8 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
   content_layout->setSpacing(0);
   inspector_layout->addWidget(inspector_content_, 1);
 
+  connect(timeline_panel_, &TimelinePanel::fitRequested, this,
+          &PlayerShell::fitTimelineRequested);
   connect(inspector_toggle_, &QToolButton::clicked, this,
           [this]() { SetInspectorCollapsed(!inspector_collapsed_); });
   connect(v_split_, &PlayerSplitter::resetRequested, this,
@@ -132,7 +130,7 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
       return;
     }
     timeline_user_resized_ = true;
-    timeline_user_height_ = timeline_host_->height();
+    timeline_user_height_ = timeline_panel_->height();
   });
   connect(h_split_, &QSplitter::splitterMoved, this, [this](int, int) {
     if (applying_sizes_) {
@@ -170,6 +168,7 @@ void PlayerShell::ApplyTokens() {
   ApplyWorkspaceMargins();
 
   ApplyTimelineConstraints();
+  timeline_panel_->ApplyTokens(tokens_);
   video_column_->setMinimumHeight(kVideoColumnMinHeightBase + tokens_.transport);
   v_split_->SetHandleWidthPx(tokens_.handle);
   h_split_->SetHandleWidthPx(tokens_.handle);
@@ -185,13 +184,17 @@ void PlayerShell::ApplyTokens() {
   ApplySplitSizes();
 }
 
+QWidget* PlayerShell::timelineHost() const {
+  return timeline_panel_ == nullptr ? nullptr : timeline_panel_->canvasHost();
+}
+
 void PlayerShell::ApplyTimelineConstraints() {
-  if (timeline_host_ == nullptr) {
+  if (timeline_panel_ == nullptr) {
     return;
   }
   if (timeline_user_resized_) {
-    timeline_host_->setMinimumHeight(tokens_.timeline_min);
-    timeline_host_->setMaximumHeight(tokens_.timeline_max);
+    timeline_panel_->setMinimumHeight(tokens_.timeline_min);
+    timeline_panel_->setMaximumHeight(tokens_.timeline_max);
     return;
   }
   // 未拖拽时时间轴高度**就是令牌**（min = max）：QSplitter 在多次嵌套 resize
@@ -200,7 +203,7 @@ void PlayerShell::ApplyTimelineConstraints() {
   // 临时放开到 96–340（见 eventFilter），松手后按新高度重新锁死。
   const int fixed_height =
       std::clamp(tokens_.timeline, tokens_.timeline_min, tokens_.timeline_max);
-  timeline_host_->setFixedHeight(fixed_height);
+  timeline_panel_->setFixedHeight(fixed_height);
 }
 
 bool PlayerShell::eventFilter(QObject* watched, QEvent* event) {
@@ -208,11 +211,11 @@ bool PlayerShell::eventFilter(QObject* watched, QEvent* event) {
     if (event->type() == QEvent::MouseButtonPress) {
       // 拖拽期间放开 96–340，让 QSplitter 能移动这一栏。
       timeline_user_resized_ = true;
-      timeline_user_height_ = timeline_host_->height();
-      timeline_host_->setMinimumHeight(tokens_.timeline_min);
-      timeline_host_->setMaximumHeight(tokens_.timeline_max);
+      timeline_user_height_ = timeline_panel_->height();
+      timeline_panel_->setMinimumHeight(tokens_.timeline_min);
+      timeline_panel_->setMaximumHeight(tokens_.timeline_max);
     } else if (event->type() == QEvent::MouseButtonRelease) {
-      timeline_user_height_ = timeline_host_->height();
+      timeline_user_height_ = timeline_panel_->height();
     }
   }
   return QWidget::eventFilter(watched, event);
@@ -247,7 +250,7 @@ void PlayerShell::ApplySplitSizes() {
     }
     // 用**实际几何**判断，不用 QSplitter::sizes()：布局中间态里 sizes() 可能已经
     // 是目标值而控件几何还没跟上（200% DPI 下出现过 sizes()=292/96 但实际 265/123）。
-    if (timeline_host_->height() != timeline_h ||
+    if (timeline_panel_->height() != timeline_h ||
         video_column_->height() != video_h) {
       v_split_->setSizes(QList<int>{video_h, timeline_h});
     }
@@ -311,7 +314,7 @@ QString PlayerShell::SplitterState() const {
     vs += QString::number(value) + QLatin1Char('/');
   }
   return QStringLiteral("tl=%1 ins=%2 vtotal=%3 vcount=%4 user=%5 vsizes=%6")
-      .arg(timeline_host_ == nullptr ? 0 : timeline_host_->height())
+      .arg(timeline_panel_ == nullptr ? 0 : timeline_panel_->height())
       .arg(inspector_host_ == nullptr ? 0 : inspector_host_->width())
       .arg(v_split_ == nullptr ? 0 : v_split_->height())
       .arg(vsizes.size())
@@ -402,7 +405,7 @@ void PlayerShell::SetFullScreenChrome(bool fullscreen) {
 }
 
 int PlayerShell::TimelineHeight() const {
-  return timeline_host_ == nullptr ? 0 : timeline_host_->height();
+  return timeline_panel_ == nullptr ? 0 : timeline_panel_->height();
 }
 
 int PlayerShell::InspectorWidth() const {

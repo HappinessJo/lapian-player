@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QByteArray>
 #include <QElapsedTimer>
@@ -617,6 +617,10 @@ class MainWindow : public QMainWindow {
   void UpdateDensity();
   void UpdateShellStage();
   void UpdateShellModeChip();
+  // UI v2（3A）：Transport 首/末帧、时间轴面板头、壳层状态同步（窄接口，无业务逻辑）。
+  void JumpToEdgeFrame(bool to_end);
+  void UpdateTimelineMeta();
+  void SyncShellChrome();
   void ShowShellHelp();
   QStringList LayoutProblemsLegacy() const;
   QStringList LayoutProblemsV2() const;
@@ -862,6 +866,8 @@ class MainWindow : public QMainWindow {
   QTimer* preview_timer_ = nullptr;
   QTimer* step_repeat_timer_ = nullptr;
   QTimer* settings_save_timer_ = nullptr;
+  // UI v2（3A）：面板头/循环按钮的轻量刷新（250ms）；3B 换成时间轴信号。
+  QTimer* ui_meta_timer_ = nullptr;
   // T7.11.1：后退跨 GOP 第一步的硬解窗口延后回拷（呈现后再填缓存）。
   QTimer* cache_fill_timer_ = nullptr;
   // T8.6.1b 在线拖动预览状态/统计（只 GUI 线程写）。

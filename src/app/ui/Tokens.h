@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // UI v2 设计令牌（规划 §4.2/§4.3）。纯常量 + 纯函数，**不依赖 Qt**，
 // 这样 Theme 与单测都能复用，且不会把壳层的依赖引到 core/media。
@@ -214,6 +214,22 @@ inline constexpr const char* kColorCache = "#a6d8c4";
 inline constexpr const char* kColorCacheBg = "#14211d";
 inline constexpr const char* kColorCacheBorder = "#2c4a40";
 inline constexpr const char* kColorWave = "#6f9df0";
+// 原型 plan.html 的容器层级（`:root --bg/--panel/--panel-2/--panel-3`）：
+// 应用底色比面板更暗，面板 = 带 1px 边框 + 4px 圆角的"卡片"。
+inline constexpr const char* kColorAppBg = "#0e0e10";
+inline constexpr const char* kColorChipBg = "#1a1a1f";
+inline constexpr const char* kColorKbdBg = "#1e1e24";
+inline constexpr const char* kColorKbdBorder = "#34343d";
+// accent 18% / 35% 与面板底混合后的实色（QSS 里避免 rgba 依赖）。
+inline constexpr const char* kColorAccentOnBg = "#232c40";
+inline constexpr const char* kColorAccentOnBorder = "#3c4d75";
+
+// 圆角（原型：kbd 2 / 按钮·输入框 3 / 面板 4 / 卡片 8 / chip 胶囊 10）。
+inline constexpr int kRadiusKbd = 2;
+inline constexpr int kRadiusButton = 3;
+inline constexpr int kRadiusPanel = 4;
+inline constexpr int kRadiusCard = 8;
+inline constexpr int kRadiusPill = 10;
 
 // M4 画面占比门槛（规划 §4.4 批准值 62/62/55/59）：
 // regular/compact ≥62%，dense 客户区 ≥500 时 ≥59%（窄窗口 820×500），
