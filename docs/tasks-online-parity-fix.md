@@ -421,3 +421,9 @@ C 的 70% 门槛：正向 ≥40.97（在线 56.21，**96.0%**）、反向 ≥39.
 - clean Release 重建 **232.2s**（`scripts\build-release.ps1 -Clean`，exit 0，脚本内 ctest 37/37）。
 - dist **25 文件 / 36,392,264B / 34.71MB**；`lapian.exe` 3,182,592B、SHA256 `D2CDEBDF637F055B1550417DEF5A0FBA17246C9AFFFBBF0ACD5508A6661ACEDB`；Medium 副本 hash 一致。
 - 代码提交 `3084e33` / `c912770` / `35fa8be`；证据 [online-drag-parity.md](perf/online-drag-parity.md) §13、[handoff-2026-10-25-p0.md](handoff-2026-10-25-p0.md)；日志 `build\p0-before*.log`、`build\p0-verify-*.log`（`build/` 不入库）。
+
+### 9.8 用户实机反馈（2026-10-25，非量化）
+
+- 用户在使用安装版后反馈：**“现在的流畅度就做的很好了”**（2026-10-25 18:33）。
+- 性质：**体感确认，不是量化验收**；未指定样本、方向、exe hash 或具体数值，不能替代 61/0 探针，也不覆盖 4K/60、`post_seek_immediate` 残余。
+- 结论：P0 的 1080P30 日常拖动体验已被用户接受；发布收口见 [handoff-2026-10-25-p0-close.md](handoff-2026-10-25-p0-close.md)。
