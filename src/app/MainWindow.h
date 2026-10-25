@@ -133,6 +133,20 @@ struct PreviewTestDiagnostics {
   int decoder_reopens = 0;
 };
 
+// P0：每次在线拖动的度量快照（只读；由 OnScrubFinished 在 Pause 前保存）。
+// 只用于证据/探针，不参与任何发布/缓存/预热判定。
+struct OnlineDragStatsSnapshot {
+  bool valid = false;
+  qint64 drag_ms = -1;
+  qint64 open_ms = -1;
+  qint64 first_publish_ms = -1;
+  qint64 first_delivered_ms = -1;
+  qint64 last_delivered_before_resume = -1;
+  int published = 0;
+  int delivered = 0;
+  int published_before_release = 0;
+};
+
 // T1.4 主窗口：打开入口（Ctrl+O / 拖拽 / 命令行）、空态、错误提示、首帧显示。
 // 播放、时间轴、标记等仍由后续任务接入。
 class MainWindow : public QMainWindow {
@@ -486,6 +500,12 @@ class MainWindow : public QMainWindow {
   int OnlinePreviewDroppedForTest() const { return online_preview_dropped_; }
   int OnlinePreviewErrorsForTest() const { return online_preview_errors_; }
   QString OnlinePreviewStateForTest() const;
+  // P0：本次拖动（ScrubStart→ScrubFinished）的只读度量；S1 只记录不改行为。
+  OnlineDragStatsSnapshot OnlineDragStatsForTest() const {
+    return online_drag_stats_;
+  }
+  // P0 占位：S1 恒 true；S3 才实现真实后台预热状态。
+  bool OnlinePreviewWarmIdleForTest() const { return true; }
   void ResetPreviewStatsForTest();
   // 自动化模拟“物理键仍按住时收到伪 KeyRelease”；-1 走真实 GetAsyncKeyState。
   void SetStepKeyPhysicalDownForTest(int state) {
@@ -792,6 +812,12 @@ class MainWindow : public QMainWindow {
   bool online_preview_last_from_cache_ = false;
   int online_preview_dropped_ = 0;
   int online_preview_errors_ = 0;
+  // P0：每次在线拖动的度量（只 GUI 线程写；S1 只记录，不参与判定）。
+  QElapsedTimer online_preview_drag_clock_;
+  bool online_preview_drag_active_ = false;
+  qint64 online_preview_drag_first_delivered_ms_ = -1;
+  int online_preview_drag_published_ = 0;
+  OnlineDragStatsSnapshot online_drag_stats_;
   int preview_presented_count_ = 0;
   // DP-1 本地预览诊断（只 GUI 线程写）：当前目标与最后成功上传的预览帧。
   std::int64_t preview_target_frame_ = -1;

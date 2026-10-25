@@ -61,6 +61,8 @@ class OnlineDragPreviewTestRunner {
     int dropped = 0;
     qint64 ui_gap_max_ms = 0;
     int ui_gap_over_200 = 0;
+    // P0：每次拖动（只打印，不上门禁）。
+    int max_missing_run = 0;
     bool exact_frame = false;
     bool exact_pts = false;
     bool preview_active_during = false;
@@ -101,12 +103,21 @@ class OnlineDragPreviewTestRunner {
     int coarse_presented = 0;
     int cache_presented = 0;
     int max_consecutive_missing = 0;
+    // P0 每次拖动度量（S1 只打印）：来自 MainWindow 的 OnScrubFinished 快照。
+    qint64 open_ms = -1;
+    qint64 first_publish_ms = -1;
+    qint64 first_delivered_ms = -1;
+    qint64 last_delivered_before_resume = -1;
+    int published_before_release = 0;
+    int decoder_published = 0;
+    int decoder_delivered = 0;
     int flicker = 0;
     qint64 release_ms = 0;
     qint64 landing_ms = 0;
     qint64 exact_ms = 0;
     bool landing_frame_ok = false;
     bool landing_pts_ok = false;
+    qint64 landing_frame = -1;
     qint64 landing_pts = 0;
     qint64 ui_gap_ms = 0;
     bool ok = false;

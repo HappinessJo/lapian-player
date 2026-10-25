@@ -185,7 +185,27 @@ struct OnlinePreviewDecoder::Impl {
   std::uint64_t decoded_frames = 0;
   std::int64_t last_published_frame = -1;
 
+  // P0 度量（只读）：每次 Begin/Resume 重置；不参与任何发布/解码判定。
+  DragStats drag_stats;
+  std::chrono::steady_clock::time_point drag_stats_start{};
+  bool drag_stats_started = false;
+
   ~Impl() { Close(); }
+
+  void ResetDragStatsLocked() {
+    drag_stats = DragStats{};
+    drag_stats_start = std::chrono::steady_clock::now();
+    drag_stats_started = true;
+  }
+
+  std::int64_t DragStatsElapsedMsLocked() const {
+    if (!drag_stats_started) {
+      return -1;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - drag_stats_start)
+        .count();
+  }
 
   bool IsActive() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -447,6 +467,10 @@ struct OnlinePreviewDecoder::Impl {
     latest_from_cache = from_cache;
     ++frames_published;
     last_published_frame = frame_index;
+    ++drag_stats.published;
+    if (drag_stats.first_publish_ms < 0) {
+      drag_stats.first_publish_ms = DragStatsElapsedMsLocked();
+    }
     if (coarse) {
       ++coarse_published;
     }
@@ -860,6 +884,9 @@ struct OnlinePreviewDecoder::Impl {
       std::lock_guard<std::mutex> lock(mutex);
       open_attempted = true;
       open_ok = opened;
+      if (opened && drag_stats.open_ms < 0) {
+        drag_stats.open_ms = DragStatsElapsedMsLocked();
+      }
       should_stop = stop;
       if (!opened) {
         if (open_error.isEmpty()) {
@@ -1159,6 +1186,12 @@ struct OnlinePreviewDecoder::Impl {
           index != nullptr && frame >= 0 &&
           static_cast<std::size_t>(frame) < index->size();
       start_threads = !thread.joinable();
+      // P0 度量：记录 Resume 前的发布基准（S1 不改 -1 行为）。
+      ResetDragStatsLocked();
+      drag_stats.last_delivered_before_resume = last_delivered_frame;
+      if (!start_threads && open_ok) {
+        drag_stats.open_ms = 0;
+      }
       active = true;
       target_frame = frame;
       target_cached = cached && covered;
@@ -1316,6 +1349,10 @@ void OnlinePreviewDecoder::Begin(
     impl_->cache_bytes = 0;
     impl_->cache_peak_bytes = 0;
     impl_->last_published_frame = -1;
+    // P0 度量：Begin 也记录上一次 UI 取走帧（Close 后通常为 -1），只读统计。
+    impl_->ResetDragStatsLocked();
+    impl_->drag_stats.last_delivered_before_resume =
+        impl_->last_delivered_frame;
     impl_->last_delivered_frame = -1;
     impl_->last_delivered_coarse = false;
     impl_->last_pts_us = 0;
@@ -1516,6 +1553,7 @@ PreviewFrame OnlinePreviewDecoder::TakeLatestFrame() {
   result.hardware = false;
   impl_->last_delivered_frame = impl_->latest_frame_index;
   impl_->last_delivered_coarse = impl_->latest_coarse;
+  ++impl_->drag_stats.delivered;
   impl_->latest = nullptr;
   impl_->latest_pts_us = 0;
   impl_->latest_frame_index = -1;
@@ -1603,6 +1641,11 @@ std::uint64_t OnlinePreviewDecoder::prefetched_frames() const {
 std::uint64_t OnlinePreviewDecoder::decoded_frames() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->decoded_frames;
+}
+
+OnlinePreviewDecoder::DragStats OnlinePreviewDecoder::drag_stats() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->drag_stats;
 }
 
 }  // namespace lapian::media

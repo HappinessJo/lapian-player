@@ -216,6 +216,10 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
   result.preview_active_during = window_->PreviewActiveForTest();
   int presented = presented_now();
   int previous_presented = presented;
+  // P0：连续多少个目标更新没有新画面（只打印）。
+  int presented_at_last_target = presented;
+  int missing_run = 0;
+  int max_missing_run = 0;
   qint64 previous_frame = start;
   bool monotonic = true;
   bool snapshot_checked = false;
@@ -238,6 +242,15 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
         samples <= 1 ? 1.0 : static_cast<double>(i) / (samples - 1);
     const qint64 frame =
         start + static_cast<qint64>(std::llround((end - start) * ratio));
+    if (i > 0) {
+      // P0：上一个目标窗口内没有新呈现 → 连续缺失计数。
+      if (presented_now() == presented_at_last_target) {
+        ++missing_run;
+        max_missing_run = std::max(max_missing_run, missing_run);
+      } else {
+        missing_run = 0;
+      }
+    }
     QElapsedTimer target_timer;
     target_timer.start();
     const int before_target = presented_now();
@@ -284,6 +297,7 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
       previous_frame = shown;
     }
     previous_presented = current_presented;
+    presented_at_last_target = current_presented;
 
     if (check_snapshot && !snapshot_checked && i >= samples / 2) {
       snapshot_checked = true;
@@ -343,6 +357,8 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
               result.stale_presented == 0 && monotonic &&
               result.preview_stopped_after;
   result.monotonic = monotonic;
+  result.max_missing_run = max_missing_run;
+  const OnlineDragStatsSnapshot drag_stats = window_->OnlineDragStatsForTest();
   Print(QStringLiteral(
             "online_drag_preview_pass label=%1 cache_hit=%2 start=%3 end=%4 "
             "span=%5 samples=%6 presented=%7 fps_total=%8 fps_active=%9 "
@@ -369,6 +385,20 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
             .arg(result.exact_pts ? 1 : 0)
             .arg(result.preview_active_during ? 1 : 0)
             .arg(result.preview_stopped_after ? 1 : 0));
+  Print(QStringLiteral(
+            "online_drag_p0_drag scenario=%1 mode=online first_publish_ms=%2 "
+            "first_delivered_ms=%3 open_ms=%4 last_before_resume=%5 "
+            "published_before_release=%6 decoder_published=%7 "
+            "decoder_delivered=%8 max_missing_run=%9")
+            .arg(label)
+            .arg(drag_stats.first_publish_ms)
+            .arg(drag_stats.first_delivered_ms)
+            .arg(drag_stats.open_ms)
+            .arg(drag_stats.last_delivered_before_resume)
+            .arg(drag_stats.published_before_release)
+            .arg(drag_stats.published)
+            .arg(drag_stats.delivered)
+            .arg(result.max_missing_run));
   return result;
 }
 
@@ -611,7 +641,18 @@ bool OnlineDragPreviewTestRunner::ParityLanding(qint64 target,
       5000, "parity_exact_landing");
   result->landing_ms = landing_timer.elapsed();
   result->landing_frame_ok = landed;
+  result->landing_frame = window_->CurrentFrameForTest();
   result->landing_pts = window_->CurrentPtsUsForTest();
+  // P0：本次拖动的只读度量快照（OnScrubFinished 在 Pause 前保存）。
+  const OnlineDragStatsSnapshot drag_stats = window_->OnlineDragStatsForTest();
+  result->open_ms = drag_stats.open_ms;
+  result->first_publish_ms = drag_stats.first_publish_ms;
+  result->first_delivered_ms = drag_stats.first_delivered_ms;
+  result->last_delivered_before_resume =
+      drag_stats.last_delivered_before_resume;
+  result->published_before_release = drag_stats.published_before_release;
+  result->decoder_published = drag_stats.published;
+  result->decoder_delivered = drag_stats.delivered;
   if (local) {
     result->landing_pts_ok = landed;
   } else {
@@ -631,7 +672,10 @@ void OnlineDragPreviewTestRunner::PrintParity(const ParityResult& result) {
             "stale_dropped=%14 coarse_presented=%15 cache_presented=%16 "
             "max_missing=%17 flicker=%18 release_ms=%19 landing_ms=%20 "
             "landing_frame=%21 landing_pts=%22 landing_frame_ok=%23 "
-            "landing_pts_ok=%24 ui_gap_ms=%25 exact_ms=%26 ok=%27")
+            "landing_pts_ok=%24 ui_gap_ms=%25 exact_ms=%26 ok=%27 "
+            "open_ms=%28 first_publish_ms=%29 first_delivered_ms=%30 "
+            "last_before_resume=%31 published_before_release=%32 "
+            "decoder_published=%33 decoder_delivered=%34")
             .arg(result.label)
             .arg(result.mode)
             .arg(result.start_frame)
@@ -652,13 +696,20 @@ void OnlineDragPreviewTestRunner::PrintParity(const ParityResult& result) {
             .arg(result.flicker)
             .arg(result.release_ms)
             .arg(result.landing_ms)
-            .arg(result.landing_pts)
+            .arg(result.landing_frame)
             .arg(result.landing_pts)
             .arg(result.landing_frame_ok ? 1 : 0)
             .arg(result.landing_pts_ok ? 1 : 0)
             .arg(result.ui_gap_ms)
             .arg(result.exact_ms)
-            .arg(result.ok ? 1 : 0));
+            .arg(result.ok ? 1 : 0)
+            .arg(result.open_ms)
+            .arg(result.first_publish_ms)
+            .arg(result.first_delivered_ms)
+            .arg(result.last_delivered_before_resume)
+            .arg(result.published_before_release)
+            .arg(result.decoder_published)
+            .arg(result.decoder_delivered));
   parity_ui_gap_max_ms_ = std::max(parity_ui_gap_max_ms_, result.ui_gap_ms);
 }
 
@@ -704,6 +755,7 @@ OnlineDragPreviewTestRunner::RunParityFrames(
       if (unanswered < static_cast<int>(target_times.size())) {
         const double latency =
             static_cast<double>(now - target_times[unanswered]);
+        result.responses.push_back(latency);
         result.max_response_ms = std::max(result.max_response_ms, latency);
         if (result.first_response_ms < 0.0 && unanswered == 0) {
           result.first_response_ms = latency;
@@ -808,6 +860,21 @@ OnlineDragPreviewTestRunner::RunParityFrames(
               result.max_gap_ms <= static_cast<double>(gap_limit_ms) &&
               result.max_consecutive_missing <= 1 && result.flicker == 0;
   PrintParity(result);
+  Print(QStringLiteral(
+            "online_drag_p0_drag scenario=%1 mode=%2 first_publish_ms=%3 "
+            "first_delivered_ms=%4 open_ms=%5 last_before_resume=%6 "
+            "published_before_release=%7 decoder_published=%8 "
+            "decoder_delivered=%9 max_missing_run=%10")
+            .arg(result.label)
+            .arg(result.mode)
+            .arg(result.first_publish_ms)
+            .arg(result.first_delivered_ms)
+            .arg(result.open_ms)
+            .arg(result.last_delivered_before_resume)
+            .arg(result.published_before_release)
+            .arg(result.decoder_published)
+            .arg(result.decoder_delivered)
+            .arg(result.max_consecutive_missing));
   return result;
 }
 
@@ -1352,6 +1419,53 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
               .arg(far_backward.presented));
     Check("far_backward_landing",
           far_backward.landing_frame_ok && far_backward.landing_pts_ok);
+  }
+
+  // P0 诊断（S1 只打印、不 Check）：先精确 seek 到远离当前预览缓存的位置，
+  // 再测“seek 后第一次拖动”。1575 距前关键帧约 75 帧、1605 约 105 帧，
+  // 用于观察基线/预热缺失时的 first_publish。
+  const bool p0_post_seek_ready = WaitUntil(
+      [this]() { return window_->OnlineFrameCachedForTest(1620); }, 120000,
+      "p0_post_seek_cached");
+  if (!p0_post_seek_ready) {
+    Print(QStringLiteral("online_drag_p0_post_seek skip cached_1620=0"));
+  } else {
+    const auto prepare_exact = [this](qint64 frame) {
+      window_->GoToFrameForTest(frame);
+      const bool landed = WaitUntil(
+          [this, frame]() {
+            return window_->CurrentFrameForTest() == frame &&
+                   window_->OnlineSeekIdleForTest();
+          },
+          std::max(5000, options_.timeout_ms), "p0_post_seek_landing");
+      if (!landed) {
+        return false;
+      }
+      // S1 占位恒 true；S3 才实现真实预热。最多等 2s，不阻断诊断。
+      const bool warm_idle = WaitUntil(
+          [this]() { return window_->OnlinePreviewWarmIdleForTest(); }, 2000,
+          "p0_post_seek_warm_idle");
+      Print(QStringLiteral(
+                "online_drag_p0_post_seek_ready frame=%1 warm_idle=%2")
+                .arg(frame)
+                .arg(warm_idle ? 1 : 0));
+      Pump(50);
+      return true;
+    };
+    if (prepare_exact(1575)) {
+      RunParitySequence(QStringLiteral("post_seek_backward"), 1575, 1565, 10,
+                        300, false, 3000, false);
+    } else {
+      Print(QStringLiteral(
+          "online_drag_p0_post_seek skip scenario=post_seek_backward"));
+    }
+    if (prepare_exact(1605)) {
+      RunParitySequence(QStringLiteral("post_seek_forward"), 1605, 1615, 10,
+                        300, true, 3000, false);
+    } else {
+      Print(QStringLiteral(
+          "online_drag_p0_post_seek skip scenario=post_seek_forward"));
+    }
   }
 
   const qint64 cache_peak =

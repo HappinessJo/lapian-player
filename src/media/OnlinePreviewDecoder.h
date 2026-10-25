@@ -87,6 +87,21 @@ class OnlinePreviewDecoder {
   bool IsThreadRunning() const;
   std::string last_error() const;
 
+  // P0 度量（只读，不参与任何发布/解码判定）：每次 Begin/Resume 重置。
+  // - open_ms：Begin/Resume 启动线程 → 解码器打开完成；线程已就绪复用为 0。
+  // - first_publish_ms：Begin/Resume → 本次第一次 PublishLocked 成功。
+  // - published：本次 PublishLocked 成功次数。
+  // - delivered：本次 TakeLatestFrame 成功取走次数。
+  // - last_delivered_before_resume：Resume/Begin 之前最后一次 UI 取走的帧。
+  struct DragStats {
+    std::int64_t open_ms = -1;
+    std::int64_t first_publish_ms = -1;
+    std::uint64_t published = 0;
+    std::uint64_t delivered = 0;
+    std::int64_t last_delivered_before_resume = -1;
+  };
+  DragStats drag_stats() const;
+
   // 诊断/探针：发布帧数、丢弃的过期帧、seek 次数、缓存帧数/字节。
   std::uint64_t frames_published() const;
   std::uint64_t stale_dropped() const;

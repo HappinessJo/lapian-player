@@ -5150,6 +5150,12 @@ void MainWindow::ResetPreviewStatsForTest() {
   preview_target_lag_ms_ = 0.0;
   online_preview_wait_status_ = false;
   online_preview_error_shown_ = false;
+  // P0：拖动度量也随统计重置（只读字段，不改变既有语义）。
+  online_preview_drag_clock_.invalidate();
+  online_preview_drag_active_ = false;
+  online_preview_drag_first_delivered_ms_ = -1;
+  online_preview_drag_published_ = 0;
+  online_drag_stats_ = OnlineDragStatsSnapshot{};
 }
 
 QString MainWindow::WaveformStateForTest() const {
@@ -5619,6 +5625,12 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   }
   if (OnlineStepEligible()) {
     // T8.6.1b：增长会话走独立的 GrowingSource 预览读层；未缓存区只提示等待。
+    // P0：本次拖动度量（只读；即使预览器创建失败也记录拖动起点）。
+    online_preview_drag_clock_.start();
+    online_preview_drag_active_ = true;
+    online_preview_drag_first_delivered_ms_ = -1;
+    online_preview_drag_published_ = 0;
+    online_drag_stats_ = OnlineDragStatsSnapshot{};
     const bool cached = OnlineFrameCached(frame);
     EnsureOnlinePreviewStarted(frame);
     if (online_preview_ != nullptr) {
@@ -5724,6 +5736,28 @@ void MainWindow::OnScrubFinished(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
+  // P0：松手前保存本次在线拖动度量（只读，不改变 Pause/End 语义）。
+  if (preview_ == nullptr && online_preview_drag_active_) {
+    OnlineDragStatsSnapshot snapshot;
+    snapshot.valid = true;
+    snapshot.drag_ms = online_preview_drag_clock_.isValid()
+                           ? online_preview_drag_clock_.elapsed()
+                           : -1;
+    snapshot.first_delivered_ms = online_preview_drag_first_delivered_ms_;
+    snapshot.published_before_release = online_preview_drag_published_;
+    if (online_preview_ != nullptr) {
+      const lapian::media::OnlinePreviewDecoder::DragStats stats =
+          online_preview_->drag_stats();
+      snapshot.open_ms = stats.open_ms;
+      snapshot.first_publish_ms = stats.first_publish_ms;
+      snapshot.last_delivered_before_resume =
+          stats.last_delivered_before_resume;
+      snapshot.published = static_cast<int>(stats.published);
+      snapshot.delivered = static_cast<int>(stats.delivered);
+    }
+    online_drag_stats_ = snapshot;
+    online_preview_drag_active_ = false;
+  }
   // 先停预览/join 预览线程，再走精确 seek；预览线程的 reader 不能和松手后的
   // 精确 seek/finalize 抢同一个 `.part` 句柄。在线增长会话只 Pause：保留
   // 有界帧缓存供下一次拖动直接命中，会话关闭/切档仍走 EndScrubPreview。
@@ -5771,6 +5805,7 @@ void MainWindow::OnScrubFinished(qint64 frame) {
 }
 
 void MainWindow::EndScrubPreview() {
+  online_preview_drag_active_ = false;
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
   }
@@ -5908,6 +5943,16 @@ void MainWindow::TickOnlinePreview() {
     if (preview_frame.from_cache) {
       ++online_preview_cache_presented_;
     }
+    // P0 度量：本次拖动第一次真正上屏的时间与松手前上屏次数（只读）。
+    if (online_preview_drag_active_) {
+      if (online_preview_drag_first_delivered_ms_ < 0) {
+        online_preview_drag_first_delivered_ms_ =
+            online_preview_drag_clock_.isValid()
+                ? online_preview_drag_clock_.elapsed()
+                : 0;
+      }
+      ++online_preview_drag_published_;
+    }
     av_frame_free(&preview_frame.frame);
   }
   online_preview_dropped_ =
@@ -5958,6 +6003,7 @@ void MainWindow::EnsurePreviewDecoderDevice() {
 }
 
 void MainWindow::StopPreview() {
+  online_preview_drag_active_ = false;
   if (preview_timer_ != nullptr) {
     preview_timer_->stop();
   }
