@@ -1,7 +1,8 @@
 # 交接：P0 发布收口与稳定性（2026-10-25）
 
-- **状态**：**待执行**。本会话只做“用户确认记录 + 交接”，未改代码。
-- **代码基线**：`24fe056`（P0 代码 `3084e33` + `c912770` + `35fa8be`；文档 `24fe056`）。
+- **状态**：**已完成（2026-10-25）**。T2–T5 串行执行完毕；代码 `925b8d5` + `08484ee`，
+  文档提交见 `git log -1 -- docs/handoff-2026-10-25-p0-close.md`。结果见 §0。
+- **代码基线**：`d7f62d6` 起；收口后代码 HEAD `08484ee`（P0 代码 `3084e33` + `c912770` + `35fa8be`；P0 文档 `24fe056`）。
 - **P0 结论**：A/B/C pass（P0 范围）；在线 parity **61/0**、cold first_publish **26–28ms**、
   post-seek 后第一次拖 delivered **48ms**、稳态 **58.5fps**、cache **60.75MiB/72**；
   `ctest` 37/37、key 77/0、T8.6.1b 35/0、A 42/0、本地 9/0。
@@ -10,6 +11,29 @@
 - **任务/证据**：[tasks-online-parity-fix.md](tasks-online-parity-fix.md) §9、
   [online-drag-parity.md](perf/online-drag-parity.md) §13、
   [handoff-2026-10-25-p0.md](handoff-2026-10-25-p0.md)。
+
+---
+
+## 0. 执行结果（2026-10-25）
+
+| 任务 | 结果 | 关键证据 |
+|---|---|---|
+| T1 用户确认核对 | 已核对 | task §9.8 / handoff p0 §3.3 均为“体感确认、非量化”，未改写为验收 |
+| T2 新根首包写入失败 | **已定位并修复** `925b8d5` | 3 新根修复前各 2 条 `bytes=0 ... 写入缓存文件失败`（在 `online_dash_keys` 前），修复后各 0 条；根因是 DASH 总长探测 `FirstChunkSink` 返回 false，不是写盘；`headers_only` 只读响应头；parity 61/0 |
+| T3 preview decoder 偶发崩溃 | **已复现并修复** `08484ee` | 修复前隔离 2/20 失败（0xC0000374、0xC0000005）、全量 ctest 首跑失败（avutil）；根因 `CloneExactLocked` 两处无锁调用；修复后隔离 **50/50**、全量 ctest **3×37/37** |
+| T4 clean 打包/安装 | **pass** | 242s、ctest 37/37、dist 25 文件/36,392,776B/34.71MB、exe `8344A2BB…`、setup 11.9MB、zip 14.49MB；静默安装 2s、hash/快捷方式一致、settings 未动 |
+| T5 回归/文档 | **pass（P0 范围）** | parity **61/0**、T8.6.1b **35/0**、A **42/0**、key **77/0**、local **9/0**、drag P6 18.0ms、strategy **7/7**；文档更新 task §9.9 / perf §13.8 / AGENTS v6.50 |
+
+- **产物**：`out\package\Lapian-0.1.0-setup.exe`（SHA256 `C6F3B075…`）、
+  `out\package\Lapian-0.1.0-portable.zip`（SHA256 `8420FEA5…`）；
+  安装版 `%LOCALAPPDATA%\Programs\拉片软件\lapian.exe` 与 dist 同 hash。
+- **环境备注**：本机直接执行 `.ps1` 被 ExecutionPolicy 拦，改用
+  `powershell -ExecutionPolicy Bypass -File`；setup 从 `%TEMP%` 静默安装，
+  未被 SmartScreen 拦截；未清空/覆盖默认缓存与在线记录。
+- **残余（不得写成全量验收/全绿）**：preview 崩溃无符号化 dump（按契约+压测收口，
+  低概率残余未知）；4K/60 与 `post_seek_immediate` 未覆盖；用户体感非量化。
+  详见 [tasks-online-parity-fix.md](tasks-online-parity-fix.md) §9.9.5、
+  [online-drag-parity.md](perf/online-drag-parity.md) §13.8。
 
 ---
 

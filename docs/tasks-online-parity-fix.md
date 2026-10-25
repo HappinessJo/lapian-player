@@ -1,8 +1,8 @@
 # 在线播放修复任务：前后一致 + 丝滑流畅 + 清晰度切换
 
-- **版本**：v1.3（2026-10-25；P0 首次拖动修复验收完成，追加 §9）
-- **状态**：**pass（P0 范围）**——A 清晰度切换 **pass**；B 前后一致 **pass**；C 丝滑流畅 **pass（P0 门禁）**：首次拖动 first_publish 26–28ms、post-seek 后第一次拖动 first_delivered 48ms、稳态 58.5fps。**残余**：seek 落地 0ms 立即再拖仍有 ~640–655ms 空档（预热完成前窗口，按批准口径不门禁）、cold 合成场景 flicker 为方向语义 artifact、本地反向/策略 flaky，详见 §9.6；不得写成“所有场景无空档/全绿”。
-- **代码基线**：`35fa8be`；P0 提交 `3084e33`（度量/探针）+ `c912770`（preview seek/首帧/预热）+ `35fa8be`（MainWindow 接线/门禁）；历史实现 `e1a89c6`+`4d89683`；文档提交见 `git log -1 -- docs/tasks-online-parity-fix.md`
+- **版本**：v1.4（2026-10-25；P0 首次拖动修复验收 + 发布收口 T2–T5，追加 §9.9）
+- **状态**：**pass（P0 范围）**——A 清晰度切换 **pass**；B 前后一致 **pass**；C 丝滑流畅 **pass（P0 门禁）**：首次拖动 first_publish 26–28ms、post-seek 后第一次拖动 first_delivered 48ms、稳态 58.5fps。**发布收口（2026-10-25）**：新根首写“失败”已定位为 DASH 总长探测假错误（`925b8d5`），预览解码器偶发 0xC0000374/0xC0000005 已复现并修复缓存克隆竞态（`08484ee`），clean 打包/安装/回归通过，详见 §9.9。**残余**：seek 落地 0ms 立即再拖仍有 ~640–655ms 空档（预热完成前窗口，按批准口径不门禁）、cold 合成场景 flicker 为方向语义 artifact、本地反向/策略波动、preview 崩溃无符号化 dump、4K/60 未验，详见 §9.6/§9.9.5；不得写成“所有场景无空档/全量验收/全绿”。
+- **代码基线**：P0 `35fa8be`；发布收口 `08484ee`（`925b8d5` 首写假失败 + `08484ee` 预览解码器竞态）；P0 提交 `3084e33`（度量/探针）+ `c912770`（preview seek/首帧/预热）+ `35fa8be`（MainWindow 接线/门禁）；历史实现 `e1a89c6`+`4d89683`；文档提交见 `git log -1 -- docs/tasks-online-parity-fix.md`
 - **性质**：在线播放体验/缓存修复；**不改本地拖动预览、M1/M2/P4/P6/P7、OB 样本、`lapian-cache-1` schema、默认 AVC≤1080p**
 - **一句话**：在线拖动要像本地一样及时响应、前后一致；拉流后切清晰度不能再报“已完整缓存但未走缓存命中”。
 
@@ -414,7 +414,7 @@ C 的 70% 门槛：正向 ≥40.97（在线 56.21，**96.0%**）、反向 ≥39.
 3. **`initial_pump_ms` 口径**：既有场景默认 80ms（让冷 decoder 打开），post/immediate 为 0（decoder 已暖、首目标==显示帧，80ms 内没有目标变化）。按含 80ms 计 post first_delivered 会变 128ms；用户可见的 target→画面延迟是 first_response 49ms。
 4. **本地反向波动**：S4 local backward 49.55/53.52fps、gap 68/59ms、max_missing 3/2（§12 为 57.00/45/2），9/0 仍过；本地源码未改，属机器负载/计时波动。
 5. **`--drag-strategy-test` flaky**：S4 两次均 6/7，唯一失败 `fast_forward max_gap 54.9/50.8ms`（阈值 50）；本地 `PreviewDecoder`/`DragStrategy` 本轮无 diff，属既有 flake。
-6. 新缓存根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试成功；S2/S3 各出现一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过，S4 clean 未出现）；均按残余记录，不写“无崩溃/无错误”。
+6. 新缓存根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试成功；S2/S3 各出现一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过，S4 clean 未出现）；均按残余记录，不写“无崩溃/无错误”。**2026-10-25 收口**：首写已定位为 DASH 总长探测假错误并修复（`925b8d5`），预览崩溃已复现并修复缓存克隆竞态（`08484ee`），见 §9.9。
 
 ### 9.7 复验与提交
 
@@ -427,3 +427,93 @@ C 的 70% 门槛：正向 ≥40.97（在线 56.21，**96.0%**）、反向 ≥39.
 - 用户在使用安装版后反馈：**“现在的流畅度就做的很好了”**（2026-10-25 18:33）。
 - 性质：**体感确认，不是量化验收**；未指定样本、方向、exe hash 或具体数值，不能替代 61/0 探针，也不覆盖 4K/60、`post_seek_immediate` 残余。
 - 结论：P0 的 1080P30 日常拖动体验已被用户接受；发布收口见 [handoff-2026-10-25-p0-close.md](handoff-2026-10-25-p0-close.md)。
+
+### 9.9 发布收口（T2–T5，2026-10-25）
+
+> 只做收口，不重开 P0 门禁；门/阈值/schema/本地预览语义未改。代码提交
+> `925b8d5`（首写假失败）+ `08484ee`（预览解码器竞态）；文档提交见
+> `git log -1 -- docs/tasks-online-parity-fix.md`。
+
+#### 9.9.1 T2 新缓存根“写入缓存文件失败”：已定位为探测假错误
+
+- **复现**：修复前 3 个全新根（`build\p0-close\t2-r1..r3`）各跑一次 P0 parity，
+  每次都有 **2 条**（视频 30080 + 音频 30280 各一次）：
+  `T8.5 cdn_done ... status=206 elapsed_ms=10–28 bytes=0 range_ignored=0 error=写入缓存文件失败`。
+  两条都紧邻 `online_dash_keys` / `online_dash_exact` 之前，随后真实下载完整成功；
+  日志 `build\t2-r1..r3.err.log`。
+- **根因**：**不是 `.part` 写盘失败**。`ProbeDashTotal` 用 `Range: bytes=0-0` 探测
+  DASH 总长，旧 `FirstChunkSink::Write` 以“返回 false 且不写 error”停止读 body；
+  `WinHttpDownloadTransport::OnRead` 把它映射成 `kSinkError`，空 error 再落成
+  “写入缓存文件失败”。首个新根没有缓存命中才走 DASH 探测，所以只在首开出现；
+  同一根第二次通常命中缓存、不再探测。
+- **修复**：新增 `DownloadRequest::headers_only`；传输层校验完 `Content-Length`/
+  `Content-Range` 即成功返回，**不读 body、不碰 sink**；探测传 `nullptr` sink。
+  真实下载保持 `headers_only=false`，写盘/续传/备份/刷新语义不变；缓存键/配额/
+  schema 未改。
+- **验证**：修复后 3 个全新根（`build\p0-close\t2-f1..f3`）各 **0 条**该错误，
+  探测日志为 `headers_only=1 error=`，视频/音频总大小与修复前一致，parity 均
+  **61/0**。修复前后日志 `build\t2-r*.err.log` / `build\t2-f*.err.log`。
+
+#### 9.9.2 T3 `lapian_preview_decoder_test` 偶发 0xC0000374/0xC0000005：已复现并修复
+
+- **复现（修复前）**：隔离跑 20 次失败 **2 次**（0xC0000374、0xC0000005）；
+  全量 `ctest` 首跑即失败（WER：`avutil-59.dll+0x43612`、`c0000005`）。Windows
+  事件日志另有 2026-10-25 00:40（2 次）、13:19、13:41 的 `c0000374` 记录。
+- **根因**：`PreviewDecoder::Impl::CloneExactLocked` 注释要求“调用方持有
+  `mutex`”，但 `Process`（精确缓存命中）与 `PrefetchStep`（预取前查缓存）两处
+  都在无锁状态裸调。该函数会遍历热缓存 `std::deque`、环缓存 `std::list` 并
+  `av_frame_clone`，而 UI 线程 `Begin/End/UpdateTarget` 与独立预取线程会并发
+  push/erase/evict 同一批 AVFrame；命中正被 eviction 释放的帧即在 avutil 崩溃，
+  容器并发增删则触发堆损坏，与两类崩溃签名吻合。
+- **修复**：两处 clone 改为作用域内持 `mutex`，出锁后再 `Publish`/`av_frame_free`；
+  锁序不变（`mutex` 为叶子锁），缓存预算/发布策略/门禁未改。
+- **验证（修复后）**：隔离 **50/50** 通过（50 份 `全部通过`、0 `[FAIL]`、353s）；
+  全量 `ctest` **3/3 均 37/37**（64/62/63s）；18:58 之后无新的 preview WER 事件。
+- **口径**：未取得符号化 dump（本机无 `cdb`、无管理员权限配置 LocalDumps）；
+  结论按“契约违反 + 崩溃签名 + 压测收口”，**不写成“证明无崩溃”**，低概率残余未知。
+
+#### 9.9.3 T4 打包 / 安装（clean）
+
+- HEAD `08484ee`；`scripts\build-release.ps1 -Clean -Package` **242s**、exit 0，
+  脚本内 `ctest 37/37`（63.43s）。
+- dist **25 文件 / 36,392,776B / 34.71MB**；`lapian.exe` **3,183,104B**，SHA256
+  `8344A2BB871130A7F21726FA72BA167296942BCEE5ABB47699D1D6AE6C1304CA`。
+- `out\package`：
+  - `Lapian-0.1.0-setup.exe` **12,474,791B / 11.9MB**，SHA256
+    `C6F3B075636E034D2FB0161677FE599691B64BA114A9DD5C81E5BD4AEB378792`；
+  - `Lapian-0.1.0-portable.zip` **15,197,307B / 14.49MB**，SHA256
+    `8420FEA53D8B06CA0A5F7AA73B3127C5D420A58A657901C0C3129228D1DE4C52`；
+  - P12 ≤100MB、`check-imports.ps1` 通过；报告 `out\package\package-report.txt`。
+- 安装：setup 复制到 `%TEMP%` 后
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER`，**exit 0 / 2s**；
+  安装版 exe hash 与 dist 一致；`%APPDATA%\拉片软件` settings 1183B 安装前后不变；
+  Start 菜单与桌面快捷方式 target 均为
+  `%LOCALAPPDATA%\Programs\拉片软件\lapian.exe`、working dir 正确、target hash
+  与 dist 一致；ProgID 命令保持 `--file "%1"`。
+- 注：E: 直接执行 `.ps1` 触发执行策略（`UnauthorizedAccess`），本轮用
+  `powershell -ExecutionPolicy Bypass -File` 运行；setup 从 `%TEMP%` 静默安装
+  未被 SmartScreen 拦截。
+
+#### 9.9.4 T5 回归（安装版）
+
+| 项 | 结果 |
+|---|---|
+| `ctest` | **37/37**（T4 clean 63.43s；T3 隔离修复后 3×37/37） |
+| P0 parity（新根、1MiB/s） | **61/0 pass**；cold first_publish **26ms** / first_delivered 36ms / response 1ms；post-seek first_delivered **46ms**；forward **56.94fps** / backward **56.66fps**，gap 31/32ms，presented 差 **0.000**；cache **63,700,992B（60.75MiB）/72 帧**；UI gap 31/32ms；首写假错误 **0** |
+| T8.6.1b | **35/0**（forward first_publish 29ms；11s） |
+| A 切档 80→112→80 | **42/0 pass**；qn 80/112/80、codecid 7、fps 30.000；PTS 1,000,000 / 第 30 帧保持；切回 `cache_hit=1`、dash/playurl=0；标记/记录/截图保留；112 条目保留 |
+| key | **77/0** |
+| 本地 parity | **9/0**；forward 58.65fps / backward 54.89fps，gap 25/48ms |
+| `--drag-test` | P4 64.4、**P6 p95 18.0ms**、P7 0.0/16.9、P8 12.8、P9 31.1，全 pass |
+| `--drag-strategy-test` | **7/7 all_pass=1**（本轮未出现 6/7 flake）；release p95 14.5ms；cache_peak 88,473,600B |
+
+- 回归日志：`build\t5-parity.*`、`build\t5-t861b.*`、`build\t5-a.*`、
+  `build\t5-key.*`、`build\t5-local.*`、`build\t5-drag.*`、`build\t5-strategy.*`；
+  T4/T3 的 ctest 日志 `build\t4-build.out.log`、`build\t3-ctest-*.log`。
+
+#### 9.9.5 残余（不得写成全量验收 / 全绿）
+
+1. preview 崩溃未取得符号化 dump；50/50 + 3×37/37 不证明“永不崩溃”，低概率残余未知。
+2. 4K/HEVC、1080P60 在线拖动未验；本轮在线样本仍为 1080P30。
+3. `post_seek_immediate` 残余不变（§9.6.1），不能引用其 `first_publish=36`。
+4. 用户“流畅度很好”仍是 §9.8 的体感确认，不替代 61/0，也不覆盖 4K/60。

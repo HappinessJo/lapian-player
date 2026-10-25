@@ -330,7 +330,7 @@ before = S1/`build\p0-before*.log`；after = S4/`build\p0-verify-parity*.log`（
 3. **`initial_pump_ms`**：既有场景 80，post/immediate 0。若按 80ms 计 post first_delivered 会是 128ms；target→画面的用户可见延迟看 `first_response`（49ms）。
 4. **本地反向波动**：S4 local backward 49.55/53.52fps、gap 68/59ms、max_missing 3/2（§12 57.00/45/2），9/0 仍过；本地源码无 diff。
 5. `--drag-strategy-test` 两次 6/7，唯一失败 `fast_forward max_gap 54.9/50.8ms`（阈值 50），既有 flaky。
-6. 新根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试；S2/S3 各一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过；S4 clean 未出现）。不写“无错误/无崩溃”。
+6. 新根首包 `bytes=0 写入缓存文件失败` 后重试成功；一次 20s 下载超时后重试；S2/S3 各一次 `lapian_preview_decoder_test` 0xc0000374（隔离/复跑通过；S4 clean 未出现）。**2026-10-25 收口**：首写已定位为 DASH 总长探测假错误（不是写盘），预览崩溃已复现并修复缓存克隆竞态；见 §13.8。
 
 ### 13.6 门禁与回归
 
@@ -365,3 +365,59 @@ $exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
 
 - clean 重建：`scripts\build-release.ps1 -Clean`（232.2s）；dist 25 文件 / 36,392,264B / 34.71MB；exe SHA256 `D2CDEBDF637F055B1550417DEF5A0FBA17246C9AFFFBBF0ACD5508A6661ACEDB`。
 - 原始日志：`build\p0-before*.log`、`build\p0-verify-*.log`（`build/` 不入库）。
+
+## 13.8 发布收口：首写假失败与预览解码器崩溃（2026-10-25）
+
+### 13.8.1 新根 `bytes=0 ... 写入缓存文件失败` = DASH 总长探测假错误
+
+- **复现（修复前）**：3 个全新根各跑一次 P0 parity，均有 2 条（视频+音频）：
+  `cdn_done status=206 bytes=0 range_ignored=0 error=写入缓存文件失败`，且都在
+  `online_dash_keys` 之前；随后真实下载完整成功（31,057,770B / 1,294,290B）。
+  日志 `build\t2-r1..r3.err.log`。
+- **根因**：`ProbeDashTotal` 发 `Range: bytes=0-0`，旧 `FirstChunkSink` 返回
+  false 且不写 error 来停止读 body；`WinHttpDownloadTransport::OnRead` 将
+  “sink 返回 false + 空 error”映射为 `kSinkError` 并落成“写入缓存文件失败”。
+  新根首开没有缓存命中才走探测，故只在首次出现；`.part` 写入路径本身正常。
+- **修复 `925b8d5`**：新增 `DownloadRequest::headers_only`；传输层在
+  `OnHeaders` 校验完 `Content-Length`/`Content-Range` 后直接 `kOk`，不 `StartRead`、
+  不碰 sink；探测传 `nullptr`。真实下载 `headers_only=false`，写盘/续传/备份/
+  刷新/配额/schema 不变。
+- **验证**：修复后 3 个全新根（`build\t2-f1..f3.err.log`）0 条该错误，探测日志
+  `headers_only=1 error=`、视频/音频总大小与修复前一致、parity 61/0。
+
+### 13.8.2 `lapian_preview_decoder_test` 0xC0000374 / 0xC0000005
+
+- **复现（修复前）**：隔离 20 次失败 2 次（0xC0000374、0xC0000005）；全量 ctest
+  首跑失败（WER `avutil-59.dll+0x43612 c0000005`）；事件日志 2026-10-25 00:40
+  （2 次）、13:19、13:41 另有 `c0000374`。
+- **根因**：`PreviewDecoder::Impl::CloneExactLocked` 注释要求持 `mutex`，但
+  `Process`（精确缓存命中）与 `PrefetchStep`（预取前查缓存）两处无锁调用。
+  该函数遍历热缓存 `deque`/环缓存 `list` 并 `av_frame_clone`；UI 线程
+  `Begin/End/UpdateTarget` 与预取线程并发 push/erase/evict 同一批 AVFrame，
+  命中被 eviction 的帧即在 avutil 崩溃，容器并发增删则堆损坏。
+- **修复 `08484ee`**：两处 clone 改为作用域内持锁，出锁后再 `Publish`/free；
+  缓存预算/发布策略/门禁未改。
+- **验证（修复后）**：隔离 **50/50**（50 份 `全部通过`、353s）；全量 `ctest`
+  **3/3 37/37**（64/62/63s）；18:58 后无新 preview WER。未取得符号化 dump，
+  不写“证明无崩溃”。
+
+### 13.8.3 最终产物 / 安装 / 回归（HEAD `08484ee`）
+
+| 项 | 结果 |
+|---|---|
+| clean `-Clean -Package` | **242s**、exit 0、脚本内 ctest 37/37（63.43s） |
+| dist | **25 文件 / 36,392,776B / 34.71MB**；exe 3,183,104B |
+| exe SHA256 | `8344A2BB871130A7F21726FA72BA167296942BCEE5ABB47699D1D6AE6C1304CA` |
+| setup / zip | 12,474,791B（11.9MB）/ 15,197,307B（14.49MB）；SHA256 `C6F3B075…` / `8420FEA5…` |
+| 安装 | `/VERYSILENT /CURRENTUSER` exit 0 / 2s；安装版 hash 与 dist 一致；Start/桌面快捷方式 target+hash 一致；settings 1183B 未动 |
+| P0 parity（新根） | **61/0**；cold first_publish 26ms / first_delivered 36ms；post 46ms；forward 56.94fps / backward 56.66fps；gap 31/32ms；presented 差 0.000；cache 60.75MiB/72；UI 31/32ms |
+| T8.6.1b / A / key / local | **35/0** / **42/0** / **77/0** / **9/0** |
+| `--drag-test` | P4 64.4、P6 p95 18.0ms、P7 0.0/16.9、P8 12.8、P9 31.1，全 pass |
+| `--drag-strategy-test` | **7/7 all_pass=1**；release p95 14.5ms |
+
+- 日志：`build\t2-r*.err.log`、`build\t2-f*.err.log`、`build\t3-post-*.out.log`、
+  `build\t3-ctest-*.log`、`build\t4-build.out.log`、`build\t4-install.log`、
+  `build\t5-*.{out,err}.log`、`out\package\package-report.txt`（`build/`/`out/` 不入库）。
+- 残余：无符号化 dump；4K/60 与 `post_seek_immediate` 未覆盖；用户体感确认非量化。
+  详见 [tasks-online-parity-fix.md](../tasks-online-parity-fix.md) §9.9、
+  [handoff-2026-10-25-p0-close.md](../handoff-2026-10-25-p0-close.md)。
