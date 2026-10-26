@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QByteArray>
 #include <QElapsedTimer>
@@ -175,11 +175,25 @@ class MainWindow : public QMainWindow {
   QRect BannerSlotGeometryForTest() const;
   QString SplitterStateForTest() const;
   void SetSplitSizesForTest(int timeline, int inspector);
+  // 3B：只改时间轴高度（检查器保持当前宽度），走同一条 96–340 夹取路径。
+  void SetTimelineHeightForTest(int timeline);
   void DragSplitterForTest(bool vertical, int delta);
   bool InspectorCollapsedForTest() const;
   QString FullScreenChromeForTest() const;
   QString ReadoutTextForTest() const;
   QRect ReadoutGeometryForTest() const;
+  // 3B：视图窗 = 画布可见范围（规划 Q3 同源断言）+ 播放头常驻 + 宽度档位 +
+  // 缓冲槽 + 两条滑块的合成拖拽（与真实鼠标同一路径）。
+  QString TimelineViewFramesForTest() const;
+  bool TimelinePlayheadVisibleForTest() const;
+  QString TransportTierForTest() const;
+  QString BufferSlotStateForTest() const;
+  bool TimelineBarDragForTest(bool work_bar, int from_x, int to_x);
+  QString TimelineBarGeometryForTest() const;
+  // M7：帧号控件（v2FrameNumber）在播放/暂停/拖动/全屏四态的几何。
+  // 输出 `visible=1 rect=.. transport=.. rel=dx,dy wxh`；rel 是"帧号中心 −
+  // Transport 中心"，全屏换了窗口尺寸也应当不变（唯一可跨态比较的量）。
+  QString M7StateForTest() const;
   // T7.1：D3D11 是否在"没有媒体打开请求"时就初始化（旧壳=1，v2 空态隐藏=0）。
   bool D3dInitAtStartupForTest() const { return d3d_init_at_startup_; }
 
@@ -621,6 +635,15 @@ class MainWindow : public QMainWindow {
   void JumpToEdgeFrame(bool to_end);
   void UpdateTimelineMeta();
   void SyncShellChrome();
+  // 3B：工作区滑块手势 → 既有 SetLoopIn/SetLoopOut 语义（含 A>B、A=B 规则）。
+  void ApplyWorkBarIn(std::int64_t frame);
+  void ApplyWorkBarOut(std::int64_t frame);
+  void ApplyWorkBarPan(std::int64_t in, std::int64_t out);
+  void ApplyWorkBarClear();
+  // 速度文本的唯一出口：旧壳状态栏标签 + v2 Transport 按钮（文本仍由 MainWindow 给）。
+  void UpdateSpeedText();
+  // 在线缓冲槽（仅 buffering/stalled 时可见；不看本地播放）。
+  void UpdateBufferSlot();
   void ShowShellHelp();
   QStringList LayoutProblemsLegacy() const;
   QStringList LayoutProblemsV2() const;
@@ -866,8 +889,7 @@ class MainWindow : public QMainWindow {
   QTimer* preview_timer_ = nullptr;
   QTimer* step_repeat_timer_ = nullptr;
   QTimer* settings_save_timer_ = nullptr;
-  // UI v2（3A）：面板头/循环按钮的轻量刷新（250ms）；3B 换成时间轴信号。
-  QTimer* ui_meta_timer_ = nullptr;
+  // UI v2（3A）：面板头/循环按钮的轻量刷新在 3B 已改为信号驱动，无定时器。
   // T7.11.1：后退跨 GOP 第一步的硬解窗口延后回拷（呈现后再填缓存）。
   QTimer* cache_fill_timer_ = nullptr;
   // T8.6.1b 在线拖动预览状态/统计（只 GUI 线程写）。

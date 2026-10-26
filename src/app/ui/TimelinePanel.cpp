@@ -1,4 +1,4 @@
-﻿#include "app/ui/TimelinePanel.h"
+#include "app/ui/TimelinePanel.h"
 
 #include <QAction>
 #include <QHBoxLayout>
@@ -6,7 +6,9 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "app/TimelineWidget.h"
 #include "app/ui/Glyph.h"
+#include "app/ui/RangeBar.h"
 #include "app/ui/Theme.h"
 
 namespace {
@@ -77,6 +79,12 @@ TimelinePanel::TimelinePanel(QWidget* parent) : QWidget(parent) {
 
   root->addWidget(head_, 0);
 
+  // ── 视图窗滑块 13 / 工作区滑块 15（原型 `.zrow` / `.wrow`）───────────
+  view_bar_ = new RangeBar(RangeBar::Mode::kView, this);
+  root->addWidget(view_bar_, 0);
+  work_bar_ = new RangeBar(RangeBar::Mode::kWork, this);
+  root->addWidget(work_bar_, 0);
+
   canvas_host_ = new QWidget(this);
   canvas_host_->setObjectName(QStringLiteral("v2TimelineCanvas"));
   auto* canvas_layout = new QVBoxLayout(canvas_host_);
@@ -84,7 +92,100 @@ TimelinePanel::TimelinePanel(QWidget* parent) : QWidget(parent) {
   canvas_layout->setSpacing(0);
   root->addWidget(canvas_host_, 1);
 
+  // 滑块手势 → 画布（同一条夹取路径）；画布变化 → 滑块重算几何。
+  connect(view_bar_, &RangeBar::viewWindowRequested, this, [this](double start,
+                                                                 double span) {
+    if (timeline_ != nullptr) {
+      timeline_->SetViewWindow(start, span);
+    }
+  });
+  connect(view_bar_, &RangeBar::scrollRequested, this, [this](double scroll) {
+    if (timeline_ != nullptr) {
+      timeline_->SetScrollPixels(scroll);
+    }
+  });
+  connect(view_bar_, &RangeBar::zoomAtRequested, this,
+          [this](double factor, double anchor) {
+            if (timeline_ != nullptr) {
+              timeline_->ZoomAtFactor(factor, anchor);
+            }
+          });
+  connect(view_bar_, &RangeBar::fitRequested, this,
+          &TimelinePanel::fitRequested);
+  connect(work_bar_, &RangeBar::workInRequested, this,
+          &TimelinePanel::workInRequested);
+  connect(work_bar_, &RangeBar::workOutRequested, this,
+          &TimelinePanel::workOutRequested);
+  connect(work_bar_, &RangeBar::workPanRequested, this,
+          &TimelinePanel::workPanRequested);
+  connect(work_bar_, &RangeBar::workClearRequested, this,
+          &TimelinePanel::workClearRequested);
+  // 工作区条上的滚轮/Shift+滚轮也走画布同一条缩放/平移路径。
+  connect(work_bar_, &RangeBar::scrollRequested, this, [this](double scroll) {
+    if (timeline_ != nullptr) {
+      timeline_->SetScrollPixels(scroll);
+    }
+  });
+  connect(work_bar_, &RangeBar::zoomAtRequested, this,
+          [this](double factor, double anchor) {
+            if (timeline_ != nullptr) {
+              timeline_->ZoomAtFactor(factor, anchor);
+            }
+          });
+
   UpdateMeta(QString(), QString());
+}
+
+void TimelinePanel::AdoptTimeline(TimelineWidget* timeline) {
+  if (timeline == nullptr) {
+    return;
+  }
+  timeline_ = timeline;
+  if (auto* layout = qobject_cast<QVBoxLayout*>(canvas_host_->layout())) {
+    layout->addWidget(timeline);
+  }
+  view_bar_->SetModel(&timeline->model());
+  work_bar_->SetModel(&timeline->model());
+  SetMediaReady(timeline->frame_count() > 0);
+  SetPlayheadFrame(timeline->current_frame());
+  connect(timeline, &TimelineWidget::viewChanged, this, [this]() {
+    if (view_bar_ != nullptr) {
+      view_bar_->RefreshView();
+    }
+    if (work_bar_ != nullptr) {
+      work_bar_->RefreshView();
+    }
+    emit viewChanged();
+  });
+  connect(timeline, &TimelineWidget::playheadChanged, this,
+          [this](qint64 frame) {
+            if (view_bar_ != nullptr) {
+              view_bar_->SetPlayheadFrame(frame);
+            }
+          });
+}
+
+void TimelinePanel::SetWorkRange(const lapian::core::LoopRange& range) {
+  if (work_bar_ == nullptr) {
+    return;
+  }
+  work_bar_->SetWorkRange(range.has_in(), range.has_out(), range.enabled(),
+                          range.in(), range.out());
+}
+
+void TimelinePanel::SetMediaReady(bool ready) {
+  if (view_bar_ != nullptr) {
+    view_bar_->SetMediaReady(ready);
+  }
+  if (work_bar_ != nullptr) {
+    work_bar_->SetMediaReady(ready);
+  }
+}
+
+void TimelinePanel::SetPlayheadFrame(std::int64_t frame) {
+  if (view_bar_ != nullptr) {
+    view_bar_->SetPlayheadFrame(frame);
+  }
 }
 
 void TimelinePanel::BindActions(QAction* zoom_in, QAction* zoom_out) {
@@ -116,6 +217,12 @@ void TimelinePanel::ApplyTokens(const lapian::ui::Tokens& tokens) {
     head_->setFixedHeight(tokens.timeline_head);
     head_->setVisible(tokens.timeline_head > 0);
   }
+  if (view_bar_ != nullptr) {
+    view_bar_->ApplyTokens(tokens);
+  }
+  if (work_bar_ != nullptr) {
+    work_bar_->ApplyTokens(tokens);
+  }
   const QFont font = lapian::ui::UiFont(
       tokens.density == lapian::ui::Density::kDense ? 10.0 : tokens.fs_meta);
   for (QLabel* label : {work_meta_, view_meta_}) {
@@ -132,4 +239,8 @@ void TimelinePanel::SetHeadVisible(bool visible) {
   if (head_ != nullptr) {
     head_->setVisible(visible);
   }
+}
+
+bool TimelinePanel::head_visible() const {
+  return head_ != nullptr && head_->isVisible() && head_->height() > 0;
 }

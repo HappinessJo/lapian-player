@@ -1,4 +1,4 @@
-﻿#include "app/TimelineWidget.h"
+#include "app/TimelineWidget.h"
 
 #include "app/ui/Tokens.h"
 
@@ -12,8 +12,6 @@
 #include <QPolygonF>
 #include <QRectF>
 #include <QResizeEvent>
-#include <QScrollBar>
-#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QWheelEvent>
 
@@ -25,9 +23,10 @@
 namespace {
 
 constexpr int kTimelineBaseHeight = 72;
-constexpr int kRulerHeight = 58;
 constexpr int kWaveformHeight = 56;
 constexpr double kPlayheadMarginPx = 8.0;
+// 越界播放头贴边箭头（Fill/Fixed 共用）。
+constexpr double kOffViewArrowWidth = 6.0;
 
 }  // namespace
 
@@ -38,24 +37,7 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
   // 不抢走视频区的键盘焦点；滚轮缩放不需要焦点。
   setFocusPolicy(Qt::NoFocus);
   setToolTip(QStringLiteral("滚轮缩放 · Shift+滚轮横向滚动 · +/- 缩放"));
-
-  scroll_bar_ = new QScrollBar(Qt::Horizontal, this);
-  scroll_bar_->setObjectName(QStringLiteral("timelineScrollBar"));
-  scroll_bar_->setFocusPolicy(Qt::NoFocus);
-  scroll_bar_->setFixedHeight(kScrollBarHeight);
-  scroll_bar_->setStyleSheet(QStringLiteral(
-      "QScrollBar:horizontal { background:#18181b; height:14px; margin:0; border:0; }"
-      "QScrollBar::handle:horizontal { background:#4a4a52; min-width:24px; "
-      "border-radius:3px; }"
-      "QScrollBar::handle:horizontal:hover { background:#5c5c66; }"
-      "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }"
-      "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { "
-      "background:transparent; }"));
-
-  connect(scroll_bar_, &QScrollBar::valueChanged, this, [this](int value) {
-    model_.SetScroll(static_cast<double>(value));
-    update();
-  });
+  // 3B：内部横向滚动条已删除（视图窗滑块取代）；横向平移由滚轮/滑块负责。
 }
 
 void TimelineWidget::Clear() {
@@ -78,29 +60,39 @@ void TimelineWidget::SetFrameCount(std::int64_t count) {
   model_.SetFrameCount(count);
   model_.SetViewportWidth(width());
   model_.Fit();
-  SyncScrollBar();
-  update();
+  emit playheadChanged(0);
+  NotifyViewChanged();
 }
 
 void TimelineWidget::SetCurrentFrame(std::int64_t frame) {
   if (model_.frame_count() <= 0) {
     current_frame_ = 0;
+    emit playheadChanged(0);
     update();
     return;
   }
+  const double scroll_before = model_.scroll();
   current_frame_ =
       std::clamp<std::int64_t>(frame, 0, model_.frame_count() - 1);
   if (follow_playhead_) {
     model_.EnsureFrameVisible(current_frame_, kPlayheadMarginPx);
-    SyncScrollBar();
   }
+  if (std::abs(model_.scroll() - scroll_before) > 1e-9) {
+    NotifyViewChanged();
+  }
+  emit playheadChanged(static_cast<qint64>(current_frame_));
   update();
+}
+
+void TimelineWidget::NotifyViewChanged() {
+  fit_mode_ = model_.IsAtFit();
+  emit viewChanged();
 }
 
 void TimelineWidget::FitToWindow() {
   fit_mode_ = true;
   model_.Fit();
-  SyncScrollBar();
+  NotifyViewChanged();
   update();
 }
 
@@ -128,9 +120,61 @@ void TimelineWidget::ZoomOut() {
 
 void TimelineWidget::SetPixelsPerFrame(double pixels_per_frame) {
   model_.SetPixelsPerFrame(pixels_per_frame);
-  fit_mode_ = model_.IsAtFit();
-  SyncScrollBar();
+  NotifyViewChanged();
   update();
+}
+
+void TimelineWidget::ZoomAtFactor(double factor, double anchor_x) {
+  ApplyZoom(factor, anchor_x);
+}
+
+void TimelineWidget::SetViewWindow(double start_frame, double span_frames) {
+  if (model_.frame_count() <= 0 || width() <= 0) {
+    return;
+  }
+  const double viewport = std::max(1.0, static_cast<double>(width()));
+  const double count = static_cast<double>(model_.frame_count());
+  const double span = std::clamp(span_frames, 1.0, std::max(1.0, count));
+  const double before_ppf = model_.pixels_per_frame();
+  const double before_scroll = model_.scroll();
+  // 先落比例（会被 fit/8px 夹取），再用**实际**比例反推滚动，保证起点贴合。
+  model_.SetPixelsPerFrame(viewport / span);
+  model_.SetScroll(start_frame * model_.pixels_per_frame());
+  NotifyViewChanged();
+  if (std::abs(before_ppf - model_.pixels_per_frame()) > 1e-9 ||
+      std::abs(before_scroll - model_.scroll()) > 1e-9) {
+    update();
+  }
+}
+
+void TimelineWidget::SetScrollPixels(double scroll_px) {
+  model_.SetScroll(scroll_px);
+  NotifyViewChanged();
+  update();
+}
+
+std::pair<std::int64_t, std::int64_t> TimelineWidget::ViewFrames() const {
+  const std::int64_t count = model_.frame_count();
+  if (count <= 0 || model_.pixels_per_frame() <= 0.0 || width() <= 0) {
+    return {0, 0};
+  }
+  const double ppf = model_.pixels_per_frame();
+  const std::int64_t first = std::clamp<std::int64_t>(
+      static_cast<std::int64_t>(std::floor(model_.scroll() / ppf)), 0,
+      count - 1);
+  const std::int64_t last = std::clamp<std::int64_t>(
+      static_cast<std::int64_t>(
+          std::floor((model_.scroll() + static_cast<double>(width())) / ppf)),
+      first, count - 1);
+  return {first, last};
+}
+
+bool TimelineWidget::PlayheadVisible() const {
+  if (model_.frame_count() <= 0) {
+    return false;
+  }
+  const double x = model_.FrameToX(current_frame_);
+  return x >= -0.5 && x <= static_cast<double>(width()) + 0.5;
 }
 
 std::int64_t TimelineWidget::FrameAtPosition(const QPointF& position) const {
@@ -197,12 +241,18 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
   event->accept();
 }
 
-int TimelineWidget::RulerHeight() const {
-  if (height_policy_ == HeightPolicy::kFill) {
-    const int available = std::max(0, height() - kScrollBarHeight);
-    return std::max(0, available - WaveformHeight());
+int TimelineWidget::ContentBottom() const {
+  // kFixed：底部保留 14px（旧滚动条占位，见头文件的 kFixedBottomReserve）。
+  // kFill ：画布区吃满面板给的高度。
+  if (height_policy_ == HeightPolicy::kFixed) {
+    return std::max(0, height() - kFixedBottomReserve);
   }
-  return std::max(0, height() - kScrollBarHeight - WaveformHeight());
+  return std::max(0, height());
+}
+
+int TimelineWidget::RulerHeight() const {
+  // 两种策略都按"实际高度"派生：标尺 = 内容高 − 波形高。
+  return std::max(0, ContentBottom() - WaveformHeight());
 }
 
 int TimelineWidget::WaveformHeight() const {
@@ -211,8 +261,8 @@ int TimelineWidget::WaveformHeight() const {
   }
   if (height_policy_ == HeightPolicy::kFill) {
     // Fill（v2 壳层）：波形跟着面板高度走，但**封顶 96**、下限 8
-    // （规划 §4.5：拉到 340 时波形不跟着变成巨大色块）。
-    const int available = std::max(0, height() - kScrollBarHeight);
+    // （规划 §4.5：拉到 340 时波形不跟着变成巨大色块，多出的高度留白）。
+    const int available = ContentBottom();
     const int target = static_cast<int>(available * 0.62);
     return std::clamp(target, 8, lapian::ui::TokensFor(
                                      lapian::ui::Density::kRegular)
@@ -294,8 +344,16 @@ void TimelineWidget::SetWaveformVisible(bool visible) {
 }
 
 void TimelineWidget::SetLoopRange(const lapian::core::LoopRange& range) {
+  const bool changed = loop_range_.has_in() != range.has_in() ||
+                       loop_range_.has_out() != range.has_out() ||
+                       loop_range_.enabled() != range.enabled() ||
+                       loop_range_.in() != range.in() ||
+                       loop_range_.out() != range.out();
   loop_range_ = range;
   update();
+  if (changed) {
+    emit loopRangeChanged();
+  }
 }
 
 void TimelineWidget::SetMarks(std::vector<std::int64_t> frames) {
@@ -468,15 +526,18 @@ void TimelineWidget::DrawLoopRange(QPainter& painter, const QRectF& rect) {
                      QPointF(right - 0.5, rect.bottom()));
   }
 
-  // A/B 标签画在标尺下缘，避开顶部的帧号标签。
+  // A/B 标签：kFixed 仍画在标尺下缘（tests/timeline_test.cpp 按 y=42..53 采样）；
+  // kFill 跟着原型画在标尺下方的标记带（`.ztrack` 之下），不再压住帧号标签。
+  constexpr double kTagWidth = 15.0;
+  constexpr double kTagHeight = 15.0;
+  const double tag_y =
+      height_policy_ == HeightPolicy::kFill
+          ? static_cast<double>(RulerHeight()) + 1.0
+          : std::max(1.0, static_cast<double>(RulerHeight()) - kTagHeight - 3.0);
   QFont tag_font = painter.font();
   tag_font.setPointSizeF(8.0);
   tag_font.setBold(true);
   painter.setFont(tag_font);
-  constexpr double kTagWidth = 15.0;
-  constexpr double kTagHeight = 15.0;
-  const double tag_y =
-      std::max(1.0, static_cast<double>(RulerHeight()) - kTagHeight - 3.0);
   const bool active_tag = active;
   auto draw_tag = [&](const QString& text, double boundary_x, bool place_right) {
     double tag_x = place_right ? boundary_x + 1.0 : boundary_x - kTagWidth - 1.0;
@@ -508,6 +569,12 @@ void TimelineWidget::DrawMarks(QPainter& painter, const QRectF& rect) {
   const double bottom = rect.bottom();
   const QColor line_color(247, 118, 142, 70);
   const QColor flag_color(QStringLiteral("#f7768e"));
+  // kFill：旗标落在标尺下方的标记带里（原型把标记画在 ruler 之下），
+  // 否则会盖住帧号标签；kFixed 保持 y=0..8（单测按 y=4 采样小旗）。
+  const double flag_top =
+      height_policy_ == HeightPolicy::kFill
+          ? static_cast<double>(RulerHeight()) + 1.0
+          : 0.0;
   painter.save();
   int last_x = std::numeric_limits<int>::min();
   for (const std::int64_t frame : marks_) {
@@ -526,8 +593,8 @@ void TimelineWidget::DrawMarks(QPainter& painter, const QRectF& rect) {
     last_x = rounded_x;
     const double line_x = std::floor(x) + 0.5;
     painter.setPen(QPen(line_color, 1.0));
-    painter.drawLine(QPointF(line_x, 8.0), QPointF(line_x, bottom));
-    painter.fillRect(QRectF(line_x - 1.0, 0.0, 3.0, 8.0), flag_color);
+    painter.drawLine(QPointF(line_x, flag_top + 8.0), QPointF(line_x, bottom));
+    painter.fillRect(QRectF(line_x - 1.0, flag_top, 3.0, 8.0), flag_color);
   }
   painter.restore();
 }
@@ -538,28 +605,50 @@ void TimelineWidget::ApplyZoom(double factor, double anchor_x) {
   }
   const double before = model_.pixels_per_frame();
   const double after = model_.ZoomAt(factor, anchor_x);
-  fit_mode_ = model_.IsAtFit();
+  NotifyViewChanged();
   if (std::abs(after - before) > 1e-9) {
-    SyncScrollBar();
     update();
   }
 }
 
-void TimelineWidget::SyncScrollBar() {
-  if (scroll_bar_ == nullptr) {
+void TimelineWidget::DrawPlayhead(QPainter& painter) {
+  if (model_.frame_count() <= 0) {
     return;
   }
-  const double max_scroll = model_.MaxScroll();
-  const double max_scroll_clamped =
-      std::min(max_scroll, static_cast<double>(std::numeric_limits<int>::max()));
-  const int max_int = static_cast<int>(std::ceil(max_scroll_clamped));
+  const double bottom = static_cast<double>(ContentBottom());
+  const double playhead_x = model_.FrameToX(current_frame_);
+  const QColor playhead_color(QStringLiteral("#ffb454"));
 
-  QSignalBlocker blocker(scroll_bar_);
-  scroll_bar_->setRange(0, max_int);
-  scroll_bar_->setPageStep(std::max(1, width()));
-  scroll_bar_->setSingleStep(std::max(1, width() / 10));
-  scroll_bar_->setValue(static_cast<int>(std::lround(model_.scroll())));
-  scroll_bar_->setEnabled(max_int > 0);
+  if (playhead_x >= -1.0 && playhead_x <= static_cast<double>(width()) + 1.0) {
+    const double cell_width = std::max(1.0, model_.pixels_per_frame());
+    painter.fillRect(QRectF(playhead_x, 0.0, cell_width, bottom),
+                     QColor(255, 180, 84, 28));
+    painter.setPen(QPen(playhead_color, 1.0));
+    painter.drawLine(QPointF(playhead_x + 0.5, 0.0),
+                     QPointF(playhead_x + 0.5, bottom));
+
+    QPolygonF head;
+    head << QPointF(playhead_x - 5.0, 0.0) << QPointF(playhead_x + 5.0, 0.0)
+         << QPointF(playhead_x, 7.0);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(playhead_color);
+    painter.drawPolygon(head);
+    return;
+  }
+
+  // M7：播放头常驻——滚出可见范围时贴边画方向箭头（不乱画在画布上）。
+  const bool before_view = playhead_x < 0.0;
+  const double edge = before_view ? 0.0 : static_cast<double>(width());
+  const double dir = before_view ? 1.0 : -1.0;
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(playhead_color);
+  QPolygonF arrow;
+  arrow << QPointF(edge, bottom / 2.0 - 6.0) << QPointF(edge, bottom / 2.0 + 6.0)
+        << QPointF(edge + dir * kOffViewArrowWidth, bottom / 2.0);
+  painter.drawPolygon(arrow);
+  painter.setPen(QPen(playhead_color, 1.0));
+  painter.drawLine(QPointF(before_view ? 0.5 : edge - 0.5, 0.0),
+                   QPointF(before_view ? 0.5 : edge - 0.5, bottom));
 }
 
 void TimelineWidget::paintEvent(QPaintEvent* event) {
@@ -580,7 +669,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     painter.setFont(hint_font);
     painter.drawText(ruler_rect.adjusted(12, 0, -12, 0),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("打开视频后显示帧刻度"));
+                     QStringLiteral("打开视频后显示帧刻度与波形"));
     return;
   }
 
@@ -588,13 +677,27 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
   tick_font.setPointSizeF(8.5);
   painter.setFont(tick_font);
 
+  // 刻度几何：kFixed 与旧实现逐像素一致（单测按 y=36 起算次刻度）；
+  // kFill 标尺更矮，按实际高度压缩，避免刻度顶进波形区。
+  const int ruler_h = RulerHeight();
+  int major_tick_top = 21;
+  int minor_tick_top = 36;
+  double label_top = 3.0;
+  double label_height = 16.0;
+  if (height_policy_ == HeightPolicy::kFill) {
+    label_top = 2.0;
+    label_height = std::max(10.0, static_cast<double>(ruler_h) - 15.0);
+    major_tick_top = std::max(6, ruler_h * 3 / 5);
+    minor_tick_top = std::max(major_tick_top, ruler_h * 4 / 5);
+  }
+
   const std::vector<lapian::core::TimelineTick> ticks = model_.BuildTicks();
   for (const lapian::core::TimelineTick& tick : ticks) {
     const double line_x = std::floor(tick.x) + 0.5;
     if (line_x < 0.0 || line_x > static_cast<double>(width())) {
       continue;
     }
-    const int tick_top = tick.major ? 21 : 36;
+    const int tick_top = tick.major ? major_tick_top : minor_tick_top;
     painter.setPen(tick.major ? QColor(QStringLiteral("#55555f"))
                               : QColor(QStringLiteral("#32323a")));
     painter.drawLine(QPointF(line_x, tick_top),
@@ -608,8 +711,9 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
       continue;
     }
     painter.setPen(QColor(QStringLiteral("#a8a8b2")));
-    painter.drawText(QRectF(label_x, 3.0, static_cast<double>(width()) - label_x,
-                            16.0),
+    painter.drawText(QRectF(label_x, label_top,
+                            static_cast<double>(width()) - label_x,
+                            label_height),
                      Qt::AlignLeft | Qt::AlignVCenter,
                      QString::number(static_cast<qlonglong>(tick.frame)));
   }
@@ -624,38 +728,19 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
   // 色条叠加在刻度/波形之上，播放头最后绘制以保持可见。
   DrawLoopRange(painter,
                 QRectF(0.0, 0.0, static_cast<double>(width()),
-                       static_cast<double>(height() - kScrollBarHeight)));
-  // 标记在色条之上、播放头之下：粉色竖线 + 顶部小旗。
+                       static_cast<double>(ContentBottom())));
+  // 标记在色条之上、播放头之下：粉色竖线 + 小旗。
   DrawMarks(painter,
             QRectF(0.0, 0.0, static_cast<double>(width()),
-                   static_cast<double>(height() - kScrollBarHeight)));
+                   static_cast<double>(ContentBottom())));
 
-  const double playhead_x = model_.FrameToX(current_frame_);
-  const double playhead_bottom =
-      static_cast<double>(height() - kScrollBarHeight);
-  if (playhead_x >= -1.0 && playhead_x <= static_cast<double>(width()) + 1.0) {
-    const double cell_width = std::max(1.0, model_.pixels_per_frame());
-    painter.fillRect(QRectF(playhead_x, 0.0, cell_width, playhead_bottom),
-                     QColor(255, 180, 84, 28));
-    painter.setPen(QPen(QColor(QStringLiteral("#ffb454")), 1.0));
-    painter.drawLine(QPointF(playhead_x + 0.5, 0.0),
-                     QPointF(playhead_x + 0.5, playhead_bottom));
-
-    QPolygonF head;
-    head << QPointF(playhead_x - 5.0, 0.0) << QPointF(playhead_x + 5.0, 0.0)
-         << QPointF(playhead_x, 7.0);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(QStringLiteral("#ffb454")));
-    painter.drawPolygon(head);
-  }
+  DrawPlayhead(painter);
 }
 
 void TimelineWidget::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
-  if (scroll_bar_ != nullptr) {
-    const int scroll_y = std::max(0, height() - kScrollBarHeight);
-    scroll_bar_->setGeometry(0, scroll_y, width(), kScrollBarHeight);
-  }
+  const double scroll_before = model_.scroll();
+  const double ppf_before = model_.pixels_per_frame();
   model_.SetViewportWidth(width());
   if (fit_mode_) {
     model_.Fit();
@@ -663,7 +748,10 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
   if (follow_playhead_ && model_.frame_count() > 0) {
     model_.EnsureFrameVisible(current_frame_, kPlayheadMarginPx);
   }
-  SyncScrollBar();
+  if (std::abs(model_.scroll() - scroll_before) > 1e-9 ||
+      std::abs(model_.pixels_per_frame() - ppf_before) > 1e-9) {
+    NotifyViewChanged();
+  }
   update();
 }
 
@@ -676,14 +764,14 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
   const QPoint angle = event->angleDelta();
   if (event->modifiers().testFlag(Qt::ShiftModifier) && angle.y() != 0) {
     model_.SetScroll(model_.scroll() - static_cast<double>(angle.y()));
-    SyncScrollBar();
+    NotifyViewChanged();
     update();
     event->accept();
     return;
   }
   if (angle.x() != 0 && angle.y() == 0) {
     model_.SetScroll(model_.scroll() + static_cast<double>(angle.x()));
-    SyncScrollBar();
+    NotifyViewChanged();
     update();
     event->accept();
     return;

@@ -1,4 +1,4 @@
-﻿#include "app/ui/Theme.h"
+#include "app/ui/Theme.h"
 
 #include <QApplication>
 #include <QFontDatabase>
@@ -118,9 +118,13 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
   border-color: @err_border; }
 #v2KbdBadge { color: @text_mute; background: @kbdbg; border: 1px solid @kbdborder;
   border-radius: 2px; }
-#infoTimecode { color: @text; }
-#infoFrame { color: @text_dim; }
-#infoTotal { color: @text_mute; }
+#v2Timecode { color: @text; }
+#v2FrameNumber { color: @text_dim; }
+#v2FrameTotal { color: @text_mute; }
+#v2ReadoutEdit { padding: 0 4px; }
+#v2SpeedButton { color: @text_dim; }
+#v2BufferSlot { background: transparent; }
+#v2BufferText { color: @text_meta; }
 #v2StatusMessage { color: @text_dim; }
 #v2StatusSep { background: @border; }
 QStatusBar { background: @surface; border-top: 1px solid @border; }

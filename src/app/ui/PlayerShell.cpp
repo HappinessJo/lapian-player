@@ -1,4 +1,4 @@
-﻿#include "app/ui/PlayerShell.h"
+#include "app/ui/PlayerShell.h"
 
 #include <QApplication>
 #include <QHBoxLayout>
@@ -377,6 +377,7 @@ void PlayerShell::SetInspectorCollapsed(bool collapsed) {
   inspector_rail_->setFixedWidth(collapsed ? tokens_.inspector_collapsed : 26);
   UpdateInspectorToggle();
   ApplySplitSizes();
+  emit inspectorCollapsedChanged(inspector_collapsed_);
 }
 
 void PlayerShell::UpdateInspectorToggle() {

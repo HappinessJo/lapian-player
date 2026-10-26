@@ -1,4 +1,4 @@
-﻿# UI v2 视觉基准（原型 = 唯一参考稿）
+# UI v2 视觉基准（原型 = 唯一参考稿）
 
 - **状态**：生效（2026-10-26，用户拍板）。**所有后续阶段（3B/3C/3D 与任何 UI 改动）在动手前必须先读本文件，
   并把原型渲成截图逐区对照。**
@@ -15,6 +15,9 @@
 > [render-plan-1280.png](ui-v2-proto/render-plan-1280.png)（原型 1280×900）与
 > [render-vs-product-3a5.png](ui-v2-proto/render-vs-product-3a5.png)（上=原型，下=2026-10-26 的 v2 壳层，
 > 用于看清"已对齐/仍缺"的差别）。图是 2026-10-26 渲的，原型改动后请按 §2 重渲并覆盖。
+> 3B 的时间轴逐区对照见 `build/ui-v2-compare-timeline.png`（上=原型、下=产品，2×）——
+> 它是**构建产物**（不入库），复现方法：`--banner-test` 截图后按 §2 的坐标裁剪拼接。
+
 ## 1. 铁律（每个阶段都要遵守）
 
 1. **原型有的一律照原型**：布局、分组、间距、圆角、层级、图标形态、文字层级。原型没有的才自由发挥。
@@ -65,7 +68,7 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
 | 画面区 | `.stage { bg #000 }` | `#v2Stage`/`#v2StageVideo` | ✅ 3A.5 |
 | Transport | `.transport 46px`：左组 5+2 按钮 + 速度 + 静音 + 音量；中间 26px 等宽时间码 + `帧 N / 总 N`；右组 6 开关 | `TransportBar`（`v2Transport`/`v2TransportLeft`/`v2TransportReadout`/`v2TransportRight`/`v2PlayButton`/`v2LoopButton`/…） | ✅ 3A.5（读数改用 `infoTimecode/infoFrame/infoTotal` 原对象） |
 | 按钮态 | `.btn { h=26, min-w=26, radius 3, icon 16, color text-dim }`；`.btn.on { accent 18% 底 + accent 图标 + 35% 边框 }`；播放键实心 accent | QSS `QToolButton` 规则 + `#v2PlayButton`；`BindGlyph()` 在 checked 时换 accent 图标 | ✅ 3A.5 |
-| 时间轴面板 | `.panel.timeline 132`：`.panelhead 26`（◷ 时间轴 + 工作区/视图/缩放）+ 视图窗条 13 + 工作区条 15 + 画布 | `TimelinePanel`（`v2TimelinePanel`/`v2TimelineHead`/`v2WorkMeta`/`v2ViewMeta`/`v2ZoomIn/Out/Fit`）+ 既有 `TimelineWidget` | ⚠️ 头+缩放已对；**两条滑块（视图窗/工作区）仍缺** → 3B |
+| 时间轴面板 | `.panel.timeline 132`：`.panelhead 26`（◷ 时间轴 + 工作区/视图/缩放）+ 视图窗条 13 + 工作区条 15 + 画布 | `TimelinePanel`（`v2TimelinePanel`/`v2TimelineHead`/`v2WorkMeta`/`v2ViewMeta`/`v2ZoomIn/Out/Fit`）+ `RangeBar`（`v2ViewBar`/`v2ViewHandleLeft/Right`/`v2WorkBar`/`v2WorkHandleLeft/Right`）+ 既有 `TimelineWidget` | ✅ 3B（两条滑块、播放头常驻、删内部滚动条；dense 档无头但数值未搬 Transport 副行 → 见 §5-2） |
 | 检查器 | `.ins-head 26` 三 tab（标记/截图 3/信息）+ `+`；列表卡片；标签/备注编辑；`.ins-foot` 存储位置 | 现在只有 `MarkPanel` 自己的表头 | ❌ → 3C（3A 只保留原对象与 getter） |
 | 状态栏 | `.statusbar 24`：左 1 条消息 + 右 3 个指标（音频/缓存/波形） | `QStatusBar` + `noticeInfo/audioInfo/loopInfo/waveformInfo/statusInfo` | ⚠️ 配色已对；**仍是 6 个控件**、`循环: 关` 与 Transport 循环键重复 → 3D |
 | 分隔条 | `.split-h/.split-v { 6px }` + `::after` 1–2px accent 细线（悬停/拖拽时 65% 不透明） | `PlayerSplitter`/`PlayerSplitHandle`（悬停 2px accent） | ✅ 3A.5 |
@@ -92,16 +95,21 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
 
 1. **图标是"形态近似"**：原型是手绘 SVG，当前 `Glyph.cpp` 用 QPainter 画了 30 个近似形（play/pause/循环/flag/相机/…）。
    形状能认、颜色跟令牌，但不是像素级一致；若要精修，改 `Glyph.cpp` 单个函数即可，不影响布局。
-2. **时间轴还缺两条滑块**（视图窗 13px / 工作区 15px）与"标记旗标条"。这是 3B 的主线，
-   面板头已经留好位置与数值（`工作区 … · 循环开` / `视图 … · 适应窗口`）。
+2. **时间轴的波形配色/标记旗标条仍是 3A 的临时值**：两条滑块（视图窗 13px / 工作区 15px）与播放头常驻
+   已在 3B 补上（形态与原型一致），但波形还是 `#7aa2f7` 实色 + `0.62×可用高`（原型是 `--wave` 55% 半透明、
+   独立标记带），标记只有细线 + 3px 小旗（原型是带帧号文字的旗标条）。属"仍缺"，3C/收口再定。
+   另：dense 档（客户区 <520）时间轴按 §3.1 无面板头，但"工作区/视图数值移到 Transport 副行"这半句
+   **3B 未做**（Transport 副行在 502px 宽时只剩 ~190px，塞不下）→ 见 [3B 交接](handoff-2026-10-26-ui-v2-3b.md) §10-2。
 3. **检查器还没 tab 化**：现在直接露出 `MarkPanel` 自己的表头。3C 做 `InspectorPanel`
    （三 tab + 折叠 44 + 页脚存储位置），届时 MarkPanel 只保留列表与编辑区。
 4. **状态栏仍是 6 个控件**：原型是"1 条消息 + 3 指标"。3D 收口（同时把 `--banner-test` 的 `loop=`
    指向 Transport 的循环键，见规划附录 A.3）。
 5. **横幅配色**：容器/高度已对，`warn` 态文案颜色仍来自 `InfoBar::UpdateBannerStyle()`；
    3D 删 InfoBar 时按原型 `.banner` 重写（`#1b1a13` + `#f0cb7a` + 左侧图标）。
-6. **Transport 的宽度降级**只有 3A 的粗粒度（<700 收速度、<640 收 A/B、<520 收次读数）；
-   原型还有 760/660/560 三档 + `tiny` 档隐藏 A/B 与循环药丸，3B 按规划 §3.3 做全量。
+6. **Transport 的宽度降级已按 §3.3 做成四档**（3B）：≥760 全量 / 660–759 收音量（静音保留）/
+   560–659 收 A/B+速度且读数 26→22 / <560 再收首末帧·标记·截图。与原型一样是"按可用宽度退场"，
+   差别只在阈值来源（原型用 `@media` 的窗口宽，产品用 **Transport 自身宽度**，按规划 §3.3）。
+   实测保留集宽度 full 档 `need=736`（阈值 760）。
 7. **画面区圆角**：面板卡片有 4px 圆角，但画面是子 HWND，四角不会跟着剪圆（Qt 无法裁剪原生子窗口）。
    这是实现限制，原型不体现；不要为它加遮罩层去压 HWND。
 
@@ -110,6 +118,10 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
 ## 6. 验收口径（视觉部分）
 
 - `--banner-test` / `--dpi-test` 的截图必须肉眼对得上原型（本文件 §3 的六个区域）。
+- **3B 起另有两个"文字化"的视觉证据**（不靠肉眼）：
+  - `--readout-edit-test` 会打印**全部 tooltip 名+文案**（M5 逐条对照 §2.3）与 **M7 四态几何**
+    （`rel=帧号中心−Transport 中心`，跨播放/暂停/拖动/全屏必须一致）。
+  - `--dpi-test` 会打印 `dpi_bars view/work` 几何（两条滑块的行/轨道位置）与 `dpi_state` 的每栏高度。
 - 每栏高度仍以令牌 ±2px 为准（M4 断言在 `LayoutProblemsForTest()` 里）。
 - 正文对比度 ≥4.5:1（截屏采样，方法见 [3A 交接](handoff-2026-10-26-ui-v2-3a.md) §4.4）。
 - 新增/改动控件必须带稳定 `objectName`（列表见规划 §7.7），否则截图对比与自动化都定位不到。

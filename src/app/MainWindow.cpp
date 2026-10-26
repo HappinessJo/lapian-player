@@ -1,4 +1,4 @@
-﻿#include "app/MainWindow.h"
+#include "app/MainWindow.h"
 
 #include <QAction>
 #include <QApplication>
@@ -40,6 +40,7 @@
 #include <QStringList>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -82,6 +83,7 @@ extern "C" {
 #include "app/ui/BannerSlot.h"
 #include "app/ui/PlayerShell.h"
 #include "app/ui/PlayerSplitter.h"
+#include "app/ui/RangeBar.h"
 #include "app/ui/StageStack.h"
 #include "app/ui/TimelinePanel.h"
 #include "app/ui/Theme.h"
@@ -451,6 +453,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
                 audio_->PlayFrom(playback_->CurrentMediaSeconds());
               }
             }
+            // 3B 缓冲槽：只在在线 buffering/stalled 时出现（本地一律隐藏）。
+            UpdateBufferSlot();
           });
 
   preview_timer_ = new QTimer(this);
@@ -720,10 +724,30 @@ void MainWindow::BuildShellUi() {
   timeline_ = new TimelineWidget(this);
   // A.6：旧壳/单测默认 Fixed（保 128/72 断言）；v2 壳层用 Fill，高度跟着面板走。
   timeline_->SetHeightPolicy(TimelineWidget::HeightPolicy::kFill);
-  if (auto* layout =
-          qobject_cast<QVBoxLayout*>(shell_->timelineHost()->layout())) {
-    layout->addWidget(timeline_, 1);
+  // 3B：画布由 TimelinePanel 托管（面板头 + 视图窗/工作区两条滑块 + 画布），
+  // 两条滑块直接读同一个 TimelineModel（规划 Q3：不存第二份视图状态）。
+  TimelinePanel* panel = shell_->timelinePanel();
+  if (panel != nullptr) {
+    panel->AdoptTimeline(timeline_);
+    connect(panel, &TimelinePanel::viewChanged, this,
+            &MainWindow::UpdateTimelineMeta);
+    connect(panel, &TimelinePanel::workInRequested, this, [this](qint64 frame) {
+      ApplyWorkBarIn(static_cast<std::int64_t>(frame));
+    });
+    connect(panel, &TimelinePanel::workOutRequested, this, [this](qint64 frame) {
+      ApplyWorkBarOut(static_cast<std::int64_t>(frame));
+    });
+    connect(panel, &TimelinePanel::workPanRequested, this,
+            [this](qint64 in, qint64 out) {
+              ApplyWorkBarPan(static_cast<std::int64_t>(in),
+                              static_cast<std::int64_t>(out));
+            });
+    connect(panel, &TimelinePanel::workClearRequested, this,
+            &MainWindow::ApplyWorkBarClear);
   }
+  // 3B：A/B 变化由画布信号驱动面板头（不再轮询）。
+  connect(timeline_, &TimelineWidget::loopRangeChanged, this,
+          &MainWindow::UpdateTimelineMeta);
 
   // 检查器：MarkPanel 原对象（结构/objectName/信号一律不动）。
   mark_panel_ = new MarkPanel(this);
@@ -756,6 +780,9 @@ void MainWindow::BuildShellUi() {
       UpdateTimelineMeta();
     }
   });
+  // 3B：检查器折叠状态由壳层信号驱动（不再靠 250ms 轮询同步 Transport 开关）。
+  connect(shell_, &PlayerShell::inspectorCollapsedChanged, this,
+          [this]() { SyncShellChrome(); });
 }
 
 void MainWindow::AdoptShellWidgets() {
@@ -791,14 +818,25 @@ void MainWindow::AdoptShellWidgets() {
           [this](bool collapsed) { shell_->SetInspectorCollapsed(collapsed); });
   if (info_bar_ != nullptr) {
     transport->AdoptTimecode(
-        info_bar_->findChild<QWidget*>(QStringLiteral("infoTimecode")));
+        info_bar_->findChild<QWidget*>(QStringLiteral("v2Timecode")));
     transport->AdoptFrame(
-        info_bar_->findChild<QWidget*>(QStringLiteral("infoFrame")));
+        info_bar_->findChild<QWidget*>(QStringLiteral("v2FrameNumber")));
     transport->AdoptTotal(
-        info_bar_->findChild<QWidget*>(QStringLiteral("infoTotal")));
+        info_bar_->findChild<QWidget*>(QStringLiteral("v2FrameTotal")));
   }
   transport->AdoptVolume(volume_slider_);
-  transport->AdoptSpeedLabel(speed_label_);
+  // 3B：速度文本仍由 MainWindow 给（FormatSpeed），控件换成 v2SpeedButton；
+  // 点击弹 0.25–2x 菜单（[ / ] 走既有 QAction 不变）。
+  transport->SetSpeedText(speed_label_ == nullptr ? QStringLiteral("1x")
+                                                  : speed_label_->text());
+  connect(transport, &TransportBar::speedSelected, this,
+          [this](double rate) { ApplySpeed(rate); });
+  // 时间码内联输入：复用既有 ApplyGotoText（帧号 / HH:MM:SS:FF 的解析与夹取），
+  // 返回 false 即非法输入 → 控件回滚。
+  transport->SetTimecodeCommit([this](const QString& text) {
+    return ApplyGotoText(text);
+  });
+  // 定时器只用于把状态推给 V2 壳层（3B 起改信号驱动，ui_meta_timer_ 已删）。
 
   if (info_bar_ != nullptr) {
     // 横幅：把 InfoBar 内部的 infoBannerRow（label + 关闭按钮）原对象搬进槽里，
@@ -815,15 +853,11 @@ void MainWindow::AdoptShellWidgets() {
   top->SetFileName(QString());
   UpdateShellModeChip();
   shell_->ApplyClientHeight(height());
-  // 时间轴面板头 / 循环按钮 / 检查器开关的轻量同步（250ms）。
-  // 3B 把时间轴面板换成自己的信号后可以删掉这个定时器。
-  ui_meta_timer_ = new QTimer(this);
-  ui_meta_timer_->setInterval(250);
-  connect(ui_meta_timer_, &QTimer::timeout, this, &MainWindow::SyncShellChrome);
-  ui_meta_timer_->start();
+  // 3B：状态同步去轮询——面板头/循环按钮/工作区滑块由信号与状态变更直接驱动
+  // （ui_meta_timer_ 已删除；时间轴 viewChanged → UpdateTimelineMeta，
+  //  A/B 变化 → SyncLoopUi → SyncShellChrome）。
   SyncShellChrome();
   UpdateShellModeChip();
-  shell_->ApplyClientHeight(height());
 }
 
 void MainWindow::UpdateDensity() {
@@ -912,17 +946,11 @@ void MainWindow::UpdateTimelineMeta() {
     view = QStringLiteral("视图 ——");
   } else {
     const double ppf = std::max(0.001, timeline_->pixels_per_frame());
-    const double start = timeline_->scroll_px();
-    const double width = timeline_->width();
-    std::int64_t first =
-        static_cast<std::int64_t>(std::floor(start / ppf));
-    std::int64_t last =
-        static_cast<std::int64_t>(std::floor((start + width) / ppf));
-    first = std::clamp<std::int64_t>(first, 0, count - 1);
-    last = std::clamp<std::int64_t>(last, first, count - 1);
+    // 视图窗数值与两条滑块/画布同一个来源（TimelineWidget::ViewFrames()）。
+    const std::pair<std::int64_t, std::int64_t> range = timeline_->ViewFrames();
     view = QStringLiteral("视图 %1–%2 · %3")
-               .arg(first)
-               .arg(last)
+               .arg(range.first)
+               .arg(range.second)
                .arg(timeline_->fit_mode()
                         ? QStringLiteral("适应窗口")
                         : QStringLiteral("%1 px/帧").arg(ppf, 0, 'f', 2));
@@ -935,6 +963,11 @@ void MainWindow::SyncShellChrome() {
     return;
   }
   UpdateTimelineMeta();
+  if (shell_->timelinePanel() != nullptr) {
+    shell_->timelinePanel()->SetWorkRange(loop_);
+    shell_->timelinePanel()->SetMediaReady(timeline_ != nullptr &&
+                                           timeline_->frame_count() > 0);
+  }
   if (shell_->transport() != nullptr) {
     shell_->transport()->SetLoopEnabled(loop_.enabled());
     shell_->transport()->SetInspectorCollapsed(shell_->inspector_collapsed());
@@ -1196,11 +1229,20 @@ QString MainWindow::BannerStateForTest() const {
 }
 
 QString MainWindow::BannerUiStateForTest() const {
+  // 3B：`volume=` 的语义从"音量滑条可见"改成"音量入口还在（滑条或静音按钮）"。
+  // 原因：规划 §3.3 的四档宽度降级在 Transport <660 时收起音量滑条、**静音保留**
+  // （--banner-test 的 narrow 相位 Transport 只有 502px），断言的本意是"控件仍
+  // 可达"而不是"滑条必须可见"。改动只影响诊断键，不改变任何 UI 行为。
+  bool volume_affordance = volume_slider_ != nullptr && volume_slider_->isVisible();
+  if (!volume_affordance && shell_ != nullptr && shell_->transport() != nullptr) {
+    QToolButton* mute = shell_->transport()->muteButton();
+    volume_affordance = mute != nullptr && mute->isVisible();
+  }
   return QStringLiteral("timeline=%1 frame=%2 play=%3 volume=%4 loop=%5 notice=%6")
       .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0)
       .arg(InfoFrameTextForTest())
       .arg(play_action_ != nullptr && play_action_->isEnabled() ? 1 : 0)
-      .arg(volume_slider_ != nullptr && volume_slider_->isVisible() ? 1 : 0)
+      .arg(volume_affordance ? 1 : 0)
       .arg(loop_label_ != nullptr && loop_label_->isVisible() ? 1 : 0)
       .arg(notice_label_ != nullptr && notice_label_->isVisible() ? 1 : 0);
 }
@@ -1422,7 +1464,7 @@ QStringList MainWindow::LayoutProblemsLegacy() const {
     };
     const QRect banner_rect = global_rect(banner_label);
     QLabel* frame_label =
-        info_bar_->findChild<QLabel*>(QStringLiteral("infoFrame"));
+        info_bar_->findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
     if (frame_label != nullptr && frame_label->isVisible() &&
         banner_rect.intersects(global_rect(frame_label))) {
       problems << QStringLiteral("banner-overlaps-frame");
@@ -1519,7 +1561,7 @@ QString MainWindow::LayoutStateV2() const {
       }
     }
   }
-  QWidget* timecode = findChild<QWidget*>(QStringLiteral("infoTimecode"));
+  QWidget* timecode = findChild<QWidget*>(QStringLiteral("v2Timecode"));
   if (timecode != nullptr) {
     parts << QStringLiteral("readout=%1").arg(rect_text(timecode->geometry()));
     parts << QStringLiteral("readout_text=%1")
@@ -1619,12 +1661,15 @@ QStringList MainWindow::LayoutProblemsV2() const {
   }
   // 规划 §4.4：横幅出现时不算瞬时态。用"画面 + 横幅槽"高度算稳态占比，
   // 这样 --banner-test 的每个相位都能继续验证 M4 门槛（62/62/55/59）。
+  // 用户把时间轴拖高后画面占比必然下降（340 时约 35%）：§4.4 明确"时间轴在
+  // 用户拖过之后跳过本条"，比值只约束**默认值**，所以这里跳过 stage-ratio-low。
   const int steady_stage_height = stage_->height() + shell_->BannerHeight();
   const double ratio =
       height() <= 0 ? 0.0
                     : 100.0 * steady_stage_height / static_cast<double>(height());
-  if (ratio + 1.0e-9 <
-      lapian::ui::StageRatioFloor(tokens.density, height())) {
+  if (!shell_->timelineUserResized() &&
+      ratio + 1.0e-9 <
+          lapian::ui::StageRatioFloor(tokens.density, height())) {
     problems << QStringLiteral("stage-ratio-low");
   }
 
@@ -1699,7 +1744,7 @@ QStringList MainWindow::LayoutProblemsV2() const {
           banner_rect.intersects(global_rect(statusBar()))) {
         problems << QStringLiteral("banner-overlaps-status");
       }
-      if (QWidget* readout = findChild<QWidget*>(QStringLiteral("infoFrame"))) {
+      if (QWidget* readout = findChild<QWidget*>(QStringLiteral("v2FrameNumber"))) {
         if (readout->isVisible() &&
             banner_rect.intersects(global_rect(readout))) {
           problems << QStringLiteral("banner-overlaps-readout");
@@ -1818,6 +1863,15 @@ void MainWindow::SetSplitSizesForTest(int timeline, int inspector) {
   UpdateDensity();
 }
 
+void MainWindow::SetTimelineHeightForTest(int timeline) {
+  if (shell_ == nullptr) {
+    return;
+  }
+  // 检查器保持当前宽度（折叠时 SetSplitSizes 会忽略它）。
+  shell_->SetSplitSizes(timeline, shell_->InspectorWidth());
+  UpdateDensity();
+}
+
 void MainWindow::DragSplitterForTest(bool vertical, int delta) {
   if (shell_ == nullptr) {
     return;
@@ -1851,17 +1905,125 @@ QString MainWindow::FullScreenChromeForTest() const {
 }
 
 QString MainWindow::ReadoutTextForTest() const {
-  auto* label = findChild<QLabel*>(QStringLiteral("infoTimecode"));
+  auto* label = findChild<QLabel*>(QStringLiteral("v2Timecode"));
   return label == nullptr ? QString() : label->text();
 }
 
 QRect MainWindow::ReadoutGeometryForTest() const {
-  QWidget* widget = findChild<QWidget*>(QStringLiteral("infoTimecode"));
+  QWidget* widget = findChild<QWidget*>(QStringLiteral("v2Timecode"));
   if (widget == nullptr || shell_ == nullptr) {
     return QRect();
   }
   return QRect(shell_->mapFromGlobal(widget->mapToGlobal(QPoint(0, 0))),
                widget->size());
+}
+
+QString MainWindow::TimelineViewFramesForTest() const {
+  if (timeline_ == nullptr || shell_ == nullptr ||
+      shell_->timelinePanel() == nullptr) {
+    return QStringLiteral("view=none");
+  }
+  const std::pair<std::int64_t, std::int64_t> range = timeline_->ViewFrames();
+  QString bar = QStringLiteral("bar=none");
+  if (shell_->timelinePanel()->viewBar() != nullptr) {
+    bar = shell_->timelinePanel()->viewBar()->ViewWindowForTest();
+  }
+  return QStringLiteral("view=%1-%2 %3").arg(range.first).arg(range.second).arg(bar);
+}
+
+bool MainWindow::TimelinePlayheadVisibleForTest() const {
+  return timeline_ != nullptr && timeline_->PlayheadVisible();
+}
+
+QString MainWindow::TransportTierForTest() const {
+  if (shell_ == nullptr || shell_->transport() == nullptr) {
+    return QStringLiteral("tier=legacy");
+  }
+  return shell_->transport()->TierStateForTest();
+}
+
+QString MainWindow::M7StateForTest() const {
+  auto* label = findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
+  if (label == nullptr || shell_ == nullptr || shell_->transport() == nullptr) {
+    return QStringLiteral("visible=0 rect=none transport=none rel=none");
+  }
+  auto rect_text = [](const QRect& rect) {
+    return QStringLiteral("%1,%2 %3x%4")
+        .arg(rect.x())
+        .arg(rect.y())
+        .arg(rect.width())
+        .arg(rect.height());
+  };
+  const QRect label_rect(shell_->mapFromGlobal(label->mapToGlobal(QPoint(0, 0))),
+                         label->size());
+  QWidget* transport = shell_->transport();
+  const QRect transport_rect(
+      shell_->mapFromGlobal(transport->mapToGlobal(QPoint(0, 0))),
+      transport->size());
+  const QPoint label_center = label_rect.center();
+  const QPoint transport_center = transport_rect.center();
+  return QStringLiteral("visible=%1 rect=%2 transport=%3 rel=%4,%5 %6x%7")
+      .arg(label->isVisible() ? 1 : 0)
+      .arg(rect_text(label_rect))
+      .arg(rect_text(transport_rect))
+      .arg(label_center.x() - transport_center.x())
+      .arg(label_center.y() - transport_center.y())
+      .arg(label_rect.width())
+      .arg(label_rect.height());
+}
+
+QString MainWindow::BufferSlotStateForTest() const {
+  if (shell_ == nullptr || shell_->transport() == nullptr ||
+      shell_->transport()->bufferSlot() == nullptr) {
+    return QStringLiteral("visible=0 text=");
+  }
+  QWidget* slot = shell_->transport()->bufferSlot();
+  QLabel* text = shell_->transport()->bufferText();
+  return QStringLiteral("visible=%1 text=%2")
+      .arg(slot->isVisible() ? 1 : 0)
+      .arg(text == nullptr ? QString() : text->text());
+}
+
+bool MainWindow::TimelineBarDragForTest(bool work_bar, int from_x, int to_x) {
+  if (shell_ == nullptr || shell_->timelinePanel() == nullptr) {
+    return false;
+  }
+  RangeBar* bar = work_bar ? shell_->timelinePanel()->workBar()
+                           : shell_->timelinePanel()->viewBar();
+  if (bar == nullptr) {
+    return false;
+  }
+  return bar->DragForTest(from_x, to_x);
+}
+
+QString MainWindow::TimelineBarGeometryForTest() const {
+  if (shell_ == nullptr || shell_->timelinePanel() == nullptr) {
+    return QStringLiteral("bars=none");
+  }
+  auto rect_text = [](const QRect& rect) {
+    return QStringLiteral("%1,%2 %3x%4")
+        .arg(rect.x())
+        .arg(rect.y())
+        .arg(rect.width())
+        .arg(rect.height());
+  };
+  RangeBar* view = shell_->timelinePanel()->viewBar();
+  RangeBar* work = shell_->timelinePanel()->workBar();
+  if (view == nullptr || work == nullptr) {
+    return QStringLiteral("bars=none");
+  }
+  return QStringLiteral("view=%1,%2 %3x%4 work=%5,%6 %7x%8 "
+                        "viewthumb=%9 workthumb=%10")
+      .arg(view->x())
+      .arg(view->y())
+      .arg(view->width())
+      .arg(view->height())
+      .arg(work->x())
+      .arg(work->y())
+      .arg(work->width())
+      .arg(work->height())
+      .arg(rect_text(view->thumbGeometryForTest()))
+      .arg(rect_text(work->thumbGeometryForTest()));
 }
 
 void MainWindow::ShowEmptyState() {
@@ -1909,9 +2071,7 @@ void MainWindow::ShowEmptyState() {
     playback_->SetRate(1.0);
   }
   rate_ = 1.0;
-  if (speed_label_ != nullptr) {
-    speed_label_->setText(QStringLiteral("1x"));
-  }
+  UpdateSpeedText();
   loop_.Clear();
   if (loop_label_ != nullptr) {
     loop_label_->setText(QStringLiteral("循环：关"));
@@ -3301,6 +3461,8 @@ void MainWindow::ApplyOnlineProgress(
   if (!online_ready_) {
     online_total_bytes_ = progress.total;
   }
+  // 3B：缓冲槽跟着下载进度刷新（缓冲中才可见）。
+  UpdateBufferSlot();
   if (online_ready_) {
     return;  // 首帧后不覆盖播放/seek 状态栏；下载继续在后台。
   }
@@ -4154,6 +4316,8 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_cache_hit_ = false;
   online_cache_path_.clear();
   online_owner_.clear();
+  // 3B：退出在线后缓冲槽必须收起（本地播放不显示）。
+  UpdateBufferSlot();
   online_fps_ = 0.0;
   online_actual_fps_ = 0.0;
   online_source_fps_hint_ = 0.0;
@@ -5272,7 +5436,7 @@ void MainWindow::BeginIndexScan() {
   }
   slower_action_->setEnabled(true);
   faster_action_->setEnabled(true);
-  speed_label_->setText(FormatSpeed(rate_));
+  UpdateSpeedText();
   SyncLoopUi();
   // 索引就绪后再加载标记：MarkStore 需要索引做 frame+pts 校正。
   // T8.7 缓存命中：在线记录已在打开时加载并先于索引可见，扫描中不能清空。
@@ -5434,7 +5598,7 @@ void MainWindow::ApplyIndexState() {
   }
   slower_action_->setEnabled(true);
   faster_action_->setEnabled(true);
-  speed_label_->setText(FormatSpeed(rate_));
+  UpdateSpeedText();
   // 扫描完成：总帧数从“扫描中”变为索引的精确/估算值；失败则回到容器值。
   // VFR 的总帧数按 T6.5 口径保持“扫描中”（帧号按显示帧计数，不承诺精确总数），
   // 不因为后台索引完成而改写这一提示语义。
@@ -6142,14 +6306,40 @@ void MainWindow::ToggleWaveform(bool visible) {
   ScheduleSettingsSave();
 }
 
+void MainWindow::UpdateSpeedText() {
+  const QString text = FormatSpeed(rate_);
+  // 旧壳留在状态栏；v2 在 Transport 的速度按钮上（同一个文本来源）。
+  if (speed_label_ != nullptr) {
+    speed_label_->setText(text);
+  }
+  if (shell_ != nullptr && shell_->transport() != nullptr) {
+    shell_->transport()->SetSpeedText(text);
+  }
+}
+
+void MainWindow::UpdateBufferSlot() {
+  if (shell_ == nullptr || shell_->transport() == nullptr) {
+    return;
+  }
+  const bool buffering =
+      online_mode_ && playback_ != nullptr && playback_->IsBuffering();
+  if (!buffering) {
+    shell_->transport()->SetBufferState(false, 0, 0);
+    return;
+  }
+  const qint64 cached = std::max<qint64>(online_published_bytes_,
+                                         session_ != nullptr
+                                             ? session_->GrowingPublished()
+                                             : 0);
+  shell_->transport()->SetBufferState(true, cached, online_total_bytes_);
+}
+
 void MainWindow::ApplySpeed(double rate) {
   if (!std::isfinite(rate)) {
     return;
   }
   rate_ = std::clamp(rate, 0.25, 2.0);
-  if (speed_label_ != nullptr) {
-    speed_label_->setText(FormatSpeed(rate_));
-  }
+  UpdateSpeedText();
   if (playback_ != nullptr) {
     playback_->SetRate(rate_);
   }
@@ -6201,6 +6391,9 @@ void MainWindow::SyncLoopUi() {
     playback_->SetLoopRange(loop_.enabled() && loop_.complete(), loop_.in(),
                             loop_.out());
   }
+  // UI v2 3B：A/B 变化直接推给工作区滑块 + Transport 循环按钮 + 面板头
+  // （不再靠 250ms 定时器轮询）。
+  SyncShellChrome();
   if (loop_label_ == nullptr) {
     return;
   }
@@ -6334,6 +6527,55 @@ void MainWindow::ClearLoop() {
   if (IsTextInputFocused()) {
     return;
   }
+  ApplyLoopClear();
+}
+
+void MainWindow::ApplyWorkBarIn(std::int64_t frame) {
+  if (!CanEditLoop() || frame < 0) {
+    return;
+  }
+  // 走既有 LoopRange 语义：A 晚于当前 B 时清除 B 并关循环（不静默交换）。
+  loop_.SetIn(frame);
+  SyncLoopUi();
+}
+
+void MainWindow::ApplyWorkBarOut(std::int64_t frame) {
+  if (!CanEditLoop() || frame < 0) {
+    return;
+  }
+  if (!loop_.has_in()) {
+    // 工作区条的"全片"状态没有 A：先把 A 落在 0，否则 SetOut 会被拒绝。
+    loop_.SetIn(0);
+  }
+  // B < A 时 LoopRange 拒绝，区间保持不变（F4-A8）。
+  loop_.SetOut(std::max(frame, loop_.in()));
+  SyncLoopUi();
+}
+
+void MainWindow::ApplyWorkBarPan(std::int64_t in, std::int64_t out) {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const std::int64_t last =
+      static_cast<std::int64_t>(session_->index().size()) - 1;
+  in = std::clamp<std::int64_t>(in, 0, last);
+  out = std::clamp<std::int64_t>(out, in, last);
+  const bool was_enabled = loop_.enabled();
+  loop_.SetIn(in);
+  loop_.SetOut(out);
+  // 平移可能先撞到"新 A 晚于旧 B"而清掉 B/关循环；按平移前的开关状态恢复，
+  // 避免"拖一下工作区就把循环关了"。
+  if (was_enabled && loop_.complete() && !loop_.enabled()) {
+    loop_.Toggle();
+  }
+  SyncLoopUi();
+}
+
+void MainWindow::ApplyWorkBarClear() {
+  if (loop_label_ == nullptr) {
+    return;
+  }
+  // 双击工作区 = 清除 A/B（与 Shift+L 同一条路径，含"没有 A/B 可清除"）。
   ApplyLoopClear();
 }
 
@@ -7152,6 +7394,10 @@ void MainWindow::EnterFullScreen() {
   if (shell_ != nullptr) {
     shell_->SetFullScreenChrome(true);
     statusBar()->hide();
+    if (shell_->transport() != nullptr) {
+      // M5 第 17 行：全屏时全屏按钮的 tooltip 变成"退出全屏（Esc）"。
+      shell_->transport()->SetFullScreenActive(true);
+    }
   }
   UpdateFullScreenActionState();
   RestoreFocusIfNeeded(fullscreen_focus_widget_);
@@ -7185,6 +7431,9 @@ void MainWindow::ExitFullScreen() {
     shell_->SetFullScreenChrome(false);
     statusBar()->show();
     UpdateDensity();
+    if (shell_->transport() != nullptr) {
+      shell_->transport()->SetFullScreenActive(false);
+    }
   }
   UpdateFullScreenActionState();
   // 全屏切换不应让键盘焦点消失：优先恢复到退出前的控件，其次退回进入前的。
@@ -7591,8 +7840,9 @@ void MainWindow::ClickTimelineForTest(int x, int y) {
 }
 
 QString MainWindow::InfoFrameTextForTest() const {
-  // 帧号 label 在 v2 被 reparent 到 Transport 读数块，所以从窗口向下找。
-  const QLabel* label = findChild<QLabel*>(QStringLiteral("infoFrame"));
+  // 帧号 label 在 v2 被 reparent 到 Transport 读数块（objectName=v2FrameNumber），
+  // 所以从窗口向下找。
+  const QLabel* label = findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
   return label == nullptr ? QString() : label->text();
 }
 
@@ -7613,7 +7863,7 @@ bool MainWindow::TimelineVisibleForTest() const {
 bool MainWindow::InfoBarVisibleForTest() const {
   // v2：信息（帧号/时间码读数）在 Transport 里，全屏仍在；旧壳读 InfoBar 可见性。
   if (shell_ != nullptr) {
-    QWidget* frame = findChild<QWidget*>(QStringLiteral("infoFrame"));
+    QWidget* frame = findChild<QWidget*>(QStringLiteral("v2FrameNumber"));
     return frame != nullptr && frame->isVisible();
   }
   return info_bar_ != nullptr && info_bar_->isVisible();

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // UI v2 设计令牌（规划 §4.2/§4.3）。纯常量 + 纯函数，**不依赖 Qt**，
 // 这样 Theme 与单测都能复用，且不会把壳层的依赖引到 core/media。
@@ -114,6 +114,14 @@ struct Tokens {
   int chip = 20;    // 顶栏 chip
   int play = 34;    // 播放按钮高
   int readout = 26; // 时间码主读数高
+  int input = 22;   // 帧号/时间码内联输入框（h-input）
+
+  // 时间轴两条滑块（规划 §4.2 h-track-zoom / h-track-work + §4.5 行高）。
+  // track_* 是**视觉**轨道高；row_* 是拖拽热区（整行都能拖，不然 4px 太难点）。
+  int track_zoom = 4;
+  int track_work = 10;
+  int row_zoom = 13;
+  int row_work = 15;
 
   // 面板
   int inspector = 304;
@@ -163,6 +171,8 @@ inline Tokens MakeTokens(Density density) {
       t.inspector_head = 24;
       t.fs_readout = 22.0;
       t.fs_readout_sm = 20.0;
+      t.row_zoom = 12;
+      t.row_work = 14;
       break;
     case Density::kDense:
       t.appbar = 30;
@@ -179,6 +189,8 @@ inline Tokens MakeTokens(Density density) {
       t.inspector_head = 22;
       t.fs_readout = 22.0;
       t.fs_readout_sm = 20.0;
+      t.row_zoom = 12;
+      t.row_work = 14;
       break;
   }
   return t;

@@ -1,4 +1,4 @@
-﻿#include <QAbstractButton>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
@@ -10,8 +10,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QMouseEvent>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
@@ -73,6 +76,222 @@ bool HasArgument(int argc, char* argv[], const char* flag) {
     }
   }
   return false;
+}
+
+// 3B：主参数的 else-if 链已经到 MSVC 的"块嵌套太深"上限（C1061），3B 的两个
+// 专用参数在进链之前先摘出来（连同它们的值一起从列表里删掉，否则值会被当成
+// 位置参数当成文件路径）。
+QStringList ExtractUiV2Args(const QStringList& args, int* timeline_height,
+                            bool* readout_edit_test) {
+  QStringList filtered;
+  filtered.reserve(args.size());
+  for (int i = 0; i < args.size(); ++i) {
+    if (args[i] == QStringLiteral("--timeline-height") &&
+        i + 1 < args.size()) {
+      if (timeline_height != nullptr) {
+        *timeline_height = args[++i].toInt();
+      } else {
+        ++i;
+      }
+      continue;
+    }
+    if (args[i] == QStringLiteral("--readout-edit-test")) {
+      if (readout_edit_test != nullptr) {
+        *readout_edit_test = true;
+      }
+      continue;
+    }
+    filtered << args[i];
+  }
+  return filtered;
+}
+
+// 3B：时间码内联输入（M5 第 6 行 + "输入框聚焦时全局键让位"）。
+// 走真实控件路径：点标签 → QLineEdit 出现 → Enter/失焦提交、Esc 取消、
+// 非法输入回滚；解析复用 ApplyGotoText（帧号 + HH:MM:SS:FF）。
+// 独立函数是为了不把 main 里的测试 lambda 再往下嵌一层（MSVC 嵌套上限）。
+void RunReadoutEditTest(MainWindow& window) {
+  auto failures = std::make_shared<int>(0);
+  auto check = [failures](const char* name, bool ok) {
+    if (!ok) {
+      ++(*failures);
+    }
+    std::fprintf(stderr, "T6.2 readout_check %s ok=%d\n", name, ok ? 1 : 0);
+    std::fflush(stderr);
+  };
+  QTimer::singleShot(700, &window, [&window, check, failures]() {
+    auto label = window.findChild<QLabel*>(QStringLiteral("v2Timecode"));
+    check("label-present", label != nullptr && label->isVisible());
+    if (label == nullptr) {
+      QCoreApplication::exit(*failures == 0 ? 0 : 1);
+      return;
+    }
+    auto click_label = [label]() {
+      const QPointF local(label->width() / 2.0, label->height() / 2.0);
+      const QPointF global = label->mapToGlobal(local.toPoint());
+      QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton,
+                        Qt::LeftButton, Qt::NoModifier);
+      QApplication::sendEvent(label, &press);
+      QMouseEvent release(QEvent::MouseButtonRelease, local, global,
+                          Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(label, &release);
+    };
+    auto send_key = [&window](int key, int modifiers = 0) {
+      QWidget* target = QApplication::focusWidget();
+      if (target == nullptr) {
+        target = &window;
+      }
+      QKeyEvent press(QEvent::KeyPress, key, Qt::KeyboardModifiers(modifiers),
+                      QString(), false);
+      QApplication::sendEvent(target, &press);
+      QKeyEvent release(QEvent::KeyRelease, key,
+                        Qt::KeyboardModifiers(modifiers), QString(), false);
+      QApplication::sendEvent(target, &release);
+    };
+
+    click_label();
+    auto edit = window.findChild<QLineEdit*>(QStringLiteral("v2ReadoutEdit"));
+    check("edit-created", edit != nullptr);
+    if (edit == nullptr) {
+      QCoreApplication::exit(*failures == 0 ? 0 : 1);
+      return;
+    }
+    check("edit-visible", edit->isVisible());
+    check("edit-focused", QApplication::focusWidget() == edit);
+    check("edit-text-focus", window.IsTextInputFocusedForTest());
+    check("label-hidden-while-editing", !label->isVisible());
+
+    // 全局键让位：Space/PgDn/W/M/L/I/O/S/F/[ ] 都不得改变播放状态。
+    const QString state_before = window.KeyStateForTest();
+    const int keys[] = {Qt::Key_Space, Qt::Key_PageDown, Qt::Key_PageUp,
+                        Qt::Key_W,     Qt::Key_M,        Qt::Key_L,
+                        Qt::Key_I,     Qt::Key_O,        Qt::Key_S,
+                        Qt::Key_F,     Qt::Key_BracketLeft,
+                        Qt::Key_BracketRight};
+    for (const int key : keys) {
+      send_key(key);
+    }
+    check("keys-yield", window.KeyStateForTest() == state_before);
+
+    // Enter 提交帧号；成功后 edit 收起、标签回来、帧号到位。
+    edit->setText(QStringLiteral("123"));
+    send_key(Qt::Key_Return);
+    check("commit-frame", window.CurrentFrameForTest() == 123);
+    check("edit-hidden-after-commit", !edit->isVisible());
+    check("label-back", label->isVisible());
+    std::fprintf(stderr, "T6.2 readout_commit frame=%lld label=%s\n",
+                 static_cast<long long>(window.CurrentFrameForTest()),
+                 window.ReadoutTextForTest().toUtf8().constData());
+    std::fflush(stderr);
+
+    // HH:MM:SS:FF：00:00:02:00 = 第 2 秒 = 30fps 下的第 60 帧。
+    click_label();
+    edit->setText(QStringLiteral("00:00:02:00"));
+    send_key(Qt::Key_Return);
+    const qint64 tc_frame = window.CurrentFrameForTest();
+    std::fprintf(stderr, "T6.2 readout_timecode frame=%lld text=%s\n",
+                 static_cast<long long>(tc_frame),
+                 window.ReadoutTextForTest().toUtf8().constData());
+    std::fflush(stderr);
+    check("commit-timecode", tc_frame == 60);
+
+    // Esc 取消：帧号不变。
+    const qint64 before_esc = window.CurrentFrameForTest();
+    click_label();
+    edit->setText(QStringLiteral("99999"));
+    send_key(Qt::Key_Escape);
+    check("esc-cancels", window.CurrentFrameForTest() == before_esc);
+    check("esc-keeps-label", label->isVisible());
+
+    // 非法输入：回滚，不跳帧。
+    const qint64 before_bad = window.CurrentFrameForTest();
+    click_label();
+    edit->setText(QStringLiteral("abc"));
+    send_key(Qt::Key_Return);
+    check("invalid-rollback", window.CurrentFrameForTest() == before_bad);
+    check("invalid-label-back", label->isVisible());
+
+    // 失焦提交。
+    click_label();
+    edit->setText(QStringLiteral("42"));
+    window.ClearFocusForTest();
+    QCoreApplication::processEvents();
+    check("blur-commits", window.CurrentFrameForTest() == 42);
+
+    // M7：帧号控件在播放/暂停/拖动/全屏四态的几何（rel = 帧号中心 − Transport
+    // 中心；窗口尺寸变了也只有这个量能跨态比较）。四态都必须可见。
+    auto log_m7 = [&window, check](const char* phase, QString* baseline) {
+      const QString state = window.M7StateForTest();
+      std::fprintf(stderr, "T6.2 readout_m7 %s %s\n", phase,
+                   state.toUtf8().constData());
+      std::fflush(stderr);
+      check((std::string("m7-visible-") + phase).c_str(),
+            state.contains(QStringLiteral("visible=1")));
+      const int rel_pos = state.indexOf(QStringLiteral("rel="));
+      const QString rel = rel_pos < 0 ? QString() : state.mid(rel_pos);
+      if (baseline->isEmpty()) {
+        *baseline = rel;
+      }
+      check((std::string("m7-rel-") + phase).c_str(), rel == *baseline);
+    };
+    QString m7_baseline;
+    window.ClearFocusForTest();
+    // 固定在同一帧号（100，3 位数）比较：帧号文本宽度一变，居中块的中心就会
+    // 跟着挪几像素（那不是"位置不稳定"，是数字变宽）。
+    auto goto_100 = [&window]() {
+      window.GoToFrameForTest(100);
+      QCoreApplication::processEvents();
+    };
+    goto_100();
+    log_m7("paused", &m7_baseline);
+    window.TogglePlaybackForTest();
+    QCoreApplication::processEvents();
+    log_m7("playing", &m7_baseline);
+    window.TogglePlaybackForTest();
+    QCoreApplication::processEvents();
+    goto_100();
+    window.ScrubStartForTest(100);
+    window.ScrubTargetForTest(100);
+    QCoreApplication::processEvents();
+    log_m7("scrubbing", &m7_baseline);
+    window.ScrubFinishForTest(100);
+    QCoreApplication::processEvents();
+    goto_100();
+    window.ToggleFullScreenForTest();
+    QCoreApplication::processEvents();
+    log_m7("fullscreen", &m7_baseline);
+    // M5 第 17 行：全屏时全屏按钮的 tooltip 变成"退出全屏（Esc）"。
+    if (QWidget* full = window.findChild<QWidget*>(QStringLiteral("v2FullScreenButton"))) {
+      std::fprintf(stderr, "T6.2 readout_exit_tooltip %s\n",
+                   full->toolTip().toUtf8().constData());
+      std::fflush(stderr);
+      check("m5-exit-fullscreen-tooltip",
+            full->toolTip() == QStringLiteral("退出全屏（Esc）"));
+    }
+    window.ToggleFullScreenForTest();
+    QCoreApplication::processEvents();
+    if (QWidget* full = window.findChild<QWidget*>(QStringLiteral("v2FullScreenButton"))) {
+      check("m5-enter-fullscreen-tooltip",
+            full->toolTip() == QStringLiteral("全屏（F / 双击画面）"));
+    }
+
+    std::fprintf(stderr, "T6.2 readout_summary fails=%d tier=%s split=%s\n",
+                 *failures, window.TransportTierForTest().toUtf8().constData(),
+                 window.SplitterStateForTest().toUtf8().constData());
+    std::fflush(stderr);
+    // M5 证据：把带 tooltip 的控件名与文案整表打出来（交接里逐条对照 §2.3）。
+    for (QWidget* widget : window.findChildren<QWidget*>()) {
+      const QString tip = widget->toolTip();
+      if (tip.isEmpty()) {
+        continue;
+      }
+      std::fprintf(stderr, "T6.2 tooltip %s | %s\n",
+                   widget->objectName().toUtf8().constData(),
+                   tip.toUtf8().constData());
+    }
+    std::fflush(stderr);
+    QCoreApplication::exit(*failures == 0 ? 0 : 1);
+  });
 }
 
 }  // namespace
@@ -568,6 +787,8 @@ int main(int argc, char* argv[]) {
   bool snapshot_test = false;
   bool fullscreen_test = false;
   bool key_test = false;
+  // 3B：时间码内联输入（提交/取消/回滚/全局键让位）。
+  bool readout_edit_test = false;
   bool settings_test = false;
   bool settings_expect = false;
   bool dpi_test = false;
@@ -593,6 +814,8 @@ int main(int argc, char* argv[]) {
   bool drag_fast = false;
   int drag_fast_step = 60;
   int drag_fast_cycles = 1;
+  // 3B：时间轴几何（0 = 令牌默认；--timeline-height 340 用于 R6/R11 的第二组几何）。
+  int timeline_height = 0;
   // DP-2：远跳粗帧探针。
   bool drag_far = false;
   // DP-3：慢拖/快拖/反向/远跳/松手策略矩阵探针。
@@ -705,7 +928,9 @@ int main(int argc, char* argv[]) {
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
-  const QStringList arguments = QCoreApplication::arguments();
+  const QStringList arguments =
+      ExtractUiV2Args(QCoreApplication::arguments(), &timeline_height,
+                      &readout_edit_test);
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
@@ -1566,6 +1791,14 @@ int main(int argc, char* argv[]) {
       drag_runner->EnableFarTest();
     }
     drag_runner->SetFastCycles(drag_fast_cycles);
+    // 3B：时间轴几何必须在 runner 打开文件/开始测量之前落地（R6/R11 两种几何）。
+    if (timeline_height > 0) {
+      window.SetTimelineHeightForTest(timeline_height);
+      std::fprintf(stderr, "T7.4 timeline_height requested=%d split=%s\n",
+                   timeline_height,
+                   window.SplitterStateForTest().toUtf8().constData());
+      std::fflush(stderr);
+    }
     drag_runner->Start();
   }
 
@@ -1883,7 +2116,7 @@ int main(int argc, char* argv[]) {
       !gop_boundary_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
-                                    mark_test, note_test,
+                                    mark_test, note_test, readout_edit_test,
                                     snapshot_test, fullscreen_test, key_test, settings_test,
                                     settings_expect, settings_expect_volume,
                                     settings_expect_waveform, settings_root, dpi_test,
@@ -1892,7 +2125,7 @@ int main(int argc, char* argv[]) {
                                     snapshot_pictures_root, playback_rate,
                                     has_playback_rate, process_start, startup_test,
                                     index_test, startup_log, startup_ms, log_startup,
-                                    log_startup_at]() {
+                                    log_startup_at, timeline_height]() {
       if (startup_log) {
         std::fprintf(stderr, "T7.1 startup stage=open_begin t_ms=%.2f\n",
                      startup_ms(std::chrono::steady_clock::now()));
@@ -1900,6 +2133,15 @@ int main(int argc, char* argv[]) {
       }
       window.OpenFile(file_path);
       log_startup("open_returned");
+      // 3B：--timeline-height 让 P4/P6 在"时间轴 132 / 340"两种几何下各测一次
+      // （规划 R6/R11）。走 SetSplitSizesForTest 的同一条夹取路径。
+      if (timeline_height > 0) {
+        window.SetTimelineHeightForTest(timeline_height);
+        std::fprintf(stderr, "T7.4 timeline_height requested=%d split=%s\n",
+                     timeline_height,
+                     window.SplitterStateForTest().toUtf8().constData());
+        std::fflush(stderr);
+      }
       if (startup_test && !window.HasMediaForTest()) {
         std::fprintf(stderr, "T7.1 startup stage=open_failed\n");
         std::fflush(stderr);
@@ -2192,6 +2434,9 @@ int main(int argc, char* argv[]) {
           check("frame-in-range", frame >= 0 && frame <= last);
           QCoreApplication::exit(*failures == 0 ? 0 : 1);
         });
+      }
+      if (readout_edit_test) {
+        RunReadoutEditTest(window);
       }
       if (mark_test) {
         // T5.2：101 个标记（0–100）、重开、点击跳转、100 标记操作与性能、
@@ -3675,8 +3920,83 @@ int main(int argc, char* argv[]) {
                   std::min(500, std::max(360, available.height() - 64));
               window.resize(820, narrow_height);
               QTimer::singleShot(250, &window,
-                                 [&window, verify, failures]() {
+                                 [&window, verify, failures, check]() {
                 verify("narrow");
+                // 3B 的两个新用例只对新壳有意义（旧壳没有时间轴面板/两条滑块，
+                // 也没有 Transport 档位）；旧壳保持 3A 的 3 相位不动。
+                if (!window.UiV2ForTest()) {
+                  QCoreApplication::exit(*failures == 0 ? 0 : 1);
+                  return;
+                }
+                // 3B 新用例 ①：档位切换（640/520 边界来回拖）——每次落档后
+                // 布局断言必须仍为空（"每栏 = 令牌 ±2" 在换档后同样成立）。
+                // 注意 1：20px 迟滞带（620–639 / 500–519）里画面占比**必然**低于
+                // M4 门槛（M4 只在那 4 个几何上定义），所以这里只排除
+                // stage-ratio-low，其余布局断言一条不放。
+                // 注意 2：高 DPI 下屏幕可用逻辑高度装不下 640/660 的窗口，按
+                // 可用高度夹取并在日志里打印实际高度（不是所有 DPI 都测得到边界）。
+                const QSize avail = window.AvailableScreenForTest();
+                // 先把窗口贴到 (0,0)：否则 150%/200% 下"窗口右上角 + 标题栏"
+                // 会超出可用区，被 window-outside-screen 判红（与裁切无关）。
+                window.move(0, 0);
+                QCoreApplication::processEvents();
+                const int max_h = std::max(400, avail.height() - 48);
+                const int win_w =
+                    std::min(1280, std::max(700, avail.width() - 40));
+                const int heights[] = {500, 640, 639, 660, 520, 519, 640, 500};
+                for (const int h : heights) {
+                  const int target_h = std::min(h, max_h);
+                  window.resize(win_w, target_h);
+                  QCoreApplication::processEvents();
+                  QStringList problems = window.LayoutProblemsForTest();
+                  problems.removeAll(QStringLiteral("stage-ratio-low"));
+                  for (const QString& problem : problems) {
+                    std::fprintf(stderr,
+                                 "T6.4 dpi_problem tier-switch-%d %s\n", h,
+                                 problem.toUtf8().constData());
+                  }
+                  std::fprintf(stderr,
+                               "T6.4 dpi_tier h=%d applied=%d tier=%s shell=%s\n",
+                               h, target_h,
+                               window.DensityNameForTest().toUtf8().constData(),
+                               window.ShellStateForTest().toUtf8().constData());
+                  std::fflush(stderr);
+                  check((std::string("tier-switch-") + std::to_string(h) +
+                         "-layout").c_str(),
+                        problems.isEmpty());
+                }
+                // 3B 新用例 ②：时间轴拖到 340（最大值）——不裁切、不顶出面板。
+                // 200% DPI（可用高 ~516）时 340 在物理上放不下（画面会被压到
+                // 170 以下），此时只断言"布局合法"，tl 值按实际打印。
+                window.resize(win_w, std::min(720, max_h));
+                QCoreApplication::processEvents();
+                window.SetTimelineHeightForTest(340);
+                const QString split_after = window.SplitterStateForTest();
+                const bool room_for_340 = max_h >= 640;
+                std::fprintf(stderr,
+                             "T6.4 dpi_tier340 max_h=%d room=%d split=%s\n",
+                             max_h, room_for_340 ? 1 : 0,
+                             split_after.toUtf8().constData());
+                std::fflush(stderr);
+                QCoreApplication::processEvents();
+                verify("timeline-340");
+                const QString bars = window.TimelineBarGeometryForTest();
+                std::fprintf(stderr, "T6.4 dpi_bars %s split=%s view=%s tier=%s\n",
+                             bars.toUtf8().constData(),
+                             window.SplitterStateForTest().toUtf8().constData(),
+                             window.TimelineViewFramesForTest().toUtf8().constData(),
+                             window.TransportTierForTest().toUtf8().constData());
+                std::fflush(stderr);
+                check("timeline-340-height",
+                      !room_for_340 ||
+                          window.SplitterStateForTest().contains(
+                              QStringLiteral("tl=340")));
+                const QStringList tall = window.LayoutProblemsForTest();
+                for (const QString& problem : tall) {
+                  std::fprintf(stderr, "T6.4 dpi_problem timeline-340 %s\n",
+                               problem.toUtf8().constData());
+                }
+                check("timeline-340-layout", tall.isEmpty());
                 QCoreApplication::exit(*failures == 0 ? 0 : 1);
               });
             });

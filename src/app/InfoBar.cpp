@@ -53,16 +53,18 @@ InfoBar::InfoBar(QWidget* parent) : QWidget(parent) {
   format_label_ = new QLabel(this);
   format_label_->setObjectName(QStringLiteral("infoFormat"));
   frame_label_ = new QLabel(this);
-  frame_label_->setObjectName(QStringLiteral("infoFrame"));
+  // UI v2 3B：读数（帧号/总帧/时间码）在 Transport 里；objectName 按规划 §7.7
+  // 改成 v2*（这三个名字不在"沿用旧名"的 17 项里），对象与文本口径不变。
+  frame_label_->setObjectName(QStringLiteral("v2FrameNumber"));
   QFont frame_font = frame_label_->font();
   frame_font.setPointSize(16);
   frame_font.setBold(true);
   frame_label_->setFont(frame_font);
   timecode_label_ = new QLabel(this);
-  timecode_label_->setObjectName(QStringLiteral("infoTimecode"));
+  timecode_label_->setObjectName(QStringLiteral("v2Timecode"));
   timecode_label_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   total_label_ = new QLabel(this);
-  total_label_->setObjectName(QStringLiteral("infoTotal"));
+  total_label_->setObjectName(QStringLiteral("v2FrameTotal"));
 
   // T8.12/DEC-4：帧号右侧常驻角标。只显示实际流 fps（有证据时附“降帧”）。
   online_fps_badge_ = new QLabel(this);

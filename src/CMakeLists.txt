@@ -1,4 +1,4 @@
-﻿# 复制 FFmpeg 运行时 DLL 到目标目录（构建后即可直接运行）
+# 复制 FFmpeg 运行时 DLL 到目标目录（构建后即可直接运行）
 function(lapian_copy_ffmpeg_dlls target)
   if(LAPIAN_FFMPEG_RUNTIME_DLLS)
     add_custom_command(TARGET ${target} POST_BUILD
@@ -229,6 +229,8 @@ qt_add_executable(lapian WIN32
   app/ui/StageStack.cpp
   app/ui/TransportBar.h
   app/ui/TransportBar.cpp
+  app/ui/RangeBar.h
+  app/ui/RangeBar.cpp
   app/ui/PlayerShell.h
   app/ui/PlayerShell.cpp
   app/CacheSettingsDialog.cpp

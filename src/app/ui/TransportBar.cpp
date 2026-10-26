@@ -1,21 +1,37 @@
 #include "app/ui/TransportBar.h"
 
 #include <QAction>
+#include <QEvent>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QProgressBar>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 #include "app/ui/Glyph.h"
 #include "app/ui/Theme.h"
+#include "core/MediaClock.h"
 
 namespace {
 
 using lapian::ui::GlyphId;
+
+// 规划 §3.3 的四档宽度边界（按 **Transport 自身宽度**，不是视口宽）。
+// 预算是 §4.6 的 750px 全量：≥760 全保留、660–759 收音量、560–659 再收
+// A/B+速度（读数 26→22）、<560 再收首末帧/标记/截图。
+// 实测校准见交接：保留集实测 need=736（full 档），阈值留了 3% 余量。
+constexpr int kTierVolumeWidth = 760;
+constexpr int kTierAbSpeedWidth = 660;
+constexpr int kTierFirstLastWidth = 560;
 
 QColor Dim() { return lapian::ui::Color(lapian::ui::kColorTextDim); }
 QColor Accent() { return lapian::ui::Color(lapian::ui::kColorAccent); }
@@ -79,14 +95,18 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   sep_ab_ = MakeSeparator(left_group_);
   left->addWidget(sep_ab_);
 
-  // 速度：3A 沿用 MainWindow 的 speedInfo 标签（[ / ] 调整），3B 换按钮 + 菜单。
-  speed_slot_ = new QWidget(left_group_);
-  speed_slot_->setObjectName(QStringLiteral("v2SpeedSlot"));
-  auto* speed_layout = new QHBoxLayout(speed_slot_);
-  speed_layout->setContentsMargins(6, 0, 6, 0);
-  speed_layout->setSpacing(0);
-  speed_slot_->setToolTip(QStringLiteral("播放速度（[ / ]）"));
-  left->addWidget(speed_slot_);
+  // 速度：3B 换成真按钮（26px 高，点击弹 0.25–2x 菜单，[ / ] 仍可用）。
+  speed_button_ = new QToolButton(left_group_);
+  speed_button_->setObjectName(QStringLiteral("v2SpeedButton"));
+  speed_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  speed_button_->setFocusPolicy(Qt::NoFocus);
+  speed_button_->setAutoRaise(true);
+  speed_button_->setText(QStringLiteral("1x"));
+  speed_button_->setToolTip(QStringLiteral("播放速度（[ / ]）"));
+  speed_button_->setFixedSize(34, 26);
+  connect(speed_button_, &QToolButton::clicked, this,
+          &TransportBar::ShowSpeedMenu);
+  left->addWidget(speed_button_, 0, Qt::AlignVCenter);
 
   mute_button_ = MakeIconButton("v2MuteButton", left_group_);
   mute_button_->setToolTip(QStringLiteral("静音（M）"));
@@ -103,14 +123,15 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   row->addWidget(left_group_, 0, Qt::AlignVCenter);
   row->addStretch(1);
 
-  // ── 读数块：26px 等宽时间码（主）+ 帧号/总帧（次）───────────────────
+  // ── 读数块：26px 等宽时间码（主，可点击输入）+ 帧号/总帧（次）───────
   readout_slot_ = new QWidget(this);
   readout_slot_->setObjectName(QStringLiteral("v2TransportReadout"));
   auto* readout_layout = new QVBoxLayout(readout_slot_);
   readout_layout->setContentsMargins(0, 0, 0, 0);
   readout_layout->setSpacing(0);
   timecode_slot_ = new QWidget(readout_slot_);
-  timecode_slot_->setObjectName(QStringLiteral("v2Timecode"));
+  // 名字给**标签本身**（规划 §7.7 的 v2Timecode）；外层 slot 用 v2TimecodeSlot。
+  timecode_slot_->setObjectName(QStringLiteral("v2TimecodeSlot"));
   auto* timecode_layout = new QHBoxLayout(timecode_slot_);
   timecode_layout->setContentsMargins(0, 0, 0, 0);
   timecode_layout->setSpacing(0);
@@ -137,8 +158,21 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   buffer_slot_ = new QWidget(right_group_);
   buffer_slot_->setObjectName(QStringLiteral("v2BufferSlot"));
   auto* buffer_layout = new QHBoxLayout(buffer_slot_);
-  buffer_layout->setContentsMargins(0, 0, 0, 0);
-  buffer_layout->setSpacing(0);
+  buffer_layout->setContentsMargins(2, 0, 6, 0);
+  buffer_layout->setSpacing(6);
+  buffer_bar_ = new QProgressBar(buffer_slot_);
+  buffer_bar_->setObjectName(QStringLiteral("v2BufferBar"));
+  buffer_bar_->setTextVisible(false);
+  buffer_bar_->setRange(0, 1000);
+  buffer_bar_->setValue(0);
+  buffer_bar_->setFixedWidth(84);
+  buffer_bar_->setFixedHeight(6);
+  buffer_bar_->setFocusPolicy(Qt::NoFocus);
+  buffer_layout->addWidget(buffer_bar_, 0, Qt::AlignVCenter);
+  buffer_text_ = new QLabel(buffer_slot_);
+  buffer_text_->setObjectName(QStringLiteral("v2BufferText"));
+  buffer_text_->setText(QStringLiteral("已缓存 ——"));
+  buffer_layout->addWidget(buffer_text_, 0, Qt::AlignVCenter);
   buffer_slot_->setVisible(false);
   right->addWidget(buffer_slot_);
 
@@ -146,8 +180,8 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   right->addWidget(sep_right_);
 
   loop_button_ = MakeIconButton("v2LoopButton", right_group_);
-  loop_button_->setToolTip(
-      QStringLiteral("工作区循环开关（L）· 清除 A/B（Shift+L）"));
+  loop_button_->setToolTip(QStringLiteral(
+      "工作区循环开关（L）· 清除 A/B（Shift+L）· 双击轨道恢复全片"));
   loop_button_->setCheckable(true);
   lapian::ui::BindGlyph(loop_button_, GlyphId::kLoop, Dim(), Accent());
   right->addWidget(loop_button_);
@@ -223,6 +257,7 @@ void TransportBar::BindActions(QAction* play, QAction* prev, QAction* next,
                                QAction* mark, QAction* snapshot,
                                QAction* fullscreen, QAction* mute) {
   play_action_ = play;
+  fullscreen_action_ = fullscreen;
   auto bind = [](QToolButton* button, QAction* action, GlyphId glyph) {
     if (button == nullptr || action == nullptr) {
       return;
@@ -238,8 +273,12 @@ void TransportBar::BindActions(QAction* play, QAction* prev, QAction* next,
   bind(wave_button_, waveform, GlyphId::kWave);
   bind(mark_button_, mark, GlyphId::kFlag);
   bind(snap_button_, snapshot, GlyphId::kCamera);
-  bind(full_button_, fullscreen, GlyphId::kFull);
   bind(mute_button_, mute, GlyphId::kVolume);
+  if (full_button_ != nullptr && fullscreen != nullptr) {
+    lapian::ui::BindToolAction(full_button_, fullscreen, GlyphId::kFull, Dim(),
+                               Accent());
+    SetFullScreenActive(fullscreen_active_);
+  }
   if (play_button_ != nullptr && play != nullptr) {
     // 播放按钮是唯一实心 accent 按钮：图标固定用亮色，播放/暂停换形。
     lapian::ui::BindToolAction(play_button_, play, GlyphId::kPlay, Bright(),
@@ -252,8 +291,8 @@ void TransportBar::BindActions(QAction* play, QAction* prev, QAction* next,
     if (loop_toggle != nullptr) {
       connect(loop_button_, &QToolButton::clicked, loop_toggle,
               &QAction::trigger);
-      loop_button_->setToolTip(
-          QStringLiteral("工作区循环开关（L）· 清除 A/B（Shift+L）"));
+      loop_button_->setToolTip(QStringLiteral(
+          "工作区循环开关（L）· 清除 A/B（Shift+L）· 双击轨道恢复全片"));
     }
     SetLoopEnabled(false);
   }
@@ -290,6 +329,65 @@ bool TransportBar::inspector_toggle_checked() const {
   return inspector_button_ != nullptr && inspector_button_->isChecked();
 }
 
+void TransportBar::SetSpeedText(const QString& text) {
+  if (speed_button_ == nullptr || speed_button_->text() == text) {
+    return;
+  }
+  speed_button_->setText(text);
+}
+
+void TransportBar::SetFullScreenActive(bool fullscreen) {
+  fullscreen_active_ = fullscreen;
+  if (full_button_ == nullptr) {
+    return;
+  }
+  full_button_->setToolTip(fullscreen
+                               ? QStringLiteral("退出全屏（Esc）")
+                               : QStringLiteral("全屏（F / 双击画面）"));
+}
+
+void TransportBar::SetBufferState(bool visible, qint64 cached_bytes,
+                                  qint64 total_bytes) {
+  if (buffer_slot_ == nullptr) {
+    return;
+  }
+  if (!visible) {
+    if (buffer_slot_->isVisible()) {
+      buffer_slot_->setVisible(false);
+    }
+    return;
+  }
+  constexpr double kMegabyte = 1024.0 * 1024.0;
+  const double cached_mb = static_cast<double>(std::max<qint64>(0, cached_bytes)) /
+                           kMegabyte;
+  const double total_mb = static_cast<double>(std::max<qint64>(0, total_bytes)) /
+                          kMegabyte;
+  if (buffer_text_ != nullptr) {
+    buffer_text_->setText(
+        total_mb > 0.0
+            ? QStringLiteral("已缓存 %1/%2 MB")
+                  .arg(cached_mb, 0, 'f', 1)
+                  .arg(total_mb, 0, 'f', 1)
+            : QStringLiteral("已缓存 %1 MB").arg(cached_mb, 0, 'f', 1));
+  }
+  if (buffer_bar_ != nullptr) {
+    const int value =
+        total_bytes > 0
+            ? static_cast<int>(std::lround(
+                  1000.0 * static_cast<double>(cached_bytes) /
+                  static_cast<double>(total_bytes)))
+            : 0;
+    buffer_bar_->setValue(std::clamp(value, 0, 1000));
+  }
+  if (!buffer_slot_->isVisible()) {
+    buffer_slot_->setVisible(true);
+  }
+}
+
+void TransportBar::SetTimecodeCommit(TimecodeCommit commit) {
+  commit_ = std::move(commit);
+}
+
 void TransportBar::AdoptTimecode(QWidget* timecode) {
   if (timecode == nullptr || timecode_slot_ == nullptr) {
     return;
@@ -301,6 +399,10 @@ void TransportBar::AdoptTimecode(QWidget* timecode) {
   timecode_ = timecode;
   // 读数允许被压缩：窗口 820 宽时先挤读数，不推高最小宽度。
   timecode->setMinimumWidth(0);
+  // M5 第 6 行：定位到帧号（Ctrl+G）的可见入口就是这个可点击的时间码。
+  timecode->setToolTip(QStringLiteral("点击输入时间码或帧号（Ctrl+G）"));
+  timecode->setCursor(Qt::IBeamCursor);
+  timecode->installEventFilter(this);
   layout->insertWidget(1, timecode);
 }
 
@@ -348,20 +450,24 @@ void TransportBar::AdoptVolume(QWidget* volume) {
   layout->addWidget(volume);
 }
 
-void TransportBar::AdoptSpeedLabel(QWidget* speed) {
-  if (speed == nullptr || speed_slot_ == nullptr) {
-    return;
+void TransportBar::ApplyReadoutFont(bool small) {
+  readout_px_ = small ? tokens_.fs_readout_sm : tokens_.fs_readout;
+  const double px = std::max(11.0, readout_px_);
+  if (auto* label = qobject_cast<QLabel*>(timecode_)) {
+    QFont font = lapian::ui::MonoFont(px, QFont::DemiBold);
+    font.setLetterSpacing(QFont::PercentageSpacing, 104.0);
+    label->setFont(font);
+    label->setAlignment(Qt::AlignCenter);
   }
-  auto* layout = qobject_cast<QHBoxLayout*>(speed_slot_->layout());
-  if (layout == nullptr) {
-    return;
+  if (readout_edit_ != nullptr) {
+    QFont font = lapian::ui::MonoFont(px, QFont::DemiBold);
+    font.setLetterSpacing(QFont::PercentageSpacing, 104.0);
+    readout_edit_->setFont(font);
   }
-  speed_ = speed;
-  speed->setMinimumWidth(0);
-  layout->addWidget(speed);
 }
 
 void TransportBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
+  tokens_ = tokens;
   setFixedHeight(tokens.transport);
   const int tc_h = tokens.readout;
   const int meta_h = std::max(12, tokens.transport - tokens.readout);
@@ -375,13 +481,7 @@ void TransportBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
     readout_slot_->setFixedHeight(tokens.transport);
   }
   // 读数不写 QSS 字号：这里按令牌下发 setPixelSize（规划 §4.7）。
-  const double timecode_px = std::max(11.0, tokens.fs_readout);
-  if (auto* label = qobject_cast<QLabel*>(timecode_)) {
-    QFont font = lapian::ui::MonoFont(timecode_px, QFont::DemiBold);
-    font.setLetterSpacing(QFont::PercentageSpacing, 104.0);
-    label->setFont(font);
-    label->setAlignment(Qt::AlignCenter);
-  }
+  ApplyReadoutFont(small_readout_);
   const double meta_px = tokens.density == lapian::ui::Density::kDense
                              ? 10.0
                              : tokens.fs_meta;
@@ -391,9 +491,19 @@ void TransportBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
       label->setAlignment(Qt::AlignCenter);
     }
   }
-  if (auto* label = qobject_cast<QLabel*>(speed_)) {
-    label->setFont(lapian::ui::MonoFont(tokens.fs_meta + 1.0, QFont::DemiBold));
-    label->setAlignment(Qt::AlignCenter);
+  if (speed_button_ != nullptr) {
+    speed_button_->setFont(
+        lapian::ui::MonoFont(tokens.fs_meta + 1.0, QFont::DemiBold));
+    speed_button_->setFixedSize(34, tokens.btn);
+  }
+  if (buffer_text_ != nullptr) {
+    buffer_text_->setFont(lapian::ui::UiFont(meta_px));
+  }
+  if (buffer_bar_ != nullptr) {
+    buffer_bar_->setFixedHeight(std::max(4, tokens.btn - 20));
+  }
+  if (readout_edit_ != nullptr) {
+    readout_edit_->setFixedHeight(tokens.input);
   }
   if (volume_ != nullptr) {
     volume_->setFixedHeight(
@@ -417,13 +527,16 @@ void TransportBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
   if (buffer_slot_ != nullptr) {
     buffer_slot_->setFixedHeight(tokens.btn);
   }
+  // 令牌变了（档位切换）：强制按新宽度/新字号重算一次。
+  narrow_state_valid_ = false;
   UpdateNarrowState();
 }
 
 QSize TransportBar::minimumSizeHint() const {
   // 允许被压窄：窄档由 UpdateNarrowState() 按自身宽度隐藏次要控件，
   // 否则 820 宽窗口会被"13 个按钮 + 读数 + 音量"顶住而缩不下去。
-  return QSize(360, height());
+  // 下限取 <560 档保留集的实测需要（约 400），再小必裁切。
+  return QSize(400, height());
 }
 
 void TransportBar::resizeEvent(QResizeEvent* event) {
@@ -436,31 +549,206 @@ void TransportBar::UpdateNarrowState() {
     return;
   }
   const int w = width();
-  const bool hide_speed = w < 700;
-  const bool hide_ab = w < 640;
-  const bool hide_meta = w < 520;
-  if (narrow_state_valid_ && hide_speed == hide_speed_ && hide_ab == hide_ab_ &&
-      hide_meta == hide_meta_) {
+  const bool hide_volume = w < kTierVolumeWidth;
+  const bool hide_ab = w < kTierAbSpeedWidth;
+  const bool hide_speed = w < kTierAbSpeedWidth;
+  const bool hide_first_last = w < kTierFirstLastWidth;
+  const bool hide_mark_snap = w < kTierFirstLastWidth;
+  const bool small = w < kTierAbSpeedWidth;
+  if (narrow_state_valid_ && hide_volume == hide_volume_ &&
+      hide_ab == hide_ab_ && hide_speed == hide_speed_ &&
+      hide_first_last == hide_first_last_ &&
+      hide_mark_snap == hide_mark_snap_ && small == small_readout_) {
     return;
   }
-  hide_speed_ = hide_speed;
+  hide_volume_ = hide_volume;
   hide_ab_ = hide_ab;
-  hide_meta_ = hide_meta;
+  hide_speed_ = hide_speed;
+  hide_first_last_ = hide_first_last;
+  hide_mark_snap_ = hide_mark_snap;
+  small_readout_ = small;
   narrow_state_valid_ = true;
-  if (speed_slot_ != nullptr) {
-    speed_slot_->setVisible(!hide_speed_);
+
+  if (volume_slot_ != nullptr) {
+    volume_slot_->setVisible(!hide_volume_);
   }
   if (sep_ab_ != nullptr) {
     sep_ab_->setVisible(!hide_ab_);
   }
-  for (QWidget* widget :
-       {static_cast<QWidget*>(in_button_), static_cast<QWidget*>(out_button_)}) {
-    if (widget != nullptr) {
-      widget->setVisible(!hide_ab_);
+  if (in_button_ != nullptr) {
+    in_button_->setVisible(!hide_ab_);
+  }
+  if (out_button_ != nullptr) {
+    out_button_->setVisible(!hide_ab_);
+  }
+  if (speed_button_ != nullptr) {
+    speed_button_->setVisible(!hide_speed_);
+  }
+  if (first_button_ != nullptr) {
+    first_button_->setVisible(!hide_first_last_);
+  }
+  if (last_button_ != nullptr) {
+    last_button_->setVisible(!hide_first_last_);
+  }
+  if (mark_button_ != nullptr) {
+    mark_button_->setVisible(!hide_mark_snap_);
+  }
+  if (snap_button_ != nullptr) {
+    snap_button_->setVisible(!hide_mark_snap_);
+  }
+  // 次读数（帧号/总帧）**任何档位都保留**：M7 要求播放/暂停/拖动/全屏四态
+  // 帧号可见且位置不变；读数只是从 26px 收到 22px。
+  ApplyReadoutFont(small_readout_);
+  tier_need_ = RetainedNeedWidth();
+}
+
+int TransportBar::RetainedNeedWidth() const {
+  // 实测校准（规划 §3.3 ±10%）：只累加**当前仍可见**的组（隐藏项在
+  // QBoxLayout::sizeHint 里被跳过），再加左右内边距。
+  int need = 16;
+  for (QWidget* group : {left_group_, readout_slot_, right_group_}) {
+    if (group != nullptr && group->isVisible()) {
+      need += group->sizeHint().width();
     }
   }
-  // 次读数（帧号/总帧）在更窄时收起；时间码主读数始终保留（M7）。
-  if (meta_slot_ != nullptr) {
-    meta_slot_->setVisible(!hide_meta_);
+  return need;
+}
+
+QString TransportBar::TierStateForTest() const {
+  const char* tier = "full";
+  if (hide_first_last_) {
+    tier = "bare";
+  } else if (hide_ab_) {
+    tier = "basic";
+  } else if (hide_volume_) {
+    tier = "no-volume";
   }
+  // need 现算（构造期/首次 resize 前的缓存值恒为 0，不可信）。
+  const int need = RetainedNeedWidth();
+  return QStringLiteral(
+             "tier=%1 w=%2 need=%3 volume=%4 ab=%5 speed=%6 first_last=%7 "
+             "mark_snap=%8 readout=%9")
+      .arg(QString::fromLatin1(tier))
+      .arg(width())
+      .arg(need)
+      .arg(hide_volume_ ? 0 : 1)
+      .arg(hide_ab_ ? 0 : 1)
+      .arg(hide_speed_ ? 0 : 1)
+      .arg(hide_first_last_ ? 0 : 1)
+      .arg(hide_mark_snap_ ? 0 : 1)
+      .arg(readout_px_, 0, 'f', 0);
+}
+
+void TransportBar::ShowSpeedMenu() {
+  if (speed_button_ == nullptr) {
+    return;
+  }
+  // 菜单点击时建（规划 §7.6：不预建菜单/对话框）。
+  if (speed_menu_ == nullptr) {
+    speed_menu_ = new QMenu(this);
+    speed_menu_->setObjectName(QStringLiteral("v2SpeedMenu"));
+    for (const double rate : lapian::core::kPlaybackRates) {
+      const QString text = QString::number(rate, 'g', 3) + QStringLiteral("x");
+      QAction* action = speed_menu_->addAction(text);
+      action->setCheckable(true);
+      connect(action, &QAction::triggered, this,
+              [this, rate]() { emit speedSelected(rate); });
+    }
+  }
+  const QString current = speed_button_->text();
+  for (QAction* action : speed_menu_->actions()) {
+    action->setChecked(action->text() == current);
+  }
+  speed_menu_->popup(
+      speed_button_->mapToGlobal(QPoint(0, speed_button_->height() + 2)));
+}
+
+void TransportBar::BeginTimecodeEdit() {
+  if (editing_timecode_ || timecode_ == nullptr || timecode_slot_ == nullptr) {
+    return;
+  }
+  auto* label = qobject_cast<QLabel*>(timecode_);
+  if (label == nullptr) {
+    return;
+  }
+  auto* layout = qobject_cast<QHBoxLayout*>(timecode_slot_->layout());
+  if (layout == nullptr) {
+    return;
+  }
+  if (readout_edit_ == nullptr) {
+    readout_edit_ = new QLineEdit(timecode_slot_);
+    readout_edit_->setObjectName(QStringLiteral("v2ReadoutEdit"));
+    readout_edit_->setAlignment(Qt::AlignCenter);
+    readout_edit_->setFixedHeight(tokens_.input);
+    readout_edit_->setToolTip(QStringLiteral("帧号（0 基）或 HH:MM:SS:FF"));
+    readout_edit_->installEventFilter(this);
+    layout->insertWidget(2, readout_edit_);
+    readout_edit_->hide();
+    ApplyReadoutFont(small_readout_);
+  }
+  if (label->text().startsWith(QStringLiteral("--"))) {
+    return;  // 空态：没有可跳转的会话
+  }
+  readout_edit_->setText(label->text());
+  readout_edit_->setFixedWidth(std::max(80, label->width()));
+  editing_timecode_ = true;
+  label->hide();
+  readout_edit_->show();
+  readout_edit_->setFocus(Qt::OtherFocusReason);
+  readout_edit_->selectAll();
+}
+
+void TransportBar::FinishTimecodeEdit(bool commit) {
+  if (!editing_timecode_ || readout_edit_ == nullptr) {
+    return;
+  }
+  editing_timecode_ = false;
+  const QString text = readout_edit_->text().trimmed();
+  if (commit && !text.isEmpty() && commit_) {
+    // 提交失败 = 非法输入/超出范围：静默回滚（标签文本没变过）。
+    commit_(text);
+  }
+  readout_edit_->hide();
+  if (timecode_ != nullptr) {
+    timecode_->show();
+  }
+  readout_edit_->clearFocus();
+}
+
+bool TransportBar::eventFilter(QObject* watched, QEvent* event) {
+  if (watched == timecode_ && event->type() == QEvent::MouseButtonRelease) {
+    auto* mouse = static_cast<QMouseEvent*>(event);
+    if (mouse->button() == Qt::LeftButton) {
+      BeginTimecodeEdit();
+      return true;
+    }
+  }
+  if (readout_edit_ != nullptr && watched == readout_edit_) {
+    if (event->type() == QEvent::ShortcutOverride) {
+      auto* key = static_cast<QKeyEvent*>(event);
+      // spec §3.7：输入框聚焦时全局快捷键必须让位（Esc 留给输入框取消）。
+      if (key->key() != Qt::Key_Escape) {
+        event->accept();
+        return true;
+      }
+      return false;
+    }
+    if (event->type() == QEvent::KeyPress) {
+      auto* key = static_cast<QKeyEvent*>(event);
+      if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+        FinishTimecodeEdit(true);
+        return true;
+      }
+      if (key->key() == Qt::Key_Escape) {
+        FinishTimecodeEdit(false);
+        return true;
+      }
+    }
+    if (event->type() == QEvent::FocusOut && editing_timecode_) {
+      // 失焦提交（点别处 = 确认输入）。
+      FinishTimecodeEdit(true);
+      return false;
+    }
+  }
+  return QWidget::eventFilter(watched, event);
 }

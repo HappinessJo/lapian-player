@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QString>
 #include <QWidget>
@@ -70,6 +70,8 @@ class PlayerShell : public QWidget {
  signals:
   // 时间轴"适配"按钮：MainWindow 调 timeline_->FitToWindow() 并刷新面板头。
   void fitTimelineRequested();
+  // 检查器折叠状态变化（3B：替代 250ms 轮询去同步 Transport 的检查器开关）。
+  void inspectorCollapsedChanged(bool collapsed);
 
  protected:
   void resizeEvent(QResizeEvent* event) override;
