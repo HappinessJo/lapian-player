@@ -324,6 +324,16 @@ void TopBar::AdoptQualityButton(QWidget* button) {
   if (auto* qbutton = qobject_cast<QAbstractButton*>(button)) {
     qbutton->setFocusPolicy(Qt::NoFocus);
     qbutton->setFont(lapian::ui::UiFont(11.0));
+    // P3：清晰度入口做成 chip 按钮（此前是 flat QPushButton，看起来像状态文字）。
+    // 样式全部走 Theme 的 #onlineQualityButton 规则，不写 per-widget QSS。
+    if (auto* push = qobject_cast<QPushButton*>(button)) {
+      push->setFlat(false);
+      push->setCursor(Qt::PointingHandCursor);
+      push->setIcon(QIcon(lapian::ui::GlyphPixmap(
+          lapian::ui::GlyphId::kChevronDown, 12, DimColor())));
+      push->setIconSize(QSize(12, 12));
+      push->setFixedHeight(20);
+    }
   }
 }
 
@@ -454,6 +464,13 @@ void TopBar::ApplyTokens(const lapian::ui::Tokens& tokens) {
                         static_cast<QWidget*>(mode_chip_)}) {
     if (chip != nullptr) {
       chip->setFixedHeight(tokens.chip);
+    }
+  }
+  if (quality_button_ != nullptr) {
+    quality_button_->setFixedHeight(tokens.chip);
+    if (auto* push = quality_button_->findChild<QPushButton*>(
+            QStringLiteral("onlineQualityButton"))) {
+      push->setFixedHeight(tokens.chip);
     }
   }
   UpdateFileElide();

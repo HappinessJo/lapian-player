@@ -131,6 +131,15 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
 #v2SpecChip, #v2ModeChip { color: @text_dim; background: @chipbg;
   border: 1px solid @border; border-radius: 10px; }
 #v2SpecChip QLabel, #v2ModeChip { color: @text_dim; }
+/* P3：清晰度入口是 chip 按钮（surface3 底 + 1px 边框 + 胶囊圆角），
+   与模式 chip 同高；hover/pressed/disabled 三态。 */
+#onlineQualityButton {
+  color: @text_dim; background: @chipbg; border: 1px solid @border;
+  border-radius: 10px; padding: 0 7px; }
+#onlineQualityButton:hover { border-color: @accent; color: @text; }
+#onlineQualityButton:pressed { background: @border; color: @text; }
+#onlineQualityButton:disabled { color: @text_mute; background: @surface2;
+  border-color: @border; }
 #v2ModeChip[kind="ok"] { color: @ok; background: @ok_bg; border-color: @ok_border; }
 #v2ModeChip[kind="cache"] { color: @cache; background: @cache_bg;
   border-color: @cache_border; }

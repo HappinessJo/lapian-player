@@ -190,6 +190,9 @@ class MainWindow : public QMainWindow {
   QRect ReadoutGeometryForTest() const;
   // 3D：M2 视觉证据（主题内 主窗/设置对话框/帮助/在线对话框/速度菜单 各一张）。
   void CaptureThemeShotsForTest(const QString& directory);
+  // P3：清晰度 chip 视觉证据（在线态文案 + 1280/820 两张图 + 顶栏溢出断言）。
+  bool CaptureQualityChipShotsForTest(const QString& directory);
+  QString TopBarOverflowForTest() const;
   // 3D：顶栏模式 chip 的完整文本（空态断言 `未打开`）。
   QString TopBarModeForTest() const;
   // 3B：视图窗 = 画布可见范围（规划 Q3 同源断言）+ 播放头常驻 + 宽度档位 +

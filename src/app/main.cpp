@@ -1638,9 +1638,12 @@ int main(int argc, char* argv[]) {
       window.OpenFile(file_path);
     }
     QTimer::singleShot(1200, &window, [&window]() {
-      window.CaptureThemeShotsForTest(
-          QDir::currentPath() + QStringLiteral("/build/ui-v2-shots"));
-      QCoreApplication::exit(0);
+      const QString shots =
+          QDir::currentPath() + QStringLiteral("/build/ui-v2-shots");
+      window.CaptureThemeShotsForTest(shots);
+      // P3：清晰度 chip 视觉证据 + 1280/820 顶栏溢出断言。
+      const bool quality_ok = window.CaptureQualityChipShotsForTest(shots);
+      QCoreApplication::exit(quality_ok ? 0 : 1);
     });
   }
   if (online_quality_no_catalog) {

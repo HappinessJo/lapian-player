@@ -2195,6 +2195,77 @@ void MainWindow::CaptureThemeShotsForTest(const QString& directory) {
   }
 }
 
+QString MainWindow::TopBarOverflowForTest() const {
+  TopBar* bar = shell_ == nullptr ? nullptr : shell_->topBar();
+  if (bar == nullptr) {
+    return QStringLiteral("bar=none");
+  }
+  const QRect bar_rect = bar->rect();
+  QStringList outside;
+  const QList<QWidget*> children = bar->findChildren<QWidget*>();
+  for (QWidget* child : children) {
+    if (child == nullptr || !child->isVisible()) {
+      continue;
+    }
+    const QRect rect(bar->mapFromGlobal(child->mapToGlobal(QPoint(0, 0))),
+                     child->size());
+    if (!bar_rect.contains(rect)) {
+      outside << QStringLiteral("%1=%2,%3 %4x%5")
+                     .arg(child->objectName().isEmpty()
+                              ? QStringLiteral("anon")
+                              : child->objectName())
+                     .arg(rect.x())
+                     .arg(rect.y())
+                     .arg(rect.width())
+                     .arg(rect.height());
+    }
+  }
+  return QStringLiteral("count=%1 w=%2 %3")
+      .arg(outside.size())
+      .arg(bar->width())
+      .arg(outside.join(QLatin1Char(';')));
+}
+
+bool MainWindow::CaptureQualityChipShotsForTest(const QString& directory) {
+  QDir().mkpath(directory);
+  if (quality_button_ == nullptr || shell_ == nullptr ||
+      shell_->topBar() == nullptr) {
+    return false;
+  }
+  // 只在探针里伪造在线态：清晰度 chip 可见 + 模式 chip 的最长文案（实际 qn/fps）。
+  quality_button_->setVisible(true);
+  quality_button_->setEnabled(true);
+  quality_button_->setText(QStringLiteral("清晰度 1080P"));
+  shell_->topBar()->SetMode(QStringLiteral("在线 · 1080P · 29.412fps · 降帧"),
+                            TopBar::ModeKind::kWarn);
+  QCoreApplication::processEvents();
+  const int dpr = qRound(devicePixelRatioF() * 100.0);
+  bool ok = true;
+  const QString wide_shot =
+      directory + QStringLiteral("/hotfix-quality-%1.png").arg(dpr);
+  ok = grab().save(wide_shot) && ok;
+  const QString wide_overflow = TopBarOverflowForTest();
+  const QSize restore = size();
+  resize(820, std::min(500, height()));
+  QCoreApplication::processEvents();
+  const QString narrow_shot =
+      directory + QStringLiteral("/hotfix-quality-820-%1.png").arg(dpr);
+  ok = grab().save(narrow_shot) && ok;
+  const QString narrow_overflow = TopBarOverflowForTest();
+  std::fprintf(stderr,
+               "P3 quality_chip dpr=%d wide_overflow=%s narrow_overflow=%s "
+               "wide_shot=%s narrow_shot=%s\n",
+               dpr, wide_overflow.toUtf8().constData(),
+               narrow_overflow.toUtf8().constData(),
+               wide_shot.toUtf8().constData(),
+               narrow_shot.toUtf8().constData());
+  std::fflush(stderr);
+  resize(restore);
+  QCoreApplication::processEvents();
+  return ok && wide_overflow.startsWith(QStringLiteral("count=0")) &&
+         narrow_overflow.startsWith(QStringLiteral("count=0"));
+}
+
 QString MainWindow::ReadoutTextForTest() const {
   auto* label = findChild<QLabel*>(QStringLiteral("v2Timecode"));
   return label == nullptr ? QString() : label->text();
@@ -3511,7 +3582,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     quality_button_->setVisible(true);
     quality_button_->setEnabled(true);
     quality_button_->setText(
-        QStringLiteral("清晰度：%1").arg(lapian::online::QualityName(online_qn_)));
+        QStringLiteral("清晰度 %1").arg(lapian::online::QualityName(online_qn_)));
     quality_button_->setToolTip(
         QStringLiteral("当前实际 qn=%1 codecid=%2；请求 qn=%3；"
                        "档位以服务端返回为准")
@@ -3719,7 +3790,7 @@ bool MainWindow::ApplyOnlineCacheHit(
   }
   if (quality_button_ != nullptr) {
     quality_button_->setText(
-        QStringLiteral("清晰度：%1").arg(lapian::online::QualityName(online_qn_)));
+        QStringLiteral("清晰度 %1").arg(lapian::online::QualityName(online_qn_)));
   }
   if (marks_ != nullptr) {
     marks_->SetOnlineContext(online_actual_fps_, online_qn_, online_codecid_);
@@ -5204,7 +5275,7 @@ void MainWindow::ApplyOnlineQuality(
     quality_button_->setEnabled(true);
     const int shown_qn =
         online_qn_ > 0 ? online_qn_ : info.catalog.DefaultQn();
-    QString text = QStringLiteral("清晰度：%1")
+    QString text = QStringLiteral("清晰度 %1")
                        .arg(lapian::online::QualityName(shown_qn));
     if (info.cache_hit) {
       text += QStringLiteral("（缓存）");
@@ -5769,7 +5840,7 @@ void MainWindow::OpenLocalMedia(const QString& path,
     if (quality_button_ != nullptr) {
       quality_button_->setVisible(true);
       quality_button_->setEnabled(true);
-      quality_button_->setText(QStringLiteral("清晰度：%1").arg(
+      quality_button_->setText(QStringLiteral("清晰度 %1").arg(
           lapian::online::QualityName(online_qn_)));
     }
   } else {
