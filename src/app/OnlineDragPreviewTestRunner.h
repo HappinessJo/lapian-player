@@ -51,6 +51,9 @@ struct OnlineDragPreviewTestOptions {
   // P1 热修探针（--cache-switch-online-test）：真实在线会话中保存缓存目录
   // 不中断播放；结束会话后新根生效、下一次会话使用新根。
   bool cache_switch = false;
+  // D4（test-only）：把正向拖动结束后“离最终目标最近的已缓存帧”dump 成
+  // preview_<w>x<h>_f<frame>.nv12，并在 stderr 打 preview_sharpness 行。
+  QString preview_dump_dir;
 };
 
 // T8.6.1b 真实窗口探针：在线增长会话拖动预览。
@@ -177,6 +180,8 @@ class OnlineDragPreviewTestRunner {
   void RunParityUncached();
   void PrintParity(const ParityResult& result);
   bool ParityLanding(qint64 target, ParityResult* result);
+  // D4：--preview-dump-dir 的视觉证据（只写 build/d4 下的证据文件，不改产品）。
+  void MaybeDumpPreviewFrame(qint64 target);
   int PresentedNow() const;
   qint64 DisplayedNow() const;
   bool CoarseNow() const;

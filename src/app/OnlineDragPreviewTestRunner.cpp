@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QTimer>
@@ -21,6 +22,7 @@
 
 #include "app/MainWindow.h"
 #include "app/OnlineResolveDialog.h"
+#include "media/OnlinePreviewDecoder.h"
 
 namespace lapian::app {
 namespace {
@@ -91,6 +93,54 @@ QString PreviewDragConfigStats(MainWindow* window) {
       .arg(tokens.value(QStringLiteral("fallback"), QStringLiteral("0")),
            tokens.value(QStringLiteral("width"), QStringLiteral("0")),
            tokens.value(QStringLiteral("height"), QStringLiteral("0")));
+}
+
+// D4：NV12 Y 平面的 3x3 Laplacian 方差（4 邻域核 [[0,1,0],[1,-4,1],[0,1,0]]）。
+// 只读探针 dump 出来的 .nv12，用于人工复核后的量化对照。注意：该指标不是
+// 跨分辨率可比量——1024 档是同一帧的降采样，边缘被压进更少像素后单位像素
+// 方差反而更大（实测 1920/1024=0.522，见 docs/perf/preview-config-matrix.md §7）；
+// 所以它只打印、不参与任何产品/门判定，绝不用来“证明”清晰度。
+double Nv12YPlaneLaplacianVariance(const QString& path, int width, int height) {
+  if (width < 3 || height < 3) {
+    return -1.0;
+  }
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    return -1.0;
+  }
+  const qint64 y_bytes = static_cast<qint64>(width) * height;
+  if (file.size() < y_bytes + y_bytes / 2) {
+    return -1.0;
+  }
+  const QByteArray y_plane = file.read(y_bytes);
+  if (y_plane.size() != y_bytes) {
+    return -1.0;
+  }
+  const auto* y =
+      reinterpret_cast<const unsigned char*>(y_plane.constData());
+  double sum = 0.0;
+  double sum_sq = 0.0;
+  qint64 count = 0;
+  for (int row = 1; row + 1 < height; ++row) {
+    const unsigned char* line = y + static_cast<qint64>(row) * width;
+    const unsigned char* up = line - width;
+    const unsigned char* down = line + width;
+    for (int col = 1; col + 1 < width; ++col) {
+      const int lap = 4 * static_cast<int>(line[col]) -
+                      static_cast<int>(up[col]) -
+                      static_cast<int>(down[col]) -
+                      static_cast<int>(line[col - 1]) -
+                      static_cast<int>(line[col + 1]);
+      sum += lap;
+      sum_sq += static_cast<double>(lap) * lap;
+      ++count;
+    }
+  }
+  if (count == 0) {
+    return 0.0;
+  }
+  const double mean = sum / static_cast<double>(count);
+  return sum_sq / static_cast<double>(count) - mean * mean;
 }
 
 }  // namespace
@@ -510,6 +560,125 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
               .arg(static_cast<qlonglong>(preview.prefetched_frames)));
   }
   return result;
+}
+
+void OnlineDragPreviewTestRunner::MaybeDumpPreviewFrame(qint64 target) {
+  if (options_.preview_dump_dir.isEmpty()) {
+    return;
+  }
+  QDir dump_dir(options_.preview_dump_dir);
+  if (!dump_dir.exists() && !QDir().mkpath(dump_dir.absolutePath())) {
+    Print(QStringLiteral("preview_dump skipped reason=mkdir_failed dir=%1")
+              .arg(dump_dir.absolutePath()));
+    return;
+  }
+  lapian::media::OnlinePreviewDecoder* decoder =
+      lapian::media::OnlinePreviewDecoder::LatestInstanceForTest();
+  if (decoder == nullptr) {
+    Print(QStringLiteral(
+              "preview_dump skipped reason=no_online_preview_decoder target=%1")
+              .arg(target));
+    return;
+  }
+  // “离最终目标最近的已缓存帧”：从目标开始向两侧找；正向拖动缓存通常落在
+  // 目标及其之前，所以先试 target-delta。缓存上限最多几百帧，半径给到
+  // max(160, 帧数上限) 足够覆盖；找不到不写文件。
+  const int radius =
+      std::max(160, std::min(800, decoder->cached_frame_limit()));
+  qint64 dump_frame = -1;
+  for (int delta = 0; delta <= radius && dump_frame < 0; ++delta) {
+    for (int sign = 0; sign < 2; ++sign) {
+      if (delta == 0 && sign == 1) {
+        break;
+      }
+      const qint64 candidate =
+          sign == 0 ? target - delta : target + delta;
+      if (candidate < 0) {
+        continue;
+      }
+      const QString candidate_path = dump_dir.filePath(
+          QStringLiteral("preview_probe_f%1.nv12").arg(candidate));
+      const QByteArray candidate_utf8 = QFile::encodeName(candidate_path);
+      const std::string candidate_std(candidate_utf8.constData(),
+                                      static_cast<std::size_t>(
+                                          candidate_utf8.size()));
+      if (decoder->DumpCachedFrameNv12ForTest(candidate, candidate_std)) {
+        dump_frame = candidate;
+        break;
+      }
+    }
+  }
+  if (dump_frame < 0) {
+    int cached_probe_count = 0;
+    for (qint64 probe : {target, target - 1, target - 10, target - 30,
+                         target - 60}) {
+      if (probe >= 0 && decoder->IsFrameCached(probe)) {
+        ++cached_probe_count;
+      }
+    }
+    Print(QStringLiteral(
+              "preview_dump skipped reason=no_cached_frame target=%1 radius=%2 "
+              "decoder_cached_frames=%3 decoder_cache_bytes=%4 "
+              "decoder_w=%5 decoder_h=%6 cached_probes=%7")
+              .arg(target)
+              .arg(radius)
+              .arg(decoder->cached_frames())
+              .arg(static_cast<qulonglong>(decoder->cache_bytes()))
+              .arg(decoder->preview_width())
+              .arg(decoder->preview_height())
+              .arg(cached_probe_count));
+    return;
+  }
+  int width = decoder->preview_width();
+  int height = decoder->preview_height();
+  if (width <= 0 || height <= 0) {
+    const QHash<QString, QString> tokens =
+        ParsePreviewConfigTokens(window_->OnlinePreviewConfigForTest());
+    width = tokens.value(QStringLiteral("width")).toInt();
+    height = tokens.value(QStringLiteral("height")).toInt();
+  }
+  if (width <= 0 || height <= 0) {
+    const QHash<QString, QString> tokens =
+        ParsePreviewConfigTokens(window_->OnlinePreviewConfigForTest());
+    const int max_side =
+        tokens.value(QStringLiteral("max_side")).toInt();
+    if (max_side > 0) {
+      width = max_side;
+      height = std::max(2, (max_side * 9 / 16 + 1) & ~1);
+    }
+  }
+  if (width <= 0 || height <= 0) {
+    Print(QStringLiteral(
+              "preview_dump skipped reason=unknown_frame_size frame=%1")
+              .arg(dump_frame));
+    return;
+  }
+  const QString probe_path = dump_dir.filePath(
+      QStringLiteral("preview_probe_f%1.nv12").arg(dump_frame));
+  const QString final_path = dump_dir.filePath(
+      QStringLiteral("preview_%1x%2_f%3.nv12")
+          .arg(width)
+          .arg(height)
+          .arg(dump_frame));
+  if (QFileInfo::exists(probe_path) && probe_path != final_path) {
+    QFile::remove(final_path);
+    QFile::rename(probe_path, final_path);
+  }
+  const double lap_var =
+      Nv12YPlaneLaplacianVariance(final_path, width, height);
+  Print(QStringLiteral(
+            "preview_dump path=%1 frame=%2 target=%3 w=%4 h=%5 target_delta=%6")
+            .arg(final_path)
+            .arg(dump_frame)
+            .arg(target)
+            .arg(width)
+            .arg(height)
+            .arg(dump_frame - target));
+  Print(QStringLiteral("preview_sharpness frame=%1 w=%2 h=%3 lap_var=%4")
+            .arg(dump_frame)
+            .arg(width)
+            .arg(height)
+            .arg(QString::number(lap_var, 'f', 3)));
 }
 
 void OnlineDragPreviewTestRunner::RunShortEdgePass() {
@@ -1458,6 +1627,8 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
 
   const ParityResult forward = RunParitySequence(
       QStringLiteral("forward"), 15, 75, 60, 1000, true, 50, false);
+  // D4（test-only）：正向拖动结束后 dump 最近的已缓存帧（与 RunDrag 同口径）。
+  MaybeDumpPreviewFrame(75);
   const ParityResult backward = RunParitySequence(
       QStringLiteral("backward"), 75, 15, 60, 1000, false, 50, false);
   Check("forward_first_response_le_100",
@@ -1702,15 +1873,46 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
         post_seek_forward_ready && post_seek_forward.flicker == 0,
         QStringLiteral("flicker=%1").arg(post_seek_forward.flicker));
 
+  // D4：内存门改为“配置感知”，不再写死 64MiB/72 帧：
+  //   peak <= configured_cache_bytes + 16MiB（配置来自本会话实际生效的解码器）；
+  //   frames <= cached_frame_limit()（D2 由预算/帧字节算出的上限）。
+  // 显式旧档 1024/64MiB 仍必须过这两条，并单独打一行 legacy_64mib 供对照。
+  const QHash<QString, QString> config_tokens =
+      ParsePreviewConfigTokens(window_->OnlinePreviewConfigForTest());
+  const qint64 configured_cache_bytes =
+      config_tokens.value(QStringLiteral("cache_bytes")).toLongLong();
+  const qint64 config_cache_mb =
+      config_tokens.value(QStringLiteral("cache_mb")).toLongLong();
+  const int config_max_side =
+      config_tokens.value(QStringLiteral("max_side")).toInt();
+  const int config_frame_limit =
+      config_tokens.value(QStringLiteral("frames")).toInt();
   const qint64 cache_peak =
       static_cast<qint64>(window_->OnlinePreviewCachePeakBytesForTest());
-  Check("online_drag_parity_cache_peak_le_64mib",
-        cache_peak <= 64LL * 1024LL * 1024LL,
-        QStringLiteral("peak=%1").arg(cache_peak));
-  Check("online_drag_parity_cache_frames_le_72",
-        window_->OnlinePreviewCachedFramesForTest() <= 72,
-        QStringLiteral("frames=%1")
-            .arg(window_->OnlinePreviewCachedFramesForTest()));
+  const int cache_frames = window_->OnlinePreviewCachedFramesForTest();
+  const qint64 peak_limit = configured_cache_bytes + 16LL * 1024LL * 1024LL;
+  Check("online_drag_parity_cache_peak_le_config_budget",
+        cache_peak <= peak_limit,
+        QStringLiteral("peak=%1 budget_mb=%2 limit=%3 frames=%4")
+            .arg(cache_peak)
+            .arg(config_cache_mb)
+            .arg(peak_limit)
+            .arg(cache_frames));
+  Check("online_drag_parity_cache_frames_le_config_limit",
+        cache_frames <= config_frame_limit,
+        QStringLiteral("frames=%1 limit=%2 cache_mb=%3 max_side=%4")
+            .arg(cache_frames)
+            .arg(config_frame_limit)
+            .arg(config_cache_mb)
+            .arg(config_max_side));
+  if (config_max_side == 1024 && config_cache_mb == 64) {
+    Print(QStringLiteral(
+              "legacy_64mib peak=%1 frames=%2 limit=%3 cache_mb=64 "
+              "max_side=1024")
+              .arg(cache_peak)
+              .arg(cache_frames)
+              .arg(config_frame_limit));
+  }
 
   // P0 诚实性诊断（只打印、不门禁）：丢弃预览器后 seek 落地 0ms 立即再拖，
   // 测的是“全新预览解码器”的冷启动；warm timer 会被 ScrubStart 取消。
@@ -2128,6 +2330,9 @@ void OnlineDragPreviewTestRunner::Run() {
   const DragResult forward = RunDragPass(
       QStringLiteral("forward"), start, end, options_.drag_samples,
       options_.cache_hit_only, true);
+  // D4（test-only）：正向拖动结束后立刻 dump“离最终目标最近的已缓存帧”，
+  // 供人眼/清晰度量化复核；此时预览器仍在（只是 Pause），缓存未被后续拖动替换。
+  MaybeDumpPreviewFrame(end);
   Check("forward_preview_active", forward.preview_active_during,
         window_->OnlinePreviewStateForTest());
   Check("forward_preview_presented", forward.presented > 0,
@@ -2345,6 +2550,22 @@ void OnlineDragPreviewTestRunner::Run() {
   // D2：拖动结束（解码器仍在、只是 Pause）时的实际配置/峰值快照；后面的
   // 短拖/关窗会释放解码器，不能留到最后再读。
   const QString drag_config_stats = PreviewDragConfigStats(window_);
+  // D4：显式旧档（1024/64MiB）兼容用例在缓存命中路径也单独打一行，口径与
+  // parity 探针的 legacy_64mib 一致（门本身只在 parity 探针里）。
+  {
+    const QHash<QString, QString> legacy_tokens =
+        ParsePreviewConfigTokens(window_->OnlinePreviewConfigForTest());
+    if (legacy_tokens.value(QStringLiteral("max_side")).toInt() == 1024 &&
+        legacy_tokens.value(QStringLiteral("cache_mb")).toLongLong() == 64) {
+      Print(QStringLiteral(
+                "legacy_64mib peak=%1 frames=%2 limit=%3 cache_mb=64 "
+                "max_side=1024")
+                .arg(static_cast<qulonglong>(
+                    window_->OnlinePreviewCachePeakBytesForTest()))
+                .arg(window_->OnlinePreviewCachedFramesForTest())
+                .arg(legacy_tokens.value(QStringLiteral("frames"))));
+    }
+  }
 
   if (!options_.cache_hit_only) {
     RunUncachedPass();

@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <QString>
 
@@ -135,6 +137,10 @@ void Log(const char* format, ...) {
   std::fflush(stderr);
   va_end(arguments);
 }
+
+// D4（仅测试）：最近创建的实例，供探针在真实会话里 dump 有界缓存帧。
+// 生命周期跟随构造函数/析构函数；产品代码不读它。
+std::atomic<OnlinePreviewDecoder*> g_latest_instance{nullptr};
 
 }  // namespace
 
@@ -1831,9 +1837,19 @@ struct OnlinePreviewDecoder::Impl {
   }
 };
 
-OnlinePreviewDecoder::OnlinePreviewDecoder() : impl_(std::make_unique<Impl>()) {}
+OnlinePreviewDecoder::OnlinePreviewDecoder() : impl_(std::make_unique<Impl>()) {
+  g_latest_instance.store(this, std::memory_order_release);
+}
 
-OnlinePreviewDecoder::~OnlinePreviewDecoder() = default;
+OnlinePreviewDecoder::~OnlinePreviewDecoder() {
+  OnlinePreviewDecoder* expected = this;
+  g_latest_instance.compare_exchange_strong(expected, nullptr,
+                                            std::memory_order_acq_rel);
+}
+
+OnlinePreviewDecoder* OnlinePreviewDecoder::LatestInstanceForTest() {
+  return g_latest_instance.load(std::memory_order_acquire);
+}
 
 bool OnlinePreviewDecoder::Configure(const Config& config) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2451,6 +2467,95 @@ std::uint64_t OnlinePreviewDecoder::primed_frames() const {
 bool OnlinePreviewDecoder::IsFrameCached(std::int64_t frame) const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->HasExactLocked(frame);
+}
+
+bool OnlinePreviewDecoder::DumpCachedFrameNv12ForTest(
+    std::int64_t frame_index, const std::string& path) const {
+  if (frame_index < 0 || path.empty()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  const AVFrame* frame = nullptr;
+  for (const CachedPreview& cached : impl_->cache) {
+    if (cached.frame_index == frame_index && cached.frame != nullptr) {
+      frame = cached.frame;
+      break;
+    }
+  }
+  if (frame == nullptr || frame->width <= 0 || frame->height <= 0 ||
+      (frame->height & 1) != 0 || frame->data[0] == nullptr ||
+      frame->linesize[0] < frame->width) {
+    return false;
+  }
+  // 缓存帧格式随路径不同：降采样路径是 NV12；max_side 等于源尺寸时
+  // ScaleToNv12 直接 av_frame_clone 源帧（软件解码常见 yuv420p），不做转换。
+  // dump 统一写“NV12 布局”（Y w*h + UV w*h/2），yuv420p 在这里把 U/V 交织，
+  // 只影响证据文件，不改缓存里的帧本身。
+  const bool nv12 = frame->format == AV_PIX_FMT_NV12;
+  const bool yuv420p = frame->format == AV_PIX_FMT_YUV420P ||
+                       frame->format == AV_PIX_FMT_YUVJ420P;
+  if (!nv12 && !yuv420p) {
+    return false;
+  }
+  if (nv12 && (frame->data[1] == nullptr ||
+               frame->linesize[1] < frame->width)) {
+    return false;
+  }
+  if (yuv420p && (frame->data[1] == nullptr || frame->data[2] == nullptr ||
+                  frame->linesize[1] < frame->width / 2 ||
+                  frame->linesize[2] < frame->width / 2)) {
+    return false;
+  }
+  const int width = frame->width;
+  const int height = frame->height;
+  FILE* file = nullptr;
+#if defined(_MSC_VER)
+  if (fopen_s(&file, path.c_str(), "wb") != 0 || file == nullptr) {
+    return false;
+  }
+#else
+  file = std::fopen(path.c_str(), "wb");
+  if (file == nullptr) {
+    return false;
+  }
+#endif
+  bool ok = true;
+  std::vector<unsigned char> row(static_cast<std::size_t>(width));
+  // Y 平面：w*h，逐行去掉 linesize padding。
+  for (int y = 0; y < height && ok; ++y) {
+    std::memcpy(row.data(),
+                frame->data[0] + static_cast<std::ptrdiff_t>(y) *
+                                     frame->linesize[0],
+                static_cast<std::size_t>(width));
+    ok = std::fwrite(row.data(), 1, static_cast<std::size_t>(width), file) ==
+         static_cast<std::size_t>(width);
+  }
+  // UV 平面（NV12 交织）：w*(h/2)。
+  const int uv_height = height / 2;
+  for (int y = 0; y < uv_height && ok; ++y) {
+    if (nv12) {
+      std::memcpy(row.data(),
+                  frame->data[1] + static_cast<std::ptrdiff_t>(y) *
+                                       frame->linesize[1],
+                  static_cast<std::size_t>(width));
+    } else {
+      const unsigned char* u = frame->data[1] +
+                               static_cast<std::ptrdiff_t>(y) *
+                                   frame->linesize[1];
+      const unsigned char* v = frame->data[2] +
+                               static_cast<std::ptrdiff_t>(y) *
+                                   frame->linesize[2];
+      const int chroma_width = width / 2;
+      for (int x = 0; x < chroma_width; ++x) {
+        row[static_cast<std::size_t>(2 * x)] = u[x];
+        row[static_cast<std::size_t>(2 * x + 1)] = v[x];
+      }
+    }
+    ok = std::fwrite(row.data(), 1, static_cast<std::size_t>(width), file) ==
+         static_cast<std::size_t>(width);
+  }
+  std::fclose(file);
+  return ok;
 }
 
 }  // namespace lapian::media

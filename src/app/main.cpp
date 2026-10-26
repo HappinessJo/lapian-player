@@ -914,6 +914,8 @@ int main(int argc, char* argv[]) {
   bool online_drag_cache_hit = false;
   // C4 诊断：缓存命中打开后等待 N 毫秒再拖动（--drag-wait-ms）。
   int online_drag_wait_ms = 0;
+  // D4（test-only）：拖动预览视觉证据目录（--preview-dump-dir）。
+  QString preview_dump_dir_arg;
   // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
   bool scrub_space_test = false;
   // P1 热修：真实在线会话中保存缓存目录（两阶段），不中断播放。
@@ -1030,6 +1032,13 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--preview-resolution") &&
                i + 1 < arguments.size()) {
       qputenv("LAPIAN_PREVIEW_RESOLUTION", arguments[i + 1].toUtf8());
+      arguments.removeAt(i + 1);
+      arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--preview-dump-dir") &&
+               i + 1 < arguments.size()) {
+      // D4（test-only）：视觉证据 dump 目录；由拖动预览探针在正向拖动结束后
+      // 把最近的已缓存帧写成 .nv12，不影响产品截图/精确帧路径。
+      preview_dump_dir_arg = arguments[i + 1];
       arguments.removeAt(i + 1);
       arguments.removeAt(i);
     } else {
@@ -2186,6 +2195,7 @@ int main(int argc, char* argv[]) {
     options.start_frame_explicit = online_drag_start_frame_explicit;
     options.cache_hit_only = online_drag_cache_hit;
     options.drag_wait_ms = online_drag_wait_ms;
+    options.preview_dump_dir = preview_dump_dir_arg;
     options.throttle_bytes_per_sec = online_m1_throttle_bps;
     options.parity = online_drag_parity_test;
     options.local_only = local_drag_parity_test;

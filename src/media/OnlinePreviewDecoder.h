@@ -130,6 +130,18 @@ class OnlinePreviewDecoder {
   bool IsWarming() const;
   std::string last_error() const;
 
+  // D4（仅测试）：把有界缓存里的该帧按 NV12 布局落盘（Y 平面 w*h + UV 平面
+  // w*h/2，行内不含 linesize padding），用于人工复核清晰度；缓存没有该帧
+  // 返回 false。缓存帧本身是 NV12 时直接写；max_side 等于源宽时缓存的是
+  // av_frame_clone 的源帧（软件解码常见 yuv420p），dump 在 test-only 代码里
+  // 把 U/V 交织成 NV12 布局，不改缓存里的帧。只读缓存，不触发解码、不发布、
+  // 不淘汰、不改任何状态。
+  bool DumpCachedFrameNv12ForTest(std::int64_t frame_index,
+                                  const std::string& path) const;
+  // D4（仅测试）：最近创建的实例。在线预览的有界缓存只存在于实例内部，探针
+  // 需要它才能在“真实会话拖动结束后”dump 缓存帧；产品代码不得调用。
+  static OnlinePreviewDecoder* LatestInstanceForTest();
+
   // P0 度量（只读，不参与任何发布/解码判定）：每次 Begin/Resume 重置。
   // - open_ms：Begin/Resume 启动线程 → 解码器打开完成；线程已就绪复用为 0。
   // - first_publish_ms：Begin/Resume → 本次第一次 PublishLocked 成功。
