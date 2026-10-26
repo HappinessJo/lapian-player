@@ -15,6 +15,7 @@ class QPaintEvent;
 class QPainter;
 class QPointF;
 class QResizeEvent;
+class QTimer;
 class QWheelEvent;
 
 // T2.7/T2.8 时间轴：帧刻度、缩放、横向滚动、播放头与指针命中。
@@ -69,6 +70,14 @@ class TimelineWidget : public QWidget {
   std::pair<std::int64_t, std::int64_t> ViewFrames() const;
   // 播放头是否落在可见范围内；越界时画布贴边画方向箭头（M7：播放头常驻）。
   bool PlayheadVisible() const;
+
+  // C5：时间轴放大后拖动播放头到视口边缘/视口外时的边缘自动平移。
+  // 只在 scrub 拖动 + 内容比视图宽（MaxScroll()>0 且非 fit）时启动；
+  // 缩到最小/适配窗口（MaxScroll()==0 / IsAtFit()）绝不滚动，目标只按 x
+  // clamp 到首/末帧。松手停在最后目标帧，不因鼠标在画布外重算而跳帧。
+  // 测试钩子：AutoPanStepForTest() 走与 16ms 定时器完全相同的一次 tick。
+  bool AutoPanActiveForTest() const { return auto_pan_direction_ != 0; }
+  void AutoPanStepForTest() { AutoPanTick(); }
 
   // 指针命中：第 N 帧占据 [N, N+1)，按物理像素对齐后 floor。
   // T2.8 的鼠标事件与 T2.9/T2.10 的拖动路径共用这一入口。
@@ -147,6 +156,15 @@ class TimelineWidget : public QWidget {
   double FramePtsSeconds(std::int64_t frame) const;
   void ApplyZoom(double factor, double anchor_x);
 
+  // C5 边缘自动平移：只在放大后拖动播放头时运行（16ms PreciseTimer）。
+  // 启动条件见 AutoPanAllowed()；fit/缩到最小、非 scrub、空时间轴一律不启动。
+  bool AutoPanAllowed() const;
+  // 记录最近鼠标 x 并按左右 10px 边缘判定；进入边缘立刻先 tick 一次。
+  void UpdateAutoPan(double x);
+  // 滚动一步 + 用 clamp 后的鼠标 x 重算目标帧；到内容首/尾即停。
+  void AutoPanTick();
+  void StopAutoPan();
+
   lapian::core::TimelineModel model_;
   HeightPolicy height_policy_ = HeightPolicy::kFixed;
   std::int64_t current_frame_ = 0;
@@ -165,4 +183,14 @@ class TimelineWidget : public QWidget {
   bool waveform_visible_ = true;
   lapian::core::LoopRange loop_range_;
   std::vector<std::int64_t> marks_;
+
+  // C5：边缘自动平移状态（只影响 scrub 拖动，不新增视图状态）。
+  QTimer* auto_pan_timer_ = nullptr;
+  int auto_pan_direction_ = 0;   // -1 左 / 0 停 / +1 右
+  double auto_pan_x_ = 0.0;      // 最近鼠标 x（原始值，算 target 时 clamp）
+  double auto_pan_overshoot_ = 0.0;  // 超出边缘触发线的距离（px）
+  bool auto_pan_was_active_on_release_ = false;  // 松手保留最后 target
+  // auto-pan 自己的 tick 也会走 SetScrollPixels；标记后再进入，避免
+  // "外部滚动打断自动平移"的规则把 tick 自己停掉。
+  bool auto_pan_scrolling_ = false;
 };

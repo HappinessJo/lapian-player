@@ -4,10 +4,12 @@
 #include <QByteArray>
 #include <QColor>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointF>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -214,6 +216,504 @@ void TestPointerInteraction() {
   QApplication::sendEvent(&widget, &release);
   Check(finished == 20, "松手发出最终目标帧 20");
   Check(widget.current_frame() == 20, "松手后播放头仍在第 20 帧");
+}
+
+// C5：时间轴放大后拖动播放头的边缘自动平移（auto-pan）。
+void SendTimelineMouse(TimelineWidget& widget, QEvent::Type type,
+                       const QPointF& position, Qt::MouseButton button,
+                       Qt::MouseButtons buttons) {
+  QMouseEvent event(type, position, position, button, buttons, Qt::NoModifier);
+  QApplication::sendEvent(&widget, &event);
+}
+
+// 400px 宽 + 2000 帧 + 视图窗 50 帧 = 8px/帧（最大缩放），内容 16000px，
+// MaxScroll=15600；视图从第 1000 帧开始（scroll=8000）。
+void PrepareZoomedTimeline(TimelineWidget& widget) {
+  widget.resize(400, 72);
+  widget.SetFrameCount(2000);
+  widget.SetViewWindow(1000, 50);
+}
+
+void SpinEventLoop(int milliseconds) {
+  QEventLoop loop;
+  QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+  loop.exec();
+}
+
+void TestAutoPanRightEdge() {
+  TimelineWidget widget;
+  PrepareZoomedTimeline(widget);
+  Check(widget.model().MaxScroll() > 0.0 && !widget.model().IsAtFit(),
+        "auto-pan 右边缘前置：放大后可滚动");
+  Check(NearlyEqual(widget.scroll_px(), 8000.0), "auto-pan 前置：视图从第 1000 帧开始");
+
+  qint64 started = -1;
+  qint64 finished = -1;
+  qint64 changed = -1;
+  int changed_count = 0;
+  QObject::connect(&widget, &TimelineWidget::scrubStarted,
+                   [&started](qint64 frame) { started = frame; });
+  QObject::connect(&widget, &TimelineWidget::scrubTargetChanged,
+                   [&changed, &changed_count](qint64 frame) {
+                     changed = frame;
+                     ++changed_count;
+                   });
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  const double scroll_before = widget.scroll_px();
+  const std::int64_t current_before = widget.current_frame();
+  Check(started == 1025 && current_before == 1025,
+        "auto-pan 前置：按下 x=200 目标为第 1025 帧");
+  Check(!widget.AutoPanActiveForTest(), "只按下不启动 auto-pan");
+  Check(NearlyEqual(widget.scroll_px(), scroll_before), "只按下不滚动");
+
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(300.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  Check(!widget.AutoPanActiveForTest(), "画布中间拖动不启动 auto-pan");
+  Check(NearlyEqual(widget.scroll_px(), scroll_before), "画布中间拖动不滚动");
+
+  // 拖到 x=420（超出 400px 画布 20px）：进入边缘先同步走一步（不等 16ms）。
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(420.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  Check(widget.AutoPanActiveForTest(), "拖到右边缘启动 auto-pan");
+  const double entry_step = widget.scroll_px() - scroll_before;
+  Check(NearlyEqual(entry_step, 16.5),
+        "进入右边缘立即滚动 6+0.35*30=16.5px");
+  Check(widget.current_frame() > current_before, "右边缘目标帧比拖动前大");
+
+  // 更远（x=1000，overshoot=610）：单步被 28px 上限夹住。
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(1000.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  const double scroll_before_capped = widget.scroll_px();
+  widget.AutoPanStepForTest();
+  Check(NearlyEqual(widget.scroll_px() - scroll_before_capped, 28.0),
+        "超出边缘很远时单步上限 28px");
+
+  for (int i = 0; i < 12; ++i) {
+    widget.AutoPanStepForTest();
+  }
+  const double scroll_after_ticks = widget.scroll_px();
+  Check(scroll_after_ticks > scroll_before + 300.0, "连续 tick 持续右移");
+  Check(widget.current_frame() > current_before + 20, "连续 tick 后当前帧增大");
+  Check(changed_count > 0 && changed == widget.current_frame(),
+        "scrubTargetChanged 收到新目标");
+
+  // 真实 16ms 定时器（不是只有测试钩子）：200ms 事件循环内继续滚动。
+  const double scroll_before_timer = widget.scroll_px();
+  SpinEventLoop(200);
+  Check(widget.scroll_px() > scroll_before_timer,
+        "16ms 定时器驱动 auto-pan（200ms 内继续滚动）");
+
+  std::printf(
+      "[auto-pan] right scroll=%.1f->%.1f delta=+%.1f current=%lld->%lld "
+      "view=%lld..%lld active=%d\n",
+      scroll_before, widget.scroll_px(), widget.scroll_px() - scroll_before,
+      static_cast<long long>(current_before),
+      static_cast<long long>(widget.current_frame()),
+      static_cast<long long>(widget.ViewFrames().first),
+      static_cast<long long>(widget.ViewFrames().second),
+      widget.AutoPanActiveForTest() ? 1 : 0);
+
+  const std::int64_t last_current = widget.current_frame();
+  const double scroll_at_release = widget.scroll_px();
+  const auto view_at_release = widget.ViewFrames();
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(420.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(finished == last_current, "松手发出最后 tick 的目标帧");
+  Check(widget.current_frame() == last_current, "松手停在最后目标帧");
+  Check(finished == widget.current_frame(), "scrubFinished == current_frame");
+  Check(!widget.AutoPanActiveForTest(), "松手后 auto-pan 停止");
+  Check(NearlyEqual(widget.scroll_px(), scroll_at_release), "松手不额外滚动");
+  Check(widget.ViewFrames() == view_at_release, "松手不改变视图范围");
+}
+
+void TestAutoPanLeftEdge() {
+  TimelineWidget widget;
+  PrepareZoomedTimeline(widget);
+
+  qint64 finished = -1;
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  const double scroll_before = widget.scroll_px();
+  const std::int64_t current_before = widget.current_frame();
+
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(-20.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  Check(widget.AutoPanActiveForTest(), "拖到左边缘启动 auto-pan");
+  const double entry_step = scroll_before - widget.scroll_px();
+  Check(NearlyEqual(entry_step, 16.5),
+        "进入左边缘立即滚动 -16.5px（左右对称）");
+  Check(widget.current_frame() < current_before, "左边缘目标帧比拖动前小");
+
+  for (int i = 0; i < 15; ++i) {
+    widget.AutoPanStepForTest();
+  }
+  const double scroll_after_ticks = widget.scroll_px();
+  Check(scroll_after_ticks < scroll_before, "连续 tick 持续左移");
+  Check(widget.current_frame() < current_before, "连续 tick 后当前帧继续减小");
+
+  std::printf(
+      "[auto-pan] left scroll=%.1f->%.1f delta=%.1f current=%lld->%lld "
+      "view=%lld..%lld active=%d\n",
+      scroll_before, scroll_after_ticks, scroll_after_ticks - scroll_before,
+      static_cast<long long>(current_before),
+      static_cast<long long>(widget.current_frame()),
+      static_cast<long long>(widget.ViewFrames().first),
+      static_cast<long long>(widget.ViewFrames().second),
+      widget.AutoPanActiveForTest() ? 1 : 0);
+
+  const std::int64_t last_current = widget.current_frame();
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(-20.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(finished == last_current, "左边缘松手停在最后目标帧");
+  Check(!widget.AutoPanActiveForTest(), "左边缘松手后 auto-pan 停止");
+
+  // 到内容首帧（scroll=0）必须停住，不越过 0。
+  widget.SetScrollPixels(0.0);
+  Check(!widget.AutoPanActiveForTest(), "外部 SetScrollPixels 停 auto-pan");
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  Check(widget.current_frame() == 25, "scroll=0 时按下 x=200 目标为第 25 帧");
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(-20.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  Check(!widget.AutoPanActiveForTest(), "已到内容首帧时 auto-pan 立即停止");
+  Check(NearlyEqual(widget.scroll_px(), 0.0), "内容首帧不再向左滚动");
+  Check(widget.current_frame() == 0, "内容首帧目标 clamp 到第 0 帧");
+  for (int i = 0; i < 5; ++i) {
+    widget.AutoPanStepForTest();
+  }
+  Check(NearlyEqual(widget.scroll_px(), 0.0) && widget.current_frame() == 0,
+        "内容首帧连续 tick 不越过 0");
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(-20.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(finished == 0 && widget.current_frame() == 0, "内容首帧松手为第 0 帧");
+}
+
+void TestAutoPanDisabledAtFit() {
+  TimelineWidget widget;
+  widget.resize(400, 72);
+  widget.SetFrameCount(2000);
+  widget.FitToWindow();
+  Check(NearlyEqual(widget.model().MaxScroll(), 0.0) && widget.model().IsAtFit(),
+        "fit 前置：全片在视图内、MaxScroll=0");
+  const double scroll_fit = widget.scroll_px();
+  const auto view_fit = widget.ViewFrames();
+  Check(view_fit.first == 0 && view_fit.second == 1999,
+        "fit 前置：可见范围 0..1999");
+
+  qint64 changed = -1;
+  qint64 finished = -1;
+  QObject::connect(&widget, &TimelineWidget::scrubTargetChanged,
+                   [&changed](qint64 frame) { changed = frame; });
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+
+  // 右边缘：不启动、不滚动，目标 clamp 到末帧。
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  Check(widget.current_frame() == 1000, "fit 时按下 x=200 目标为第 1000 帧");
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(420.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  widget.AutoPanStepForTest();
+  SpinEventLoop(300);
+  Check(!widget.AutoPanActiveForTest(), "fit 时右边缘绝不启动 auto-pan");
+  Check(NearlyEqual(widget.scroll_px(), scroll_fit), "fit 时右边缘不滚动");
+  Check(widget.ViewFrames() == view_fit, "fit 时右边缘视图范围不变");
+  Check(widget.current_frame() == 1999, "fit 时右侧越界目标 clamp 到末帧");
+  Check(changed == 1999, "fit 时 scrubTargetChanged 仍报末帧");
+
+  // 左边缘：同样不滚动，目标 clamp 到首帧。
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(-20.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  widget.AutoPanStepForTest();
+  SpinEventLoop(300);
+  Check(!widget.AutoPanActiveForTest(), "fit 时左边缘绝不启动 auto-pan");
+  Check(NearlyEqual(widget.scroll_px(), scroll_fit), "fit 时左边缘不滚动");
+  Check(widget.ViewFrames() == view_fit, "fit 时左边缘视图范围不变");
+  Check(widget.current_frame() == 0, "fit 时左侧越界目标 clamp 到首帧");
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(-20.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(finished == 0 && widget.current_frame() == 0, "fit 时松手停在首帧");
+
+  // "缩到最小" = 比例被夹回 fit：同样不许 auto-pan。
+  widget.SetPixelsPerFrame(0.001);
+  Check(widget.model().IsAtFit(), "最小缩放被夹到全片适配");
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(420.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  widget.AutoPanStepForTest();
+  Check(!widget.AutoPanActiveForTest(), "缩到最小时右边缘不启动 auto-pan");
+  Check(NearlyEqual(widget.scroll_px(), 0.0), "缩到最小时右边缘不滚动");
+  Check(widget.current_frame() == 1999, "缩到最小时目标 clamp 到末帧");
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(-20.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(-20.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(widget.current_frame() == 0, "缩到最小时左侧目标 clamp 到首帧");
+
+  std::printf(
+      "[auto-pan] fit scroll=%.1f->%.1f view=%lld..%lld active=0 current=%lld\n",
+      scroll_fit, widget.scroll_px(),
+      static_cast<long long>(widget.ViewFrames().first),
+      static_cast<long long>(widget.ViewFrames().second),
+      static_cast<long long>(widget.current_frame()));
+}
+
+void TestAutoPanStopsAtContentEnd() {
+  TimelineWidget widget;
+  PrepareZoomedTimeline(widget);
+  qint64 finished = -1;
+  QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                   [&finished](qint64 frame) { finished = frame; });
+
+  widget.SetScrollPixels(widget.model().MaxScroll());
+  const double scroll_at_end = widget.scroll_px();
+  Check(NearlyEqual(scroll_at_end, 15600.0), "末尾前置：scroll 在 MaxScroll");
+
+  SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                    Qt::LeftButton, Qt::LeftButton);
+  Check(widget.current_frame() == 1975, "末尾前置：按下目标为第 1975 帧");
+  SendTimelineMouse(widget, QEvent::MouseMove, QPointF(420.0, 30.0),
+                    Qt::NoButton, Qt::LeftButton);
+  Check(!widget.AutoPanActiveForTest(), "到内容末尾 auto-pan 立即停止");
+  Check(NearlyEqual(widget.scroll_px(), scroll_at_end), "内容末尾不再滚动");
+  Check(widget.current_frame() == 1999, "内容末尾目标为末帧");
+  for (int i = 0; i < 8; ++i) {
+    widget.AutoPanStepForTest();
+  }
+  Check(NearlyEqual(widget.scroll_px(), scroll_at_end), "末尾连续 tick 不越过上限");
+  Check(widget.current_frame() == 1999, "末尾连续 tick 不循环回第 0 帧");
+
+  std::printf("[auto-pan] end scroll=%.1f->%.1f active=0 current=%lld view=%lld..%lld\n",
+              scroll_at_end, widget.scroll_px(),
+              static_cast<long long>(widget.current_frame()),
+              static_cast<long long>(widget.ViewFrames().first),
+              static_cast<long long>(widget.ViewFrames().second));
+
+  SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(420.0, 30.0),
+                    Qt::LeftButton, Qt::NoButton);
+  Check(finished == 1999 && widget.current_frame() == 1999,
+        "末尾松手为末帧（不循环）");
+  Check(!widget.AutoPanActiveForTest(), "末尾松手后 auto-pan 停止");
+}
+
+void TestAutoPanStopsOnViewChanges() {
+  auto start_pan = [](TimelineWidget& widget) {
+    PrepareZoomedTimeline(widget);
+    SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                      Qt::LeftButton, Qt::LeftButton);
+    SendTimelineMouse(widget, QEvent::MouseMove, QPointF(420.0, 30.0),
+                      Qt::NoButton, Qt::LeftButton);
+  };
+
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    Check(widget.AutoPanActiveForTest(), "SetFrameCount 前置：auto-pan 在跑");
+    widget.SetFrameCount(0);
+    Check(!widget.AutoPanActiveForTest(), "SetFrameCount(0) 停 auto-pan");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.Clear();
+    Check(!widget.AutoPanActiveForTest(), "Clear 停 auto-pan");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.SetViewWindow(0, 100);
+    Check(!widget.AutoPanActiveForTest(), "SetViewWindow 停 auto-pan");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.SetPixelsPerFrame(2.0);
+    Check(!widget.AutoPanActiveForTest(), "SetPixelsPerFrame 停 auto-pan");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.SetScrollPixels(4000.0);
+    Check(!widget.AutoPanActiveForTest(), "外部 SetScrollPixels 停 auto-pan");
+    Check(NearlyEqual(widget.scroll_px(), 4000.0), "外部 SetScrollPixels 生效");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.ZoomIn();
+    Check(!widget.AutoPanActiveForTest(), "ZOOM 停 auto-pan");
+  }
+  {
+    TimelineWidget widget;
+    start_pan(widget);
+    widget.FitToWindow();
+    Check(!widget.AutoPanActiveForTest(), "FitToWindow 停 auto-pan");
+  }
+  {
+    // resize 事件只在控件已创建后同步派发，先 show 一次再改几何。
+    TimelineWidget widget;
+    widget.show();
+    QApplication::processEvents();
+    start_pan(widget);
+    Check(widget.AutoPanActiveForTest(), "resize 前置：auto-pan 在跑");
+    widget.resize(500, 72);
+    QApplication::processEvents();
+    Check(!widget.AutoPanActiveForTest(), "resizeEvent 停 auto-pan");
+  }
+  {
+    // 只按在右边缘、不拖动：不启动也不滚动。
+    TimelineWidget widget;
+    PrepareZoomedTimeline(widget);
+    const double scroll_before = widget.scroll_px();
+    SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(395.0, 30.0),
+                      Qt::LeftButton, Qt::LeftButton);
+    Check(!widget.AutoPanActiveForTest(), "只按在右边缘不启动 auto-pan");
+    SpinEventLoop(120);
+    Check(NearlyEqual(widget.scroll_px(), scroll_before),
+          "只按在右边缘不滚动");
+    SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(395.0, 30.0),
+                      Qt::LeftButton, Qt::NoButton);
+    Check(!widget.AutoPanActiveForTest(), "松手后仍未启动 auto-pan");
+  }
+}
+
+// C5：一次远拖到画布外（x=width+100）时目标帧必须单调推进。修前 mouseMove 用
+// 原始 x 先把目标跳到画布外，第一次 tick 又用 clamp 后的 x 拉回来 → 播放头
+// "先右跳再左退"、scrubTargetChanged 抖动。
+void TestAutoPanNoBackJump() {
+  {
+    TimelineWidget widget;
+    PrepareZoomedTimeline(widget);
+    qint64 finished = -1;
+    QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                     [&finished](qint64 frame) { finished = frame; });
+
+    SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                      Qt::LeftButton, Qt::LeftButton);
+    const double scroll_start = widget.scroll_px();
+    const std::int64_t current_start = widget.current_frame();
+    Check(current_start == 1025, "远拖前置：按下目标为第 1025 帧");
+
+    // 单次 move 直接到 x=500（400px 画布外 100px），不经过边缘带。
+    SendTimelineMouse(widget, QEvent::MouseMove, QPointF(500.0, 30.0),
+                      Qt::NoButton, Qt::LeftButton);
+    Check(widget.AutoPanActiveForTest(), "远拖到画布外启动 auto-pan");
+    const std::int64_t current_after_move = widget.current_frame();
+    Check(current_after_move >= current_start, "远拖落点目标不回退（先落在边缘帧）");
+
+    bool current_monotonic = true;
+    bool scroll_monotonic = true;
+    bool view_monotonic = true;
+    std::int64_t previous_current = current_after_move;
+    double previous_scroll = widget.scroll_px();
+    auto previous_view = widget.ViewFrames();
+    std::string current_sequence = std::to_string(current_after_move);
+    for (int i = 0; i < 15; ++i) {
+      widget.AutoPanStepForTest();
+      const std::int64_t current = widget.current_frame();
+      current_monotonic = current_monotonic && current >= previous_current;
+      scroll_monotonic = scroll_monotonic && widget.scroll_px() >= previous_scroll;
+      const auto view = widget.ViewFrames();
+      view_monotonic = view_monotonic && view.first >= previous_view.first;
+      current_sequence += "->" + std::to_string(current);
+      previous_current = current;
+      previous_scroll = widget.scroll_px();
+      previous_view = view;
+    }
+    Check(current_monotonic, "远拖右边缘 current_frame 单调不减（不回跳）");
+    Check(scroll_monotonic, "远拖右边缘 scroll 单调不减");
+    Check(view_monotonic, "远拖右边缘 ViewFrames().first 单调推进");
+    Check(previous_current > current_start + 20, "远拖右边缘目标帧持续推进");
+    Check(widget.scroll_px() > scroll_start + 300.0, "远拖右边缘视图持续右移");
+
+    std::printf(
+        "[auto-pan] no-backjump right current=%s scroll=%.1f->%.1f "
+        "view=%lld..%lld active=%d\n",
+        current_sequence.c_str(), scroll_start, widget.scroll_px(),
+        static_cast<long long>(widget.ViewFrames().first),
+        static_cast<long long>(widget.ViewFrames().second),
+        widget.AutoPanActiveForTest() ? 1 : 0);
+
+    const std::int64_t last_current = widget.current_frame();
+    const double scroll_at_release = widget.scroll_px();
+    const auto view_at_release = widget.ViewFrames();
+    SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(500.0, 30.0),
+                      Qt::LeftButton, Qt::NoButton);
+    Check(finished == last_current, "画布外松手 scrubFinished == 最后一次 current");
+    Check(widget.current_frame() == last_current, "画布外松手目标帧不回跳");
+    Check(NearlyEqual(widget.scroll_px(), scroll_at_release),
+          "画布外松手不再滚动");
+    Check(widget.ViewFrames() == view_at_release, "画布外松手视图范围不变");
+    Check(!widget.AutoPanActiveForTest(), "画布外松手 auto-pan 停止");
+  }
+
+  {
+    // 左边缘对称：一次 move 到 x=-100。
+    TimelineWidget widget;
+    PrepareZoomedTimeline(widget);
+    qint64 finished = -1;
+    QObject::connect(&widget, &TimelineWidget::scrubFinished,
+                     [&finished](qint64 frame) { finished = frame; });
+
+    SendTimelineMouse(widget, QEvent::MouseButtonPress, QPointF(200.0, 30.0),
+                      Qt::LeftButton, Qt::LeftButton);
+    const double scroll_start = widget.scroll_px();
+    const std::int64_t current_start = widget.current_frame();
+
+    SendTimelineMouse(widget, QEvent::MouseMove, QPointF(-100.0, 30.0),
+                      Qt::NoButton, Qt::LeftButton);
+    Check(widget.AutoPanActiveForTest(), "远拖到左画布外启动 auto-pan");
+    const std::int64_t current_after_move = widget.current_frame();
+    Check(current_after_move <= current_start, "远拖左落点目标不前进（先落在边缘帧）");
+
+    bool current_monotonic = true;
+    bool scroll_monotonic = true;
+    bool view_monotonic = true;
+    std::int64_t previous_current = current_after_move;
+    double previous_scroll = widget.scroll_px();
+    auto previous_view = widget.ViewFrames();
+    std::string current_sequence = std::to_string(current_after_move);
+    for (int i = 0; i < 15; ++i) {
+      widget.AutoPanStepForTest();
+      const std::int64_t current = widget.current_frame();
+      current_monotonic = current_monotonic && current <= previous_current;
+      scroll_monotonic = scroll_monotonic && widget.scroll_px() <= previous_scroll;
+      const auto view = widget.ViewFrames();
+      view_monotonic = view_monotonic && view.first <= previous_view.first;
+      current_sequence += "->" + std::to_string(current);
+      previous_current = current;
+      previous_scroll = widget.scroll_px();
+      previous_view = view;
+    }
+    Check(current_monotonic, "远拖左边缘 current_frame 单调不增（不回跳）");
+    Check(scroll_monotonic, "远拖左边缘 scroll 单调不增");
+    Check(view_monotonic, "远拖左边缘 ViewFrames().first 单调左移");
+    Check(previous_current < current_start - 20, "远拖左边缘目标帧持续左移");
+    Check(widget.scroll_px() < scroll_start - 300.0, "远拖左边缘视图持续左移");
+
+    std::printf(
+        "[auto-pan] no-backjump left current=%s scroll=%.1f->%.1f "
+        "view=%lld..%lld active=%d\n",
+        current_sequence.c_str(), scroll_start, widget.scroll_px(),
+        static_cast<long long>(widget.ViewFrames().first),
+        static_cast<long long>(widget.ViewFrames().second),
+        widget.AutoPanActiveForTest() ? 1 : 0);
+
+    const std::int64_t last_current = widget.current_frame();
+    SendTimelineMouse(widget, QEvent::MouseButtonRelease, QPointF(-100.0, 30.0),
+                      Qt::LeftButton, Qt::NoButton);
+    Check(finished == last_current, "左画布外松手 scrubFinished == 最后一次 current");
+    Check(widget.current_frame() == last_current, "左画布外松手目标帧不回跳");
+    Check(!widget.AutoPanActiveForTest(), "左画布外松手 auto-pan 停止");
+  }
 }
 
 void TestWaveformRender() {
@@ -505,6 +1005,12 @@ int main(int argc, char** argv) {
   TestModel();
   TestWidgetViewState();
   TestPointerInteraction();
+  TestAutoPanRightEdge();
+  TestAutoPanLeftEdge();
+  TestAutoPanNoBackJump();
+  TestAutoPanDisabledAtFit();
+  TestAutoPanStopsAtContentEnd();
+  TestAutoPanStopsOnViewChanges();
   TestWaveformRender();
   TestLoopRender();
   TestMarkRenderAndHit();

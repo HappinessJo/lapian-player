@@ -13,6 +13,7 @@
 #include <QRectF>
 #include <QResizeEvent>
 #include <QSizePolicy>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -28,6 +29,14 @@ constexpr double kPlayheadMarginPx = 8.0;
 // 越界播放头贴边箭头（Fill/Fixed 共用）。
 constexpr double kOffViewArrowWidth = 6.0;
 
+// C5：放大后拖动播放头到左右边缘的自动平移。
+// 边缘带宽度按逻辑像素（DPI 无关）；步长随鼠标超出边缘触发线的距离增大。
+constexpr int kAutoPanEdgePx = 10;
+constexpr int kAutoPanIntervalMs = 16;
+constexpr double kAutoPanBaseStepPx = 6.0;
+constexpr double kAutoPanOvershootFactor = 0.35;
+constexpr double kAutoPanMaxStepPx = 28.0;
+
 }  // namespace
 
 TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
@@ -38,6 +47,12 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
   setFocusPolicy(Qt::NoFocus);
   setToolTip(QStringLiteral("滚轮缩放 · Shift+滚轮横向滚动 · +/- 缩放"));
   // 3B：内部横向滚动条已删除（视图窗滑块取代）；横向平移由滚轮/滑块负责。
+  // C5：边缘自动平移定时器。只在放大后拖动播放头到边缘时运行，parent=this
+  // 保证控件销毁/隐藏后不会再有 tick。
+  auto_pan_timer_ = new QTimer(this);
+  auto_pan_timer_->setTimerType(Qt::PreciseTimer);
+  auto_pan_timer_->setInterval(kAutoPanIntervalMs);
+  connect(auto_pan_timer_, &QTimer::timeout, this, &TimelineWidget::AutoPanTick);
 }
 
 void TimelineWidget::Clear() {
@@ -48,6 +63,7 @@ void TimelineWidget::Clear() {
 }
 
 void TimelineWidget::SetFrameCount(std::int64_t count) {
+  StopAutoPan();
   if (scrubbing_) {
     scrubbing_ = false;
     follow_playhead_ = follow_before_scrub_;
@@ -90,6 +106,7 @@ void TimelineWidget::NotifyViewChanged() {
 }
 
 void TimelineWidget::FitToWindow() {
+  StopAutoPan();
   fit_mode_ = true;
   model_.Fit();
   NotifyViewChanged();
@@ -119,6 +136,7 @@ void TimelineWidget::ZoomOut() {
 }
 
 void TimelineWidget::SetPixelsPerFrame(double pixels_per_frame) {
+  StopAutoPan();
   model_.SetPixelsPerFrame(pixels_per_frame);
   NotifyViewChanged();
   update();
@@ -129,6 +147,7 @@ void TimelineWidget::ZoomAtFactor(double factor, double anchor_x) {
 }
 
 void TimelineWidget::SetViewWindow(double start_frame, double span_frames) {
+  StopAutoPan();
   if (model_.frame_count() <= 0 || width() <= 0) {
     return;
   }
@@ -148,6 +167,11 @@ void TimelineWidget::SetViewWindow(double start_frame, double span_frames) {
 }
 
 void TimelineWidget::SetScrollPixels(double scroll_px) {
+  // 外部滚动（滚轮/滑块/面板）会打断自动平移；auto-pan 自己的 tick 例外，
+  // 否则每一步都会把自己停掉（见 AutoPanTick）。
+  if (!auto_pan_scrolling_) {
+    StopAutoPan();
+  }
   model_.SetScroll(scroll_px);
   NotifyViewChanged();
   update();
@@ -195,6 +219,8 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     QWidget::mousePressEvent(event);
     return;
   }
+  // C5：按在边缘不启动自动平移——必须真的拖动进入/越过边缘。
+  StopAutoPan();
   if (!scrubbing_) {
     follow_before_scrub_ = follow_playhead_;
     follow_playhead_ = false;
@@ -212,15 +238,33 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
   if (!scrubbing_ || !(event->buttons() & Qt::LeftButton)) {
+    StopAutoPan();
     QWidget::mouseMoveEvent(event);
     return;
   }
-  const std::int64_t target = FrameAtPosition(event->position());
+  const double raw_x = event->position().x();
+  // C5：放大后拖到左/右边缘时，目标帧先落在**边缘帧**，而不是画布外的原始
+  // x。否则一次远拖（如 x=width+100）会先跳到画布外的帧，再被 auto-pan
+  // 第一次 tick 用 clamp 后的 x 拉回来，造成播放头/目标帧"先右跳再左退"。
+  // 方向/overshoot 仍用原始 x（见 UpdateAutoPan）。
+  double target_x = raw_x;
+  if (AutoPanAllowed()) {
+    const double right_trigger = static_cast<double>(width()) - kAutoPanEdgePx;
+    if (raw_x < kAutoPanEdgePx || raw_x > right_trigger) {
+      target_x = std::clamp(
+          raw_x, 0.0, std::max(0.0, static_cast<double>(width()) - 1.0));
+    }
+  }
+  const std::int64_t target =
+      FrameAtPosition(QPointF(target_x, event->position().y()));
   if (target != drag_target_frame_) {
     drag_target_frame_ = target;
     SetCurrentFrame(drag_target_frame_);
     emit scrubTargetChanged(static_cast<qint64>(drag_target_frame_));
   }
+  // C5：先更新目标帧，再按当前鼠标 x 判定边缘自动平移（进入边缘立刻先走一步）。
+  // 每次都用控件当前宽度，不缓存旧几何（窄窗/全屏/高 DPI 都成立）。
+  UpdateAutoPan(raw_x);
   event->accept();
 }
 
@@ -229,16 +273,108 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     QWidget::mouseReleaseEvent(event);
     return;
   }
-  const std::int64_t target = FrameAtPosition(event->position());
-  if (target != drag_target_frame_) {
-    drag_target_frame_ = target;
-    SetCurrentFrame(drag_target_frame_);
-    emit scrubTargetChanged(static_cast<qint64>(drag_target_frame_));
+  // C5：松手时若刚才在自动平移，保留最后一次 tick 算出的目标帧；不能再按
+  // 鼠标 x 重算——拖动到画布外时那样会跳帧（x 已超出可见范围）。
+  auto_pan_was_active_on_release_ = auto_pan_direction_ != 0;
+  StopAutoPan();
+  if (!auto_pan_was_active_on_release_) {
+    const std::int64_t target = FrameAtPosition(event->position());
+    if (target != drag_target_frame_) {
+      drag_target_frame_ = target;
+      SetCurrentFrame(drag_target_frame_);
+      emit scrubTargetChanged(static_cast<qint64>(drag_target_frame_));
+    }
   }
   scrubbing_ = false;
   follow_playhead_ = follow_before_scrub_;
   emit scrubFinished(static_cast<qint64>(drag_target_frame_));
   event->accept();
+}
+
+bool TimelineWidget::AutoPanAllowed() const {
+  // 四条同时满足才允许边缘自动平移；fit/缩到最小（MaxScroll()==0 或
+  // IsAtFit()）时绝不启动，拖出边界只把目标 clamp 到首/末帧。
+  return scrubbing_ && width() > 0 && model_.frame_count() > 0 &&
+         model_.MaxScroll() > 0.0 && !model_.IsAtFit();
+}
+
+void TimelineWidget::UpdateAutoPan(double x) {
+  auto_pan_x_ = x;
+  if (!AutoPanAllowed()) {
+    StopAutoPan();
+    return;
+  }
+  const double edge = static_cast<double>(kAutoPanEdgePx);
+  const double right_trigger = static_cast<double>(width()) - edge;
+  int direction = 0;
+  double overshoot = 0.0;
+  if (x > right_trigger) {
+    direction = 1;
+    overshoot = x - right_trigger;
+  } else if (x < edge) {
+    direction = -1;
+    overshoot = edge - x;
+  }
+  if (direction == 0) {
+    // 回到画布中间：停 timer，保持现有目标帧不动。
+    StopAutoPan();
+    return;
+  }
+  const bool entering = auto_pan_direction_ != direction;
+  auto_pan_direction_ = direction;
+  auto_pan_overshoot_ = std::max(0.0, overshoot);
+  if (entering) {
+    // 进入边缘立刻先走一步（不等 16ms），然后由定时器继续。
+    AutoPanTick();
+    if (auto_pan_direction_ == 0) {
+      return;  // 已经在内容首/尾，无可滚动
+    }
+  }
+  if (auto_pan_timer_ != nullptr && !auto_pan_timer_->isActive()) {
+    auto_pan_timer_->start();
+  }
+}
+
+void TimelineWidget::AutoPanTick() {
+  if (auto_pan_direction_ == 0) {
+    return;
+  }
+  if (!AutoPanAllowed()) {
+    StopAutoPan();
+    return;
+  }
+  const double before = model_.scroll();
+  const double overshoot = std::max(0.0, auto_pan_overshoot_);
+  const double step =
+      std::min(kAutoPanMaxStepPx,
+               kAutoPanBaseStepPx + kAutoPanOvershootFactor * overshoot);
+  auto_pan_scrolling_ = true;
+  SetScrollPixels(before + static_cast<double>(auto_pan_direction_) * step);
+  auto_pan_scrolling_ = false;
+
+  // 滚动后用 clamp 到 [0, width-1] 的鼠标 x 重算目标帧：播放头保持在视口
+  // 边缘，视图继续按鼠标位置方向推进（到内容首/尾由 scroll 夹取自然停住）。
+  const double x = std::clamp(
+      auto_pan_x_, 0.0, std::max(0.0, static_cast<double>(width()) - 1.0));
+  const std::int64_t target = model_.FrameAtX(x);
+  if (target != drag_target_frame_) {
+    drag_target_frame_ = target;
+    SetCurrentFrame(target);
+    emit scrubTargetChanged(static_cast<qint64>(target));
+  }
+
+  const bool scroll_moved = std::abs(model_.scroll() - before) > 1e-9;
+  if (!scroll_moved || !AutoPanAllowed()) {
+    StopAutoPan();
+  }
+}
+
+void TimelineWidget::StopAutoPan() {
+  if (auto_pan_timer_ != nullptr && auto_pan_timer_->isActive()) {
+    auto_pan_timer_->stop();
+  }
+  auto_pan_direction_ = 0;
+  auto_pan_overshoot_ = 0.0;
 }
 
 int TimelineWidget::ContentBottom() const {
@@ -603,6 +739,7 @@ void TimelineWidget::ApplyZoom(double factor, double anchor_x) {
   if (model_.frame_count() <= 0) {
     return;
   }
+  StopAutoPan();
   const double before = model_.pixels_per_frame();
   const double after = model_.ZoomAt(factor, anchor_x);
   NotifyViewChanged();
@@ -739,6 +876,8 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
 
 void TimelineWidget::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
+  // C5：几何变化（窄窗/全屏/DPI 切换）打断自动平移；下一次 tick 用新宽度。
+  StopAutoPan();
   const double scroll_before = model_.scroll();
   const double ppf_before = model_.pixels_per_frame();
   model_.SetViewportWidth(width());
@@ -763,16 +902,12 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
 
   const QPoint angle = event->angleDelta();
   if (event->modifiers().testFlag(Qt::ShiftModifier) && angle.y() != 0) {
-    model_.SetScroll(model_.scroll() - static_cast<double>(angle.y()));
-    NotifyViewChanged();
-    update();
+    SetScrollPixels(model_.scroll() - static_cast<double>(angle.y()));
     event->accept();
     return;
   }
   if (angle.x() != 0 && angle.y() == 0) {
-    model_.SetScroll(model_.scroll() + static_cast<double>(angle.x()));
-    NotifyViewChanged();
-    update();
+    SetScrollPixels(model_.scroll() + static_cast<double>(angle.x()));
     event->accept();
     return;
   }
