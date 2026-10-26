@@ -35,6 +35,9 @@ struct OnlineDragPreviewTestOptions {
   bool scrub_space = false;
   bool scrub_space_local = false;
   int scrub_space_repeats = 20;
+  // P1 热修探针（--cache-switch-online-test）：真实在线会话中保存缓存目录
+  // 不中断播放；结束会话后新根生效、下一次会话使用新根。
+  bool cache_switch = false;
 };
 
 // T8.6.1b 真实窗口探针：在线增长会话拖动预览。
@@ -144,6 +147,7 @@ class OnlineDragPreviewTestRunner {
   void RunLocalParity();
   void RunOnlineParity();
   void RunScrubSpace();
+  void RunCacheSwitch();
   bool EnsureLocalReady(QString* error);
   ParityResult RunParitySequence(const QString& label, qint64 start, qint64 end,
                                  int samples, int duration_ms, bool forward,

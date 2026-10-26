@@ -201,14 +201,17 @@ void CacheSettingsDialog::Refresh() {
   if (session_active_) {
     session_label_->setText(
         session_description_.isEmpty()
-            ? QStringLiteral("在线会话打开中：不能更改缓存目录或配额；清空缓存会"
+            ? QStringLiteral("当前在线会话继续使用旧目录；新目录/配额在本次"
+                             "会话结束后生效（下次在线打开使用）。清空缓存会"
                              "保留当前会话的条目。")
             : session_description_);
   }
-  browse_button_->setEnabled(!session_active_ && cache_ != nullptr);
-  default_button_->setEnabled(!session_active_ && cache_ != nullptr);
-  quota_spin_->setEnabled(!session_active_ && cache_ != nullptr);
-  save_button_->setEnabled(!session_active_ && cache_ != nullptr);
+  // P1（两阶段保存）：在线会话中允许编辑/保存；MainWindow 只写 settings 并
+  // 置 pending，不替换当前 OnlineSession 持有的 CacheStore。
+  browse_button_->setEnabled(cache_ != nullptr);
+  default_button_->setEnabled(cache_ != nullptr);
+  quota_spin_->setEnabled(cache_ != nullptr);
+  save_button_->setEnabled(cache_ != nullptr);
   clear_button_->setEnabled(cache_ != nullptr);
   cleanup_button_->setEnabled(cache_ != nullptr);
   open_button_->setEnabled(cache_ != nullptr);
@@ -234,7 +237,11 @@ void CacheSettingsDialog::UpdatePendingUi() {
       QDir::cleanPath(pending_root_) != QDir::cleanPath(cache_->root());
   if (changed) {
     SetStateProperty(root_state_label_, "warn");
-    root_state_label_->setText(QStringLiteral("目录已更改，点击“保存”后生效。"));
+    root_state_label_->setText(
+        session_active_
+            ? QStringLiteral("目录已更改：保存后本次在线会话仍用旧目录，"
+                             "会话结束后生效（下次在线打开使用）。")
+            : QStringLiteral("目录已更改，点击“保存”后生效。"));
   }
 }
 
@@ -314,10 +321,6 @@ bool CacheSettingsDialog::ApplyInternal(bool close_on_success, QString* error) {
     }
     return false;
   };
-  if (session_active_) {
-    return fail(QStringLiteral("在线会话打开中，不能更改缓存目录或配额；"
-                               "请先关闭在线视频。"));
-  }
   if (cache_ == nullptr || !callbacks_.apply) {
     return fail(QStringLiteral("在线缓存未初始化，无法保存。"));
   }
@@ -328,7 +331,13 @@ bool CacheSettingsDialog::ApplyInternal(bool close_on_success, QString* error) {
     return fail(apply_error.isEmpty() ? QStringLiteral("保存失败") : apply_error);
   }
   pending_root_ = normalized;
-  SetStatus(QStringLiteral("已保存：缓存目录/配额已生效，并在下次启动继续使用。"),
+  // P1：在线会话中保存是两阶段的——本次会话仍用旧 CacheStore，MainWindow 只
+  // 写 settings + pending；新目录/配额在会话结束后生效。
+  SetStatus(session_active_
+                ? QStringLiteral("已保存：本次在线会话继续使用旧目录/配额，"
+                                 "会话结束后生效（下次在线打开使用）。")
+                : QStringLiteral(
+                      "已保存：缓存目录/配额已生效，并在下次启动继续使用。"),
             false);
   if (close_on_success) {
     accept();

@@ -716,8 +716,9 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
     Check(QStringLiteral("ui-save-enabled"), dialog.SaveEnabledForTest());
     Check(QStringLiteral("ui-clear-enabled"), dialog.ClearEnabledForTest());
     dialog.SetSessionActive(true, QStringLiteral("测试会话"));
-    Check(QStringLiteral("ui-active-disables-save"), !dialog.SaveEnabledForTest());
-    Check(QStringLiteral("ui-active-disables-quota"), !dialog.QuotaEnabledForTest());
+    // P1：在线会话中不再禁用目录/配额/保存（两阶段保存）。
+    Check(QStringLiteral("ui-active-keeps-save"), dialog.SaveEnabledForTest());
+    Check(QStringLiteral("ui-active-keeps-quota"), dialog.QuotaEnabledForTest());
     Check(QStringLiteral("ui-active-keeps-clear"), dialog.ClearEnabledForTest());
     dialog.SetSessionActive(false);
     Check(QStringLiteral("ui-inactive-enables-save"), dialog.SaveEnabledForTest());
@@ -794,6 +795,88 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                                       : QStringLiteral("fail");
   }
   PrintKV("maintenance", maintenance_state);
+
+  // 9) P1：在线会话中保存缓存目录/配额 = 两阶段。保存后当前 store/root 不变、
+  // settings 已写、pending=1；会话结束（idle）后新 root 生效，旧目录与当前
+  // `.part` 都不被删。
+  QString deferred_state = QStringLiteral("skip");
+  if (options.ui_smoke) {
+    const int failures_before = g_failures;
+    MainWindow window(nullptr, settings_root, false);
+    const QString pending_old_root =
+        QDir(scratch).filePath(QStringLiteral("cache-pending-old"));
+    const QString pending_new_root =
+        QDir(scratch).filePath(QStringLiteral("cache-pending-new"));
+    QDir(pending_old_root).removeRecursively();
+    QDir(pending_new_root).removeRecursively();
+    QString pending_error;
+    Check(QStringLiteral("deferred-set-old-root"),
+          window.ApplyCacheSettingsForTest(pending_old_root, 9, &pending_error),
+          pending_error);
+    Check(QStringLiteral("deferred-old-root-active"),
+          QDir::cleanPath(window.OnlineCacheRootForTest())
+                  .compare(QDir::cleanPath(pending_old_root),
+                           Qt::CaseInsensitive) == 0,
+          window.OnlineCacheRootForTest());
+    // 当前会话正在写的 `.part`（用独立 store 在旧根里创建路径，模拟进行中）。
+    const CacheKey pending_key{
+        UniqueKey(QStringLiteral("p"), 14), 114, 80, 7};
+    CacheStore pending_old_store(pending_old_root, 9 * kGb);
+    const QString pending_part = pending_old_store.PartPath(pending_key);
+    Check(QStringLiteral("deferred-seed-part"),
+          CreateSizedFile(pending_part, 16 * kKb), pending_part);
+
+    // 在线会话进行中：保存新目录/配额。
+    window.SetOnlineModeForTest(true);
+    Check(QStringLiteral("deferred-online-apply"),
+          window.ApplyCacheSettingsForTest(pending_new_root, 8, &pending_error),
+          pending_error);
+    Check(QStringLiteral("deferred-root-unchanged"),
+          QDir::cleanPath(window.OnlineCacheRootForTest())
+                  .compare(QDir::cleanPath(pending_old_root),
+                           Qt::CaseInsensitive) == 0,
+          window.OnlineCacheRootForTest());
+    Check(QStringLiteral("deferred-pending-flag"),
+          window.CacheSettingsPendingForTest());
+    Check(QStringLiteral("deferred-part-kept"), QFileInfo::exists(pending_part),
+          pending_part);
+    Check(QStringLiteral("deferred-old-root-kept"),
+          QFileInfo(pending_old_root).isDir());
+    {
+      SettingsStore check_settings(settings_root);
+      const lapian::core::SettingsLoadResult reloaded = check_settings.Load();
+      Check(QStringLiteral("deferred-settings-written"),
+            reloaded.status == lapian::core::SettingsLoadStatus::kLoaded &&
+                QDir::cleanPath(reloaded.settings.cache_root)
+                        .compare(QDir::cleanPath(pending_new_root),
+                                 Qt::CaseInsensitive) == 0 &&
+                reloaded.settings.cache_quota_gb == 8,
+            QStringLiteral("root=%1 quota=%2")
+                .arg(reloaded.settings.cache_root)
+                .arg(reloaded.settings.cache_quota_gb));
+    }
+    Check(QStringLiteral("deferred-pending-before-idle"),
+          window.CacheSettingsPendingForTest());
+    // 会话结束 → idle 后应用延迟的 store。
+    window.SetOnlineModeForTest(false);
+    window.ApplyPendingCacheStoreForTest();
+    Check(QStringLiteral("deferred-applied-root"),
+          QDir::cleanPath(window.OnlineCacheRootForTest())
+                  .compare(QDir::cleanPath(pending_new_root),
+                           Qt::CaseInsensitive) == 0,
+          window.OnlineCacheRootForTest());
+    Check(QStringLiteral("deferred-pending-cleared"),
+          !window.CacheSettingsPendingForTest());
+    Check(QStringLiteral("deferred-new-root-ready"),
+          window.CacheRootReadyForTest(), window.CacheRootErrorForTest());
+    Check(QStringLiteral("deferred-old-part-still-there"),
+          QFileInfo::exists(pending_part), pending_part);
+    Check(QStringLiteral("deferred-old-cache-not-deleted"),
+          QFileInfo(pending_old_root).isDir());
+    deferred_state = g_failures == failures_before ? QStringLiteral("pass")
+                                                   : QStringLiteral("fail");
+  }
+  PrintKV("online_cache_deferred", deferred_state);
 
   const qint64 final_usage = store.UsageBytes();
   PrintKV("root", root);

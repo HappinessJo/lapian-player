@@ -2661,10 +2661,77 @@ bool MainWindow::EnsureOnlineCacheReady(QString* error) {
   return true;
 }
 
+void MainWindow::ApplyPendingCacheStoreIfIdle() {
+  if (!cache_settings_pending_) {
+    return;
+  }
+  // 只在线会话完全结束（且没有持有 store 的 OnlineSession）时换 store；
+  // 设置对话框打开期间也不换（对话框持有旧 CacheStore*）。
+  if (online_ != nullptr || online_mode_ || cache_settings_dialog_open_) {
+    return;
+  }
+  const int clamped_gb = std::clamp(
+      loaded_settings_.cache_quota_gb, lapian::core::kCacheQuotaMinGb,
+      lapian::core::kCacheQuotaMaxGb);
+  const qint64 quota =
+      static_cast<qint64>(clamped_gb) * 1024LL * 1024LL * 1024LL;
+  auto next = std::make_unique<lapian::online::CacheStore>(
+      loaded_settings_.cache_root, quota);
+  const QString next_root = next->root();
+  QString error;
+  if (!next->SetRoot(next_root, &error) ||
+      !next->SetQuotaBytes(quota, &error)) {
+    // settings 已写入；目录暂时不可用时保留 pending，下次 idle 再试。
+    online_cache_error_ = error;
+    statusBar()->showMessage(
+        QStringLiteral("缓存设置已保存，但新目录暂不可用：%1（本次仍用旧目录）")
+            .arg(error),
+        12000);
+    return;
+  }
+  if (online_cache_ != nullptr &&
+      QDir::cleanPath(online_cache_->root())
+              .compare(QDir::cleanPath(next_root), Qt::CaseInsensitive) == 0 &&
+      online_cache_->quota() == quota) {
+    // 用户把目录/配额改回原值：没有需要替换的 store。
+    cache_settings_pending_ = false;
+    return;
+  }
+  const QString old_root = online_cache_ != nullptr
+                               ? online_cache_->root()
+                               : lapian::online::CacheStore::DefaultRoot();
+  const qint64 old_usage =
+      online_cache_ != nullptr ? online_cache_->UsageBytes() : 0;
+  online_cache_ = std::move(next);
+  online_cache_ready_ = true;
+  online_cache_error_.clear();
+  cache_settings_pending_ = false;
+  // 会话已结束，可以安全回收；不迁移旧目录。
+  QString evict_error;
+  const bool evicted =
+      online_cache_->EvictToQuota(lapian::online::CacheKey{}, &evict_error);
+  if (QDir::cleanPath(old_root)
+              .compare(QDir::cleanPath(next_root), Qt::CaseInsensitive) != 0 &&
+      old_usage > 0) {
+    statusBar()->showMessage(
+        QStringLiteral("缓存设置已生效；旧目录仍有 %1，未自动迁移或删除。")
+            .arg(lapian::online::CacheStore::FormatBytes(old_usage)),
+        12000);
+  } else if (!evicted) {
+    statusBar()->showMessage(
+        QStringLiteral("缓存设置已生效；暂未完全回收：%1").arg(evict_error),
+        10000);
+  } else {
+    statusBar()->showMessage(QStringLiteral("缓存设置已生效。"), 5000);
+  }
+}
+
 void MainWindow::EnsureOnlineSession() {
   if (online_) {
     return;
   }
+  // P1：下一次在线会话前先应用延迟的缓存目录/配额。
+  ApplyPendingCacheStoreIfIdle();
   QString cache_error;
   if (!EnsureOnlineCacheReady(&cache_error)) {
     online_last_error_ =
@@ -2762,8 +2829,61 @@ bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
     return false;
   };
   if (online_mode_) {
-    return fail(QStringLiteral("在线会话打开中，不能更改缓存目录或配额；"
-                               "请先关闭在线视频。"));
+    // P1（两阶段保存）：在线会话的 OnlineSession 持有当前 CacheStore*，.part/
+    // 下载/读层都指向旧目录；这里只校验新目录（临时 store）并写 settings，
+    // 不替换 online_cache_、不 Shutdown，等 idle 后由
+    // ApplyPendingCacheStoreIfIdle() 换 store。配额同样延迟，避免
+    // EvictToQuota 清掉正在写的 .part。
+    const int pending_gb =
+        std::clamp(quota_gb, lapian::core::kCacheQuotaMinGb,
+                   lapian::core::kCacheQuotaMaxGb);
+    const qint64 pending_quota = static_cast<qint64>(pending_gb) * 1024LL *
+                                 1024LL * 1024LL;
+    const QString pending_root =
+        lapian::online::CacheManager::NormalizeRoot(root);
+    if (pending_root.isEmpty()) {
+      return fail(QStringLiteral("缓存目录为空"));
+    }
+    auto probe =
+        std::make_unique<lapian::online::CacheStore>(pending_root, pending_quota);
+    QString probe_error;
+    if (!probe->SetRoot(pending_root, &probe_error)) {
+      return fail(probe_error);
+    }
+    if (!probe->SetQuotaBytes(pending_quota, &probe_error)) {
+      return fail(probe_error);
+    }
+    lapian::core::AppSettings updated =
+        lapian::core::MergeVolumeWaveform(loaded_settings_, volume_,
+                                          waveform_visible_);
+    updated.cache_root =
+        QDir::cleanPath(pending_root).compare(
+            QDir::cleanPath(lapian::online::CacheStore::DefaultRoot()),
+            Qt::CaseInsensitive) == 0
+            ? QString()
+            : pending_root;
+    updated.cache_quota_gb = pending_gb;
+    if (settings_store_ == nullptr) {
+      return fail(
+          QStringLiteral("设置存储未初始化，无法保存缓存目录/配额。"));
+    }
+    QElapsedTimer pending_save_timer;
+    pending_save_timer.start();
+    const bool pending_saved = settings_store_->Save(updated);
+    settings_last_save_ms_ =
+        static_cast<double>(pending_save_timer.nsecsElapsed()) / 1.0e6;
+    if (!pending_saved) {
+      return fail(QStringLiteral("无法写入 settings.json，缓存目录/配额未改变；"
+                                 "请检查 %APPDATA% 写权限后重试。"));
+    }
+    loaded_settings_ = updated;
+    settings_dirty_ = false;
+    cache_settings_pending_ = true;
+    statusBar()->showMessage(
+        QStringLiteral("缓存设置已保存：本次在线会话继续使用旧目录/配额，"
+                       "会话结束后生效（下次在线打开使用新目录）。"),
+        12000);
+    return true;
   }
   const int clamped_gb = std::clamp(quota_gb, lapian::core::kCacheQuotaMinGb,
                                     lapian::core::kCacheQuotaMaxGb);
@@ -2818,6 +2938,7 @@ bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
   online_cache_ = std::move(next);
   online_cache_ready_ = true;
   online_cache_error_.clear();
+  cache_settings_pending_ = false;
   loaded_settings_ = updated;
   settings_dirty_ = false;
   // 配额调小后立即回收；读句柄占用时只提示，不阻止设置保存。
@@ -2917,6 +3038,8 @@ bool MainWindow::OpenOnlineCacheDirectory(QString* error) {
 }
 
 void MainWindow::ShowCacheSettingsDialog() {
+  // P1：打开设置前先把上次延迟的缓存设置落成新 store（仅 idle 时生效）。
+  ApplyPendingCacheStoreIfIdle();
   if (online_cache_ == nullptr) {
     InitializeOnlineCacheStore();
   }
@@ -2946,19 +3069,26 @@ void MainWindow::ShowCacheSettingsDialog() {
   };
   const QString description =
       online_mode_
-          ? QStringLiteral("在线会话打开中：不能更改缓存目录或配额；"
-                           "清空缓存会保留当前会话的条目。")
+          ? QStringLiteral("当前在线会话继续使用旧目录（本次会话的 .part 不会被"
+                           "清掉）；新目录/配额在本次会话结束后生效，下次在线"
+                           "打开使用。")
           : QString();
   lapian::app::CacheSettingsDialog dialog(
       online_cache_.get(), OnlineRecordsRoot(), online_mode_, description,
       callbacks, this);
+  cache_settings_dialog_open_ = true;
   dialog.exec();
+  cache_settings_dialog_open_ = false;
+  // 对话框已关闭，旧 CacheStore* 不再被持有；离线时立即应用延迟的设置。
+  ApplyPendingCacheStoreIfIdle();
 }
 
 void MainWindow::RunCacheMaintenance(const char* reason) {
   if (!cache_maintenance_enabled_) {
     return;
   }
+  // P1：缓存维护入口也是“会话结束后应用延迟缓存设置”的安全点。
+  ApplyPendingCacheStoreIfIdle();
   const QString reason_text =
       QString::fromLatin1(reason == nullptr ? "manual" : reason);
   QElapsedTimer timer;

@@ -439,6 +439,12 @@ class MainWindow : public QMainWindow {
   void RunCacheMaintenanceForTest();
   bool ApplyCacheSettingsForTest(const QString& root, int quota_gb,
                                  QString* error);
+  // P1 热修：在线会话中保存缓存目录/配额 → 两阶段（本次会话继续用旧 store，
+  // idle 后由 ApplyPendingCacheStoreIfIdle() 换新 store）。
+  bool CacheSettingsPendingForTest() const { return cache_settings_pending_; }
+  void ApplyPendingCacheStoreForTest() { ApplyPendingCacheStoreIfIdle(); }
+  // 只给离屏探针模拟“在线会话进行中”（不启动网络会话，不改产品路径）。
+  void SetOnlineModeForTest(bool online) { online_mode_ = online; }
   bool CacheRootReadyForTest() const { return online_cache_ready_; }
   QString CacheRootErrorForTest() const { return online_cache_error_; }
   QString CacheLastMaintenanceReasonForTest() const {
@@ -669,6 +675,10 @@ class MainWindow : public QMainWindow {
   void InitializeOnlineCacheStore();
   bool EnsureOnlineCacheReady(QString* error);
   bool ApplyCacheSettings(const QString& root, int quota_gb, QString* error);
+  // P1：只有 online_==nullptr && !online_mode_（idle）时把延迟的缓存设置换成
+  // 新 CacheStore；在线/会话进行中一律不换，避免 OnlineSession 持有悬空指针
+  // 或清掉正在写的 `.part`。
+  void ApplyPendingCacheStoreIfIdle();
   bool ClearOnlineCache(QString* error, qint64* removed_bytes, int* kept_entries);
   bool CleanupOnlineCache(QString* error, qint64* removed_bytes,
                           int* removed_entries);
@@ -905,6 +915,10 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::online::CacheStore> online_cache_;
   bool online_cache_ready_ = false;
   QString online_cache_error_;
+  // P1：在线会话中保存的新目录/配额，等 idle 后再生效（旧 store 不替换）。
+  bool cache_settings_pending_ = false;
+  // 设置对话框打开期间绝不替换 store（对话框持有旧 CacheStore*）。
+  bool cache_settings_dialog_open_ = false;
   QTimer* cache_maintenance_timer_ = nullptr;
   bool cache_maintenance_enabled_ = true;
   QString cache_last_maintenance_reason_;

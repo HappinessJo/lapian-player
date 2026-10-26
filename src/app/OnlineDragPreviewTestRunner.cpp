@@ -2,8 +2,10 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFileInfo>
 #include <QTimer>
 
 #include <algorithm>
@@ -1697,6 +1699,104 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
   QCoreApplication::exit(failures_ == 0 ? 0 : 1);
 }
 
+void OnlineDragPreviewTestRunner::RunCacheSwitch() {
+  Print(QStringLiteral(
+            "cache_switch_sample bvid=%1 cid=%2 tag=%3")
+            .arg(options_.bvid)
+            .arg(options_.cid)
+            .arg(options_.tag));
+  window_->raise();
+  window_->activateWindow();
+  window_->FocusVideoForTest();
+  QString error;
+  const bool opened = OpenOnline(false, &error);
+  Check("cache_switch_open", opened, error);
+  if (!opened) {
+    Print(QStringLiteral(
+              "cache_switch_result checks=%1 failures=%2 verdict=fail")
+              .arg(checks_)
+              .arg(failures_));
+    QCoreApplication::exit(2);
+    return;
+  }
+  Check("cache_switch_growing", window_->OnlineModeForTest() &&
+                                    !window_->OnlineCacheHitForTest(),
+        QStringLiteral("online=%1 cache_hit=%2")
+            .arg(window_->OnlineModeForTest() ? 1 : 0)
+            .arg(window_->OnlineCacheHitForTest() ? 1 : 0));
+  const QString old_root = window_->OnlineCacheRootForTest();
+  const QString part_before = window_->OnlinePartPathForTest();
+  Check("cache_switch_part_under_old_root",
+        !part_before.isEmpty() &&
+            QDir::cleanPath(part_before)
+                .startsWith(QDir::cleanPath(old_root), Qt::CaseInsensitive),
+        QStringLiteral("part=%1 root=%2").arg(part_before, old_root));
+
+  // 正在播放：改缓存设置不能停播/换 store。
+  window_->StartPlaybackForTest();
+  const int presented_before = window_->PresentedFrameCountForTest();
+  Pump(800);
+  Check("cache_switch_playing_before_save", window_->IsPlayingForTest());
+  Check("cache_switch_presented_before_save",
+        window_->PresentedFrameCountForTest() > presented_before);
+
+  const QString new_root =
+      QDir::currentPath() + QStringLiteral("/build/hotfix-p1-cache-new");
+  QDir(new_root).removeRecursively();
+  QString apply_error;
+  const bool applied =
+      window_->ApplyCacheSettingsForTest(new_root, 9, &apply_error);
+  Check("cache_switch_apply_during_online", applied, apply_error);
+  Check("cache_switch_root_unchanged",
+        QDir::cleanPath(window_->OnlineCacheRootForTest())
+                .compare(QDir::cleanPath(old_root), Qt::CaseInsensitive) == 0,
+        window_->OnlineCacheRootForTest());
+  Check("cache_switch_pending", window_->CacheSettingsPendingForTest());
+  Check("cache_switch_session_alive",
+        window_->OnlineModeForTest() && window_->OnlineReadyForTest());
+  Check("cache_switch_part_unchanged",
+        window_->OnlinePartPathForTest() == part_before &&
+            QFileInfo::exists(part_before),
+        window_->OnlinePartPathForTest());
+  const int presented_at_save = window_->PresentedFrameCountForTest();
+  Pump(1000);
+  Check("cache_switch_still_playing", window_->IsPlayingForTest());
+  Check("cache_switch_still_presenting",
+        window_->PresentedFrameCountForTest() > presented_at_save,
+        QStringLiteral("presented=%1->%2")
+            .arg(presented_at_save)
+            .arg(window_->PresentedFrameCountForTest()));
+
+  // 本次会话结束 → idle 后应用新 store；下一次会话必须落在新根。
+  window_->ShutdownOnlineForTest();
+  Check("cache_switch_session_closed", !window_->OnlineModeForTest());
+  window_->ApplyPendingCacheStoreForTest();
+  Check("cache_switch_new_root_active",
+        QDir::cleanPath(window_->OnlineCacheRootForTest())
+                .compare(QDir::cleanPath(new_root), Qt::CaseInsensitive) == 0,
+        window_->OnlineCacheRootForTest());
+  Check("cache_switch_old_part_kept", QFileInfo::exists(part_before),
+        part_before);
+  const bool reopened = OpenOnline(false, &error);
+  Check("cache_switch_reopen_online", reopened, error);
+  if (reopened) {
+    const QString part_after = window_->OnlinePartPathForTest();
+    Check("cache_switch_next_session_new_root",
+          !part_after.isEmpty() &&
+              QDir::cleanPath(part_after)
+                  .startsWith(QDir::cleanPath(new_root), Qt::CaseInsensitive),
+          QStringLiteral("part=%1 root=%2").arg(part_after, new_root));
+    window_->ShutdownOnlineForTest();
+  }
+  Print(QStringLiteral(
+            "cache_switch_result checks=%1 failures=%2 verdict=%3")
+            .arg(checks_)
+            .arg(failures_)
+            .arg(failures_ == 0 ? QStringLiteral("pass")
+                                : QStringLiteral("fail")));
+  QCoreApplication::exit(failures_ == 0 ? 0 : 1);
+}
+
 void OnlineDragPreviewTestRunner::RunScrubSpace() {
   const bool local = options_.scrub_space_local;
   Print(QStringLiteral(
@@ -1803,6 +1903,10 @@ void OnlineDragPreviewTestRunner::RunScrubSpace() {
 }
 
 void OnlineDragPreviewTestRunner::Run() {
+  if (options_.cache_switch) {
+    RunCacheSwitch();
+    return;
+  }
   if (options_.scrub_space) {
     RunScrubSpace();
     return;

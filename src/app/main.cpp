@@ -905,6 +905,8 @@ int main(int argc, char* argv[]) {
   bool online_drag_cache_hit = false;
   // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
   bool scrub_space_test = false;
+  // P1 热修：真实在线会话中保存缓存目录（两阶段），不中断播放。
+  bool cache_switch_test = false;
   QString online_m1_bvid;
   QString online_m1_cid_text;
   QString online_m1_tag;
@@ -1322,7 +1324,10 @@ int main(int argc, char* argv[]) {
   if (arguments.contains(QStringLiteral("--scrub-space-test"))) {
     scrub_space_test = true;
   }
-  if (scrub_space_test && !online_m1_bvid.isEmpty()) {
+  if (arguments.contains(QStringLiteral("--cache-switch-online-test"))) {
+    cache_switch_test = true;
+  }
+  if ((scrub_space_test || cache_switch_test) && !online_m1_bvid.isEmpty()) {
     online_drag_preview_test = true;
   }
 
@@ -2102,7 +2107,8 @@ int main(int argc, char* argv[]) {
   // T8.6.1b：在线增长会话拖动预览（已缓存 FPS/精确落帧/未缓存提示/缓存命中）。
   std::unique_ptr<lapian::app::OnlineDragPreviewTestRunner>
       online_drag_preview_runner;
-  if (online_drag_preview_test || local_drag_parity_test || scrub_space_test) {
+  if (online_drag_preview_test || local_drag_parity_test || scrub_space_test ||
+      cache_switch_test) {
     lapian::app::OnlineDragPreviewTestOptions options;
     options.bvid = online_m1_bvid;
     options.cid = online_m1_cid;
@@ -2119,6 +2125,7 @@ int main(int argc, char* argv[]) {
     options.local_file = file_path;
     options.scrub_space = scrub_space_test;
     options.scrub_space_local = scrub_space_test && online_m1_bvid.isEmpty();
+    options.cache_switch = cache_switch_test;
     online_drag_preview_runner =
         std::make_unique<lapian::app::OnlineDragPreviewTestRunner>(&window,
                                                                    options);
