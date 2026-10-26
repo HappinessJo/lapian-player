@@ -720,6 +720,10 @@ class MainWindow : public QMainWindow {
   // “用户刚点确认/正在解析”的等待窗口里：只切画面页 + 取设备，不打开媒体、
   // 不读缓存。重复调用在设备已存在时只返回；空态/本地打开绝不调用。
   qint64 PrewarmOnlineVideoStage();
+  // C4：DASH 缓存命中（`online_cache_hit_ && session_->IsGrowing()`）的拖动
+  // 预览改软件解码——这条素材硬解反向只有 9–16fps，软解 27fps（接近首次在线
+  // OnlinePreviewDecoder）。durl 缓存命中（本地会话）/本地/增长在线保持硬解优先。
+  bool UseSoftwarePreviewForCacheHit() const;
   bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
   bool ApplyOnlineCacheHit(const lapian::app::OnlineReadyInfo& info);
   // T8.9：档位目录回调 → 档位按钮/菜单；失败不影响播放。

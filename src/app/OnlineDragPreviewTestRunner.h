@@ -21,8 +21,14 @@ struct OnlineDragPreviewTestOptions {
   int drag_samples = 60;
   // 已缓存区起点；探针会向后寻找足够长的连续已缓存窗口。
   qint64 start_frame = 15;
+  // 是否显式给了 --drag-start-frame（A 默认窗口 = 未给；C4 的反向比例硬门
+  // 只在这个窗口上生效，自定义窗口只打印）。
+  bool start_frame_explicit = false;
   // 只验证缓存命中（本地完整 data.mp4）路径；用于第二轮证据。
   bool cache_hit_only = false;
+  // C4 诊断（--drag-wait-ms）：打开后先空等 N 毫秒再开始拖动，用于量化
+  // “等一会再拖会顺一些”（波形/索引/音频线程冷启动）而先不改产品行为。
+  int drag_wait_ms = 0;
   // 只节流视频下载，保证未缓存区在测试窗口内仍然存在（0 = 不节流）。
   qint64 throttle_bytes_per_sec = 0;
   // 2026-10-25：前后一致 + 丝滑验收（--online-drag-parity-test）。

@@ -906,7 +906,11 @@ int main(int argc, char* argv[]) {
   int online_drag_seconds = 1;
   int online_drag_samples = 60;
   qint64 online_drag_start_frame = 15;
+  // C4：--drag-start-frame 是否显式给出（反向比例硬门只在 A 默认窗口生效）。
+  bool online_drag_start_frame_explicit = false;
   bool online_drag_cache_hit = false;
+  // C4 诊断：缓存命中打开后等待 N 毫秒再拖动（--drag-wait-ms）。
+  int online_drag_wait_ms = 0;
   // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
   bool scrub_space_test = false;
   // P1 热修：真实在线会话中保存缓存目录（两阶段），不中断播放。
@@ -1127,6 +1131,7 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--drag-start-frame") &&
                i + 1 < arguments.size()) {
       online_drag_start_frame = arguments[++i].toLongLong();
+      online_drag_start_frame_explicit = true;
     } else if (arguments[i] == QStringLiteral("--drag-cache-hit")) {
       online_drag_cache_hit = true;
     } else if (arguments[i] == QStringLiteral("--drag-throttle-bps") &&
@@ -1324,6 +1329,10 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--quality-cache-hit-menu")) {
       // B：缓存命中打开 → 点开清晰度菜单按需拉目录 → 选非当前档 → 切回缓存档。
       online_quality_switch_cache_hit_menu = true;
+    } else if (arguments[i] == QStringLiteral("--drag-wait-ms") &&
+               i + 1 < arguments.size()) {
+      // C4 诊断：缓存命中打开后先等 N 毫秒再开始拖动（0 = 不等待）。
+      online_drag_wait_ms = arguments[++i].toInt();
     }
   }
 
@@ -2130,7 +2139,9 @@ int main(int argc, char* argv[]) {
     options.drag_seconds = online_drag_seconds;
     options.drag_samples = online_drag_samples;
     options.start_frame = online_drag_start_frame;
+    options.start_frame_explicit = online_drag_start_frame_explicit;
     options.cache_hit_only = online_drag_cache_hit;
+    options.drag_wait_ms = online_drag_wait_ms;
     options.throttle_bytes_per_sec = online_m1_throttle_bps;
     options.parity = online_drag_parity_test;
     options.local_only = local_drag_parity_test;

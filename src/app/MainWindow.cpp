@@ -7888,6 +7888,13 @@ void MainWindow::TickOnlinePreview() {
   }
 }
 
+bool MainWindow::UseSoftwarePreviewForCacheHit() const {
+  // C4：只有 DASH 缓存命中走 growing 会话（display_path 只是展示名）；durl
+  // 缓存命中是本地会话（OpenLocalMedia），保持硬解优先。
+  return online_mode_ && online_cache_hit_ && session_ != nullptr &&
+         session_->IsGrowing();
+}
+
 QString MainWindow::CacheHitPreviewPath() const {
   // DASH 缓存命中：视频真身是 CacheStore 里的 data.mp4（.part/.mp4 同名原子改名，
   // GrowingSource 直接读它），online_part_path_ 已由 EmitCacheHitReady 的
@@ -7923,11 +7930,14 @@ void MainWindow::EnsureCacheHitPreviewDecoder() {
   preview_.reset();
   preview_ = std::make_unique<lapian::media::PreviewDecoder>();
   const QByteArray path_utf8 = path.toUtf8();
+  // C4：DASH 缓存命中改软解（硬解反向 9–16fps / 软解 27fps）；durl 缓存命中、
+  // 本地、增长在线仍硬解优先。只改这里的传参，不动 PreviewDecoder 语义。
+  const bool prefer_hardware = !UseSoftwarePreviewForCacheHit();
   preview_->Configure(
       std::string(path_utf8.constData(),
                   static_cast<std::size_t>(path_utf8.size())),
       session_->video_stream_index(), &session_->index(),
-      gfx_->d3d_device(), true, session_->info().video.width,
+      gfx_->d3d_device(), prefer_hardware, session_->info().video.width,
       session_->info().video.height);
   preview_configure_path_ = path;
   preview_configure_session_path_ = QString::fromStdString(session_->path_utf8());
@@ -7952,11 +7962,14 @@ void MainWindow::EnsurePreviewDecoderDevice() {
           ? CacheHitPreviewPath()
           : QString::fromStdString(session_->path_utf8());
   const QByteArray preview_path_utf8 = preview_path.toUtf8();
+  // C4：设备重建后仍按同一口径选解码路径，否则 DASH 缓存命中会悄悄回到硬解。
+  const bool prefer_hardware = !UseSoftwarePreviewForCacheHit();
   preview_->Configure(
       std::string(preview_path_utf8.constData(),
                   static_cast<std::size_t>(preview_path_utf8.size())),
-      session_->video_stream_index(), &session_->index(), device, true,
-      session_->info().video.width, session_->info().video.height);
+      session_->video_stream_index(), &session_->index(), device,
+      prefer_hardware, session_->info().video.width,
+      session_->info().video.height);
   preview_configure_path_ = preview_path;
   preview_configure_session_path_ = QString::fromStdString(session_->path_utf8());
   if (resume) {

@@ -425,12 +425,16 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
   if (cache_hit) {
     // A：缓存命中走本地预览器（preview_）。preview_ 存在但 0 帧时，这行给出
     // “配置的是哪条路径/文件是否存在/解码器是否打开成功/取帧是否一直为空”。
+    // C4：再加 hw_requested/hw_active 与缓存/seek/预取计数——缓存命中 DASH 预览
+    // 已改软解（hw_requested=0），durl 缓存命中仍为硬解优先（hw_requested=1）。
     const PreviewTestDiagnostics preview = window_->PreviewDiagnosticsForTest();
     Print(QStringLiteral(
               "online_drag_preview_pipeline label=%1 configured=%2 "
               "configured_exists=%3 session_path=%4 session_exists=%5 "
               "begin=%6 null_ticks=%7 open_attempted=%8 open_ok=%9 "
-              "open_error=%10 last_error=%11 presented=%12")
+              "open_error=%10 last_error=%11 presented=%12 hw_requested=%13 "
+              "hw_active=%14 fallback=%15 cache_hits=%16 seeks=%17 "
+              "prefetched=%18")
               .arg(label)
               .arg(preview.configure_path)
               .arg(QFileInfo::exists(preview.configure_path) ? 1 : 0)
@@ -444,7 +448,15 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
                                                 : preview.open_error)
               .arg(preview.last_error.isEmpty() ? QStringLiteral("none")
                                                 : preview.last_error)
-              .arg(preview.presented));
+              .arg(preview.presented)
+              .arg(preview.hw_requested ? 1 : 0)
+              .arg(preview.hw_active ? 1 : 0)
+              .arg(preview.hw_fallback_reason.isEmpty()
+                       ? QStringLiteral("none")
+                       : preview.hw_fallback_reason)
+              .arg(static_cast<qlonglong>(preview.cache_hits))
+              .arg(static_cast<qlonglong>(preview.seeks))
+              .arg(static_cast<qlonglong>(preview.prefetched_frames)));
   }
   return result;
 }
@@ -1946,14 +1958,16 @@ void OnlineDragPreviewTestRunner::Run() {
   }
   Print(QStringLiteral(
             "online_drag_preview_sample tag=%1 bvid=%2 cid=%3 page=%4 "
-            "drag_seconds=%5 samples=%6 cache_hit_only=%7 throttle_bps=%8")
+            "drag_seconds=%5 samples=%6 cache_hit_only=%7 throttle_bps=%8 "
+            "drag_wait_ms=%9")
             .arg(options_.tag, options_.bvid)
             .arg(options_.cid)
             .arg(options_.page)
             .arg(options_.drag_seconds)
             .arg(options_.drag_samples)
             .arg(options_.cache_hit_only ? 1 : 0)
-            .arg(options_.throttle_bytes_per_sec));
+            .arg(options_.throttle_bytes_per_sec)
+            .arg(options_.drag_wait_ms));
 
   window_->raise();
   window_->activateWindow();
@@ -2013,6 +2027,21 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(window_->OnlineCacheHitForTest() ? 1 : 0)
             .arg(options_.cache_hit_only ? 1 : 0));
   Check("default_paused", !window_->IsPlayingForTest());
+  if (options_.drag_wait_ms > 0) {
+    // C4 诊断：打开后先空等 N 毫秒再拖（只读；不改产品行为）。波形/索引/音频
+    // 线程都是打开后才启动，这里给出“等待 vs 立即拖”的同机对照数据。
+    QElapsedTimer wait_timer;
+    wait_timer.start();
+    Pump(options_.drag_wait_ms);
+    Print(QStringLiteral(
+              "online_drag_preview_open_wait wait_ms=%1 elapsed_ms=%2 "
+              "waveform=%3 index=%4 audio=%5")
+              .arg(options_.drag_wait_ms)
+              .arg(wait_timer.elapsed())
+              .arg(window_->WaveformStateForTest())
+              .arg(window_->IndexStateForTest())
+              .arg(window_->AudioStateForTest()));
+  }
   const double fps = StreamFps(window_);
   const qint64 desired_span = std::max<std::int64_t>(
       60, static_cast<std::int64_t>(std::ceil(fps * 2.0 *
@@ -2132,6 +2161,51 @@ void OnlineDragPreviewTestRunner::Run() {
         QStringLiteral("stale=%1").arg(backward.stale_presented));
   Check("backward_monotonic", backward.monotonic);
   Check("backward_preview_stopped", backward.preview_stopped_after);
+  if (options_.cache_hit_only) {
+    // C4：缓存命中反向 parity（DASH 预览改软解）。阈值依据（同机 Medium + 隔离
+    // cache）：1s/60 默认窗口软解 28/30=0.93（720P）、28/30=0.93（1080P），
+    // 硬解 16/30=0.53、9/30=0.30；故硬门（≥70%，或 1s/60 时 fps_total≥20）只在
+    // “A 默认窗口”（cache-hit + 1s 拖动 + 未自定义 --drag-start-frame）上生效。
+    // 其余拖动形状 check 仍在（总数不变），但按 5c8c390 的 out_of_premise 口径
+    // 写 out_of_parity_gate=1：2s/60 把同样 30 个反向目标摊到 2s；1080P 5s-GOP
+    // 的 start150 反向每次要从 K 重解约 60 帧。这两类实测 0.60–0.63 / 0.23–0.33
+    // （硬解基线 0.30 / 0.43 同样 <70%），属长 GOP“可用档”观察值，不当作本次
+    // 传参改动的硬门，也不把低值写成通过。
+    const int backward_samples = std::max(1, backward.samples);
+    const double backward_present_ratio =
+        static_cast<double>(backward.presented) /
+        static_cast<double>(backward_samples);
+    const PreviewTestDiagnostics backward_preview =
+        window_->PreviewDiagnosticsForTest();
+    const QString ratio_numbers =
+        QStringLiteral("presented=%1 samples=%2 ratio=%3 fps_total=%4 "
+                       "hw_requested=%5 hw_active=%6")
+            .arg(backward.presented)
+            .arg(backward_samples)
+            .arg(QString::number(backward_present_ratio, 'f', 3))
+            .arg(QString::number(backward.fps_total, 'f', 2))
+            .arg(backward_preview.hw_requested ? 1 : 0)
+            .arg(backward_preview.hw_active ? 1 : 0);
+    const bool in_parity_gate_window =
+        options_.drag_seconds <= 1 && !options_.start_frame_explicit;
+    const bool ratio_ok = backward_present_ratio >= 0.70;
+    const bool fps_ok = backward.fps_total >= 20.0;
+    Check("cache_hit_backward_presented_ratio_ge_70pct",
+          in_parity_gate_window ? (ratio_ok || fps_ok) : true,
+          in_parity_gate_window
+              ? ratio_numbers
+              : QStringLiteral("out_of_parity_gate=1 start_frame=%1 %2")
+                    .arg(options_.start_frame)
+                    .arg(ratio_numbers));
+    if (!in_parity_gate_window) {
+      Print(QStringLiteral(
+                "cache_hit_backward_ratio_note note=not_gated_outside_A_"
+                "default_window drag_seconds=%1 start=%2 %3")
+                .arg(options_.drag_seconds)
+                .arg(options_.start_frame)
+                .arg(ratio_numbers));
+    }
+  }
 
   if (!options_.cache_hit_only) {
     RunUncachedPass();
