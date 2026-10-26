@@ -905,6 +905,9 @@ int main(int argc, char* argv[]) {
   bool local_drag_parity_test = false;
   int online_drag_seconds = 1;
   int online_drag_samples = 60;
+  // C8（2026-10-26）：反向目标数。0 = 旧口径 min(30, samples)；>0 = 与正向
+  // 同跨度、min(N, samples) 个目标（N == samples 才是同一目标率/跨度对测）。
+  int online_drag_backward_samples = 0;
   qint64 online_drag_start_frame = 15;
   // C4：--drag-start-frame 是否显式给出（反向比例硬门只在 A 默认窗口生效）。
   bool online_drag_start_frame_explicit = false;
@@ -997,9 +1000,25 @@ int main(int argc, char* argv[]) {
   QString snapshot_pictures_arg;
   double playback_rate = 1.0;
   bool has_playback_rate = false;
-  const QStringList arguments =
+  QStringList arguments =
       ExtractUiV2Args(QCoreApplication::arguments(), &timeline_height,
                       &readout_edit_test, &dpi_empty, &ui_shots_test);
+  // C8（2026-10-26，test-only）：反向目标数在进入主参数链前摘出，避免再给
+  // 这条 else-if 链加分支（MSVC C1061 块嵌套上限，主链已接近上限）。
+  for (int i = 1; i < arguments.size();) {
+    if (arguments[i] == QStringLiteral("--drag-backward-samples")) {
+      if (i + 1 < arguments.size()) {
+        online_drag_backward_samples = arguments[i + 1].toInt();
+        arguments.removeAt(i + 1);
+      }
+      arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--drag-backward-full")) {
+      online_drag_backward_samples = -1;
+      arguments.removeAt(i);
+    } else {
+      ++i;
+    }
+  }
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
@@ -1435,6 +1454,13 @@ int main(int argc, char* argv[]) {
     }
     if (online_drag_samples > 240) {
       online_drag_samples = 240;
+    }
+    if (online_drag_backward_samples < 0) {
+      // --drag-backward-full / 负值：反向与正向同目标数（同跨度对测）。
+      online_drag_backward_samples = online_drag_samples;
+    }
+    if (online_drag_backward_samples > online_drag_samples) {
+      online_drag_backward_samples = online_drag_samples;
     }
     if (online_drag_start_frame < 0) {
       online_drag_start_frame = 0;
@@ -2138,6 +2164,7 @@ int main(int argc, char* argv[]) {
     options.timeout_ms = online_m1_timeout_ms;
     options.drag_seconds = online_drag_seconds;
     options.drag_samples = online_drag_samples;
+    options.drag_backward_samples = online_drag_backward_samples;
     options.start_frame = online_drag_start_frame;
     options.start_frame_explicit = online_drag_start_frame_explicit;
     options.cache_hit_only = online_drag_cache_hit;

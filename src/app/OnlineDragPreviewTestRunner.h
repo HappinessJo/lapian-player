@@ -19,6 +19,13 @@ struct OnlineDragPreviewTestOptions {
   // 拖动模拟：总时长与目标采样数（默认 1s/60 次，约 60Hz 鼠标移动）。
   int drag_seconds = 1;
   int drag_samples = 60;
+  // 2026-10-26 C8：双向同口径测量（test-only，不改产品行为）。
+  // 0（默认）= 旧口径：反向固定 min(30, drag_samples) 个目标、跨度 30 帧；
+  // >0 = 反向用 min(N, drag_samples) 个目标，且跨度与正向相同（end→start），
+  // 因此只有 N == drag_samples 时才是“同一目标率 + 同一跨度”的严格对测。
+  // 注意：旧口径把反向目标数减半，会让 presented/fps 看起来只有正向一半，
+  // 不能用来判断前后是否一致。
+  int drag_backward_samples = 0;
   // 已缓存区起点；探针会向后寻找足够长的连续已缓存窗口。
   qint64 start_frame = 15;
   // 是否显式给了 --drag-start-frame（A 默认窗口 = 未给；C4 的反向比例硬门

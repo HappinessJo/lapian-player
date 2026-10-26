@@ -1959,7 +1959,7 @@ void OnlineDragPreviewTestRunner::Run() {
   Print(QStringLiteral(
             "online_drag_preview_sample tag=%1 bvid=%2 cid=%3 page=%4 "
             "drag_seconds=%5 samples=%6 cache_hit_only=%7 throttle_bps=%8 "
-            "drag_wait_ms=%9")
+            "drag_wait_ms=%9 backward_samples=%10 backward_full=%11")
             .arg(options_.tag, options_.bvid)
             .arg(options_.cid)
             .arg(options_.page)
@@ -1967,7 +1967,9 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(options_.drag_samples)
             .arg(options_.cache_hit_only ? 1 : 0)
             .arg(options_.throttle_bytes_per_sec)
-            .arg(options_.drag_wait_ms));
+            .arg(options_.drag_wait_ms)
+            .arg(options_.drag_backward_samples)
+            .arg(options_.drag_backward_samples > 0 ? 1 : 0));
 
   window_->raise();
   window_->activateWindow();
@@ -2146,12 +2148,20 @@ void OnlineDragPreviewTestRunner::Run() {
     }
   }
 
-  // 反向拖动：只检查单调/精确落帧；帧率不设 ≥30 的硬门槛。
+  // 反向拖动：默认旧口径（30 个目标、跨度 30 帧）；--drag-backward-samples N
+  // 改成与正向同跨度、min(N, samples) 个目标，用于“前进/后退同一目标率”的对测。
+  const bool backward_full = options_.drag_backward_samples > 0;
+  const int backward_samples =
+      backward_full ? std::min(options_.drag_backward_samples,
+                               options_.drag_samples)
+                    : std::min(30, options_.drag_samples);
+  const qint64 backward_span = backward_full ? (end - start) : 30;
   const qint64 backward_start = end;
-  const qint64 backward_end = std::max<std::int64_t>(0, end - 30);
+  const qint64 backward_end =
+      std::max<std::int64_t>(0, end - backward_span);
   const DragResult backward = RunDragPass(
       QStringLiteral("backward"), backward_start, backward_end,
-      std::min(30, options_.drag_samples), options_.cache_hit_only, false);
+      backward_samples, options_.cache_hit_only, false);
   Check("backward_exact_landing",
         backward.exact_frame && backward.exact_pts,
         QStringLiteral("frame=%1 pts=%2")
@@ -2204,6 +2214,74 @@ void OnlineDragPreviewTestRunner::Run() {
                 .arg(options_.drag_seconds)
                 .arg(options_.start_frame)
                 .arg(ratio_numbers));
+    }
+  }
+
+  // C8（2026-10-26）：前进/后退同一目标率硬门（首次在线 growing + 缓存命中
+  // DASH 都适用）。旧门只量反向 30 个目标，无法回答“60Hz 下前进能到、后退
+  // 是否也能到”；本门只对“反向与正向同目标数/同跨度 + 60Hz 目标率
+  // （samples = 60×秒）+ 未自定义 --drag-start-frame（长 GOP start150 属可用档、
+  // 只记录）”生效。判据（三条同时满足）：
+  //   1) 反向 presented ≥ 正向 90%；
+  //   2) 反向 fps_active ≥ 正向 90%；
+  //   3) 正向和反向 fps_active 都 ≥30（“两边一样烂”必须 fail）。
+  // 不满足即 fail；不允许只看正向就宣布通过，也不允许靠拉低正向换一致。
+  {
+    const bool same_target_rate =
+        backward_full && backward.samples == forward.samples &&
+        forward.samples == options_.drag_seconds * 60;
+    // 硬门只覆盖“同一 60Hz / 60 个目标”的 1s 窗口；2s/120 是同一目标率但
+    // 目标数翻倍（120），这里只记录比例（out_of_parity_gate=1）。
+    const bool parity_gate_window = same_target_rate &&
+                                    options_.drag_seconds == 1 &&
+                                    forward.samples == 60 &&
+                                    !options_.start_frame_explicit;
+    const double forward_presented =
+        static_cast<double>(std::max(1, forward.presented));
+    const double forward_fps = std::max(0.01, forward.fps_active);
+    const double backward_presented_ratio =
+        static_cast<double>(backward.presented) / forward_presented;
+    const double backward_fps_ratio = backward.fps_active / forward_fps;
+    const bool ratio_ok = backward_presented_ratio >= 0.9 &&
+                          backward_fps_ratio >= 0.9;
+    const bool floor_ok =
+        forward.fps_active >= 30.0 && backward.fps_active >= 30.0;
+    const bool parity_ok = ratio_ok && floor_ok;
+    const QString parity_numbers =
+        QStringLiteral("mode=%1 forward_presented=%2 backward_presented=%3 "
+                       "forward_samples=%4 backward_samples=%5 "
+                       "presented_ratio=%6 forward_fps_active=%7 "
+                       "backward_fps_active=%8 fps_ratio=%9 fps_floor_30=%10 "
+                       "forward_span=%11 backward_span=%12 duration_ms=%13")
+            .arg(options_.cache_hit_only ? QStringLiteral("cache_hit")
+                                         : QStringLiteral("growing"))
+            .arg(forward.presented)
+            .arg(backward.presented)
+            .arg(forward.samples)
+            .arg(backward.samples)
+            .arg(QString::number(backward_presented_ratio, 'f', 3))
+            .arg(QString::number(forward.fps_active, 'f', 2))
+            .arg(QString::number(backward.fps_active, 'f', 2))
+            .arg(QString::number(backward_fps_ratio, 'f', 3))
+            .arg(floor_ok ? 1 : 0)
+            .arg(forward.span_frames)
+            .arg(backward.span_frames)
+            .arg(options_.drag_seconds * 1000);
+    Check("online_drag_forward_backward_parity",
+          parity_gate_window ? parity_ok : true,
+          parity_gate_window
+              ? parity_numbers
+              : QStringLiteral("out_of_parity_gate=1 backward_full=%1 "
+                               "start_frame_explicit=%2 %3")
+                    .arg(backward_full ? 1 : 0)
+                    .arg(options_.start_frame_explicit ? 1 : 0)
+                    .arg(parity_numbers));
+    if (!parity_gate_window) {
+      Print(QStringLiteral(
+                "online_drag_parity_note note=not_gated_requires_same_60hz_"
+                "rate_and_same_span backward_full=%1 %2")
+                .arg(backward_full ? 1 : 0)
+                .arg(parity_numbers));
     }
   }
 
