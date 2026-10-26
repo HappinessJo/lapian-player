@@ -783,6 +783,12 @@ class PlayerShell : public QWidget {
 | 检查器 | `v2Inspector`、`v2InspectorHead`、`v2TabMarks`、`v2TabShots`、`v2TabInfo`、`v2MarkBadge`、`v2ShotBadge`、`v2InspectorCollapse`、`v2InspectorRail`、`v2InspectorStack`、`v2ShotGrid`、`v2InfoTable`、`v2InspectorFooter`、`v2StoreText`、`markPanel`*、`markTree`*、`markLabelEdit`*、`markNoteEdit`*、`markStorage`*；**3C 追加**：`v2InspectorAdd`（`+`=添加标记第二入口，M5 复核用）、`v2InspectorExpand`（折叠 rail 的展开按钮）、`v2ShotEmpty`（"还没有截图（S）"空态）、`v2ShotNote`（>60 张时的截断说明） |
 | 状态栏 | `v2StatusMessage`、`noticeInfo`*、`audioInfo`*、`cacheInfo`（新）、`waveformInfo`*、`statusInfo`* |
 
+> **3D 收口（2026-10-26）**：`infoFile`/`infoFormat`/`v2Timecode`/`v2FrameNumber`/`v2FrameTotal` 仍沿用
+> 这些名字，但**主人**已变成 TopBar/Transport 自建（不再从 InfoBar reparent）；`BannerSlot` 自建
+> `infoBanner`/`infoBannerClose`；状态栏只常驻 `noticeInfo`+`audioInfo`+`cacheInfo`+`waveformInfo`
+> （`speedInfo`/`loopInfo`/`statusInfo` 对象保留但不再常驻）；`LayoutStateV2` 的 `info=`/`info_h=`
+> 别名已删除（`banner=` 保留），`BannerStateForTest()` 的 `info_h=` 语义 = BannerSlot 高度（名字不改）。
+
 > `*` = **沿用旧名**（测试/日志已按名读，不改；共 17 项）。
 > `timelineScrollBar` 不在清单里：3B 删除时间轴内部横向滚动条（视图窗滑块取代）。
 > 已 grep 确认 `src/` 与 `tests/` 都没有按这个名字取控件（只在 `TimelineWidget.cpp:41` 设置过一次）。
@@ -963,7 +969,7 @@ T8.6.1b 35/0           --online-drag-parity-test 61/0（Medium）
 
 保留全部旧键（`dpr/window/frame/available/min/stage/panel/gfx/timeline/status`），**新增**：
 `tier=`、`appbar=`、`transport=`、`banner=`、`inspector=`、`readout=`、`playhead_visible=`。
-`info=` 与 `info_<label>=` 键在 3A 保留为 `banner=` 的别名输出，3D 删除（避免一次断掉旧日志对比）。
+`info=` 与 `info_<label>=` 键在 3A–3C 保留为 `banner=` 的别名输出；**3D 已删除**（`banner=` 保留）。
 `InfoFileLabelForTest()`/`InfoFileNameForTest()`/`InfoNarrowModeForTest()` **方法名不改**，内部改读顶栏
 （elide 逻辑搬到 `TopBar::UpdateFileText()`，行为与 `InfoBar::UpdateFileText()` 一致：`ElideMiddle` + tooltip 全名）。
 

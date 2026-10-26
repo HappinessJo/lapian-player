@@ -60,17 +60,19 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
 |---|---|---|---|
 | 应用底色 | `--bg #0e0e10` | `Tokens::kColorAppBg` + `PlayerShell/Workspace` QSS | ✅ 3A.5 |
 | 面板卡片 | `.panel { bg #17171a; border 1px #2b2b33; radius 4 }` | `#v2VideoCard` / `#v2TimelinePanel` / `#v2Inspector` | ✅ 3A.5 |
-| 顶栏 | `.appbar h=38 bg #17171a 底边线`，文件图标+名、规格 chip、模式 chip、右 4 按钮 | `TopBar`（`v2TopBar`/`v2FileLabel`/`v2SpecChip`/`v2ModeChip`/`v2OpenButton`/`v2OnlineButton`/`v2HelpButton`/`settingsSlot`/`cacheSettingsButton`） | ✅ 3A.5 |
+| 顶栏 | `.appbar h=38 bg #17171a 底边线`，文件图标+名、规格 chip、模式 chip、右 4 按钮 | `TopBar`（`v2TopBar`/`v2FileLabel`/`v2SpecChip`/`v2ModeChip`/`v2OpenButton`/`v2OnlineButton`/`v2HelpButton`/`settingsSlot`/`cacheSettingsButton`） | ✅ 3A.5；**3D：模式 chip 收口**（本地/在线解析/在线 qn+fps/缓存命中/缓冲/切档/打开失败），DEC-4 `onlineFpsBadge` 进 chip 内 |
 | 键位角标 | `.kbd {9px Consolas, border #34343d, bg #1e1e24}` | `#v2KbdBadge`（在"打开/在线"里） | ✅ 3A.5 |
 | chip | `.chip { h=20, radius 10, padding 0 7, border, bg #1a1a1f, 11px }`；`.chip.ok { #9ed6a1 on #17201a }` | `#v2SpecChip`/`#v2ModeChip`（QSS 属性选择器上语义色：`kind=ok/cache/warn/error`） | ✅ 3A.5 |
 | 图标 | 内联 `<symbol>` 16×16 线性图标 | `ui/Glyph.{h,cpp}`（QPainter 绘制，2×DPR 自适应，无 qrc/字体依赖） | ✅ 3A.5（形态近似，见 §5-1） |
-| 横幅 | `.banner { h=26, bg #1b1a13, color #f0cb7a, 12px, 左侧图标 + 右侧 × }` | `BannerSlot`（内容仍是 InfoBar 的 `infoBannerRow`） | ⚠️ 容器已对；配色仍是 InfoBar 自己的（3D 收口） |
+| 横幅 | `.banner { h=26, bg #1b1a13, color #f0cb7a, 12px, 左侧图标 + 右侧 × }` | `BannerSlot`（`v2BannerSlot`/`v2BannerIcon`/`infoBanner`/`infoBannerClose`） | ✅ 3D：颜色/图标/单行/仅降帧可关；`media::StatusNotice` 语义未动 |
 | 画面区 | `.stage { bg #000 }` | `#v2Stage`/`#v2StageVideo` | ✅ 3A.5 |
-| Transport | `.transport 46px`：左组 5+2 按钮 + 速度 + 静音 + 音量；中间 26px 等宽时间码 + `帧 N / 总 N`；右组 6 开关 | `TransportBar`（`v2Transport`/`v2TransportLeft`/`v2TransportReadout`/`v2TransportRight`/`v2PlayButton`/`v2LoopButton`/…） | ✅ 3A.5（读数改用 `infoTimecode/infoFrame/infoTotal` 原对象） |
+| Transport | `.transport 46px`：左组 5+2 按钮 + 速度 + 静音 + 音量；中间 26px 等宽时间码 + `帧 N / 总 N`；右组 6 开关 | `TransportBar`（`v2Transport`/`v2TransportLeft`/`v2TransportReadout`/`v2TransportRight`/`v2PlayButton`/`v2LoopButton`/…） | ✅ 3A.5；3B 内联输入/缓冲槽/四档降级；**3D：读数改由 Transport 自建**（`v2Timecode`/`v2FrameNumber`/`v2FrameTotal`） |
 | 按钮态 | `.btn { h=26, min-w=26, radius 3, icon 16, color text-dim }`；`.btn.on { accent 18% 底 + accent 图标 + 35% 边框 }`；播放键实心 accent | QSS `QToolButton` 规则 + `#v2PlayButton`；`BindGlyph()` 在 checked 时换 accent 图标 | ✅ 3A.5 |
 | 时间轴面板 | `.panel.timeline 132`：`.panelhead 26`（◷ 时间轴 + 工作区/视图/缩放）+ 视图窗条 13 + 工作区条 15 + 画布 | `TimelinePanel`（`v2TimelinePanel`/`v2TimelineHead`/`v2WorkMeta`/`v2ViewMeta`/`v2ZoomIn/Out/Fit`）+ `RangeBar`（`v2ViewBar`/`v2ViewHandleLeft/Right`/`v2WorkBar`/`v2WorkHandleLeft/Right`）+ 既有 `TimelineWidget` | ✅ 3B（两条滑块、播放头常驻、删内部滚动条；dense 档无头但数值未搬 Transport 副行 → 见 §5-2）。**有意偏差**：画布左右各 8px 外边距（原型画布铺满），与滑块轨道的 8px 内边距对齐，否则工作区端点对不准画布（2026-10-26 用户要求"往里收"） |
 | 检查器 | `.ins-head 26` 三 tab（标记/截图 3/信息）+ `+`；列表卡片；标签/备注编辑；`.ins-foot` 存储位置 | `ui/InspectorPanel`（`v2InspectorHead`/`v2TabMarks`/`v2TabShots`/`v2TabInfo`/`v2MarkBadge`/`v2ShotBadge`/`v2InspectorAdd`/`v2InspectorCollapse`）+ `v2InspectorStack` 三页（MarkPanel 原对象 / `v2ShotGrid` / `v2InfoTable`）+ `v2InspectorFooter`/`v2StoreText` + 折叠 `v2InspectorRail`/`v2InspectorExpand` | ✅ 3C（行内删除/选中左侧 accent 竖条仍缺，见 §5-3） |
-| 状态栏 | `.statusbar 24`：左 1 条消息 + 右 3 个指标（音频/缓存/波形） | `QStatusBar` + `noticeInfo/audioInfo/loopInfo/waveformInfo/statusInfo` | ⚠️ 配色已对；**仍是 6 个控件**、`循环: 关` 与 Transport 循环键重复 → 3D |
+| 状态栏 | `.statusbar 24`：左 1 条消息 + 右 3 个指标（音频/缓存/波形） | `QStatusBar` + `noticeInfo`/`audioInfo`/`cacheInfo`/`waveformInfo` | ✅ 3D：1 消息 + 3 指标；`speed/loop/volume/statusInfo` 退出（对象保留） |
+| 全屏 | 顶栏/横幅/状态栏/检查器隐藏，Transport/时间轴保留 | `PlayerShell::SetFullScreenChrome` + `--fullscreen-test` chrome | ✅ 3D 复核：`v2=1 appbar=0 banner=0 status=0 inspector=0 transport=1 timeline=1` |
+| 对话框/菜单 | 原型无（主题内深色） | `Theme::GlobalStyleSheet`（`QDialog`/`QMenu`/`QMessageBox` + `online*`/`cache*`/`v2HelpDialog`） | ✅ 3D：设置/在线/扫码/帮助/速度/清晰度全深色；无 per-widget QSS |
 | 分隔条 | `.split-h/.split-v { 6px }` + `::after` 1–2px accent 细线（悬停/拖拽时 65% 不透明） | `PlayerSplitter`/`PlayerSplitHandle`（悬停 2px accent） | ✅ 3A.5 |
 | 密度 | `#app.density-compact/dense` 覆盖 appbar/banner/transport/timeline/status/panelhead | `Tokens::MakeTokens()` + `ResolveDensity()`（客户区高 + 20px 迟滞） | ✅ 3A.5（dense 无面板头） |
 
@@ -106,16 +108,21 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
    单测断言依赖）；截图网格 caption 按任务用 `f<帧号>`（原型是"第 N 帧"）；原型截图页的独立
    "截图目录"页脚被收敛成检查器的唯一常显页脚（规划 §2.2）。对照图：
    `build/ui-v2-shots/3c-vs-proto-inspector.png`（上=原型，下=产品；构建产物，不入库）。
-4. **状态栏仍是 6 个控件**：原型是"1 条消息 + 3 指标"。3D 收口（同时把 `--banner-test` 的 `loop=`
-   指向 Transport 的循环键，见规划附录 A.3）。
-5. **横幅配色**：容器/高度已对，`warn` 态文案颜色仍来自 `InfoBar::UpdateBannerStyle()`；
-   3D 删 InfoBar 时按原型 `.banner` 重写（`#1b1a13` + `#f0cb7a` + 左侧图标）。
+4. **状态栏已压到 1 消息 + 3 指标（3D）**：`noticeInfo` + `audioInfo`/`cacheInfo`/`waveformInfo`；
+   `speed_label_`/`loop_label_`/`volume_slider_`/`statusInfo` 退出常驻（对象保留）。`--banner-test` 的
+   `loop=` 已改指 Transport 循环键（规划附录 A.3），断言未改。
+5. **横幅配色已按原型重写（3D）**：`#1b1a13` 底 + `#f0cb7a` 文字 + 左侧 `v2BannerIcon`；error/info 有
+   语义变体；同一时刻仍 1 条、单行、仅降帧可关。`InfoBar` 已删除，`UpdateBannerStyle` 的 per-widget
+   QSS 一并消失。
 6. **Transport 的宽度降级已按 §3.3 做成四档**（3B）：≥760 全量 / 660–759 收音量（静音保留）/
    560–659 收 A/B+速度且读数 26→22 / <560 再收首末帧·标记·截图。与原型一样是"按可用宽度退场"，
    差别只在阈值来源（原型用 `@media` 的窗口宽，产品用 **Transport 自身宽度**，按规划 §3.3）。
    实测保留集宽度 full 档 `need=736`（阈值 760）。
 7. **画面区圆角**：面板卡片有 4px 圆角，但画面是子 HWND，四角不会跟着剪圆（Qt 无法裁剪原生子窗口）。
    这是实现限制，原型不体现；不要为它加遮罩层去压 HWND。
+8. **3D 后仍缺**：在线 820 窄窗的顶栏模式 chip（`在线 · 1080P · 29.412fps · 降帧` + 清晰度按钮 +
+   4 个按钮）未截图/未断言；真实 1080P 的在线截图因 SESSDATA 过期（`vip_status=-1`）未生成；检查器
+   行内删除/选中 accent 竖条仍缺（与 3C 相同）。
 
 ---
 
