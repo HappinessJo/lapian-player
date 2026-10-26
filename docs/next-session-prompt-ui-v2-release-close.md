@@ -1,13 +1,27 @@
 # 新会话提示词：UI v2 3D 热修 · 发布收口（release closeout）
 
-- **状态**：待执行（2026-10-26 起草）。
-- **当前代码**：HEAD `1e407ad`（4 个代码 commit `534d909`/`b78bbe1`/`6533da0`/`efc6831` 之后，
-  只有文档提交）；四项热修已完成并通过全量回归。
+- **状态**：待执行（2026-10-26 交接给下一个 agent）。
+- **当前代码**：HEAD `76a425a`（docs-only；源码仍是 4 个代码 commit `534d909`/`b78bbe1`/`6533da0`/`efc6831`，
+  文档 `c23003d`/`1e407ad`/`76a425a`）；四项热修已完成并通过全量回归。
 - **本轮范围**：只做**构建 → 打包 → 安装 → 安装版冒烟 → 发布文档**；**不改产品代码、不改门/阈值/
   schema、不重开 3D/热修范围**。若打包/安装失败且根因在产品代码，停下来报告，不静默热修。
 - **上游**：[热修实现交接](handoff-2026-10-26-ui-v2-3d-hotfix-close.md)（修复/门禁/证据）、
   [3D 收口](handoff-2026-10-26-ui-v2-3d.md)、[上次发布收口](handoff-2026-10-25-p0-close.md)（流程/格式）、
   [预览发布说明](preview-release-2026-10-22.md)、[T8.16 安装/卸载](handoff-2026-10-24-t8.16.md)。
+
+## 交接检查（新 agent 开工前 30 秒）
+
+```powershell
+cd 'E:\拉片软件开发'
+git status --short                 # 应为空（只有超长路径 warning）
+git log --oneline -8               # 应含 534d909/b78bbe1/6533da0/efc6831 + 3 个 docs commit
+(Get-FileHash build\release\bin\lapian.exe -Algorithm SHA256).Hash
+(Get-FileHash "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe" -Algorithm SHA256).Hash
+# 两者当前都应为 EE366C0A950B455068480EA2397EE80F1FDE62BE360103A3B4C58E85109A52CF
+```
+
+当前安装目录里是热修后的手工 Medium 副本（不是 setup 装的）；发布收口装完 setup 后，
+安装版 hash 应变成新 dist exe 的 hash（clean 重建可能不再是 `EE36…`，以实际为准）。
 
 ---
 
@@ -29,9 +43,9 @@ schema、不重开 3D 范围**；如果构建/打包/安装失败且根因在产
 - docs/handoff-2026-10-24-t8.16.md（静默安装/卸载参数、快捷方式/设置核对）
 
 当前状态（开工先核对，别假设）：
-- git HEAD 应为 1e407ad（或之后仅 docs 提交）；`git status` 应干净。
+- git HEAD 应为 76a425a（或之后仅 docs 提交）；`git status` 应干净。
 - 4 个代码 commit：534d909（P0 待播/落地补 Play）、b78bbe1（P1 两阶段缓存设置）、
-  6533da0（P2 扫码长高/夹屏/滚动）、efc6831（P3 清晰度 chip）；文档 c23003d/1e407ad。
+  6533da0（P2 扫码长高/夹屏/滚动）、efc6831（P3 清晰度 chip）；文档 c23003d/1e407ad/76a425a。
 - 已构建 exe（热修后）：build\release\bin\lapian.exe 3,538,432B，
   SHA256 EE366C0A950B455068480EA2397EE80F1FDE62BE360103A3B4C58E85109A52CF；
   Medium 副本 %LOCALAPPDATA%\Programs\拉片软件\lapian.exe 同 hash。

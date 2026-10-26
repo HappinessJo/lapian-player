@@ -314,3 +314,12 @@ $sp = 'build\hotfix-gates\settings-final'
 - `efc6831` → 清晰度入口恢复 flat 文本按钮（Theme/TopBar/截图断言回退）。
 
 文档 commit 只改 `docs/` 与本文件，不参与代码回滚。
+
+---
+
+## 11. 下一步
+
+**发布收口**（clean Release → dist/setup/zip → 安装 Medium → 安装版冒烟 → 发布说明）已交接给
+下一个新会话；开工提示词见 [next-session-prompt-ui-v2-release-close.md](next-session-prompt-ui-v2-release-close.md)。
+当前 HEAD `76a425a`（docs-only，源码仍是 4 个热修 commit），安装目录仍是热修后的手工 Medium 副本
+（`EE366C0A…`），尚未用 setup 重新安装。
