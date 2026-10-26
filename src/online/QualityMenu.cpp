@@ -49,10 +49,23 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
 
   QualityMenuEntry header;
   header.kind = QualityMenuKind::kHeader;
-  header.text = context.current_from_cache
+  // B：只有“缓存 meta 单档目录”才可以说未联网；拿到服务端目录后必须用服务端
+  // 口径（目录多档时即便会话仍是缓存命中，也已经联网拉过目录）。
+  const bool cache_meta_titles =
+      context.current_from_cache && !context.catalog_from_server &&
+      catalog.tiers.size() <= 1;
+  header.text = cache_meta_titles
                     ? QStringLiteral("缓存命中档位（未联网；来自缓存 meta）")
                     : QStringLiteral("实际可用档位（以 playurl 返回为准）");
   entries.append(header);
+
+  if (context.catalog_loading && catalog.tiers.size() <= 1) {
+    QualityMenuEntry loading;
+    loading.kind = QualityMenuKind::kNote;
+    loading.text = QStringLiteral(
+        "正在获取档位目录…（只拉目录，不启播/不换流；缓存播放不受影响）");
+    entries.append(loading);
+  }
 
   if (!catalog.HasVideo()) {
     QualityMenuEntry note;
@@ -140,6 +153,15 @@ QVector<QualityMenuEntry> BuildQualityMenuModel(const DashCatalog& catalog,
     note.kind = QualityMenuKind::kNote;
     note.text = QStringLiteral("当前播放 %1 不在 DASH 目录里（durl 与服务端档位不同）")
                     .arg(QualityName(context.current_qn));
+    entries.append(note);
+  }
+  if (!context.error.isEmpty()) {
+    // B：显式拉目录失败不清掉已有目录（缓存播放/当前档不受影响）；菜单里
+    // 明确写出失败原因，不静默换档。
+    QualityMenuEntry note;
+    note.kind = QualityMenuKind::kNote;
+    note.text = QStringLiteral("档位目录刷新失败：%1（保留上次目录；缓存播放不受影响）")
+                    .arg(context.error);
     entries.append(note);
   }
   if (!context.logged_in) {

@@ -944,6 +944,7 @@ int main(int argc, char* argv[]) {
   int online_quality_switch_high_qn = 112;
   int online_quality_switch_back_qn = 80;
   int online_quality_switch_wait_ms = 120000;
+  bool online_quality_switch_cache_hit_menu = false;
   // T8.15：大会员可用档条件验收（O11，非门）。
   bool online_vip_test = false;
   int online_vip_qn = 0;
@@ -1320,6 +1321,9 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--quality-switch-wait-ms") &&
                i + 1 < arguments.size()) {
       online_quality_switch_wait_ms = arguments[++i].toInt();
+    } else if (arguments[i] == QStringLiteral("--quality-cache-hit-menu")) {
+      // B：缓存命中打开 → 点开清晰度菜单按需拉目录 → 选非当前档 → 切回缓存档。
+      online_quality_switch_cache_hit_menu = true;
     }
   }
 
@@ -2020,6 +2024,7 @@ int main(int argc, char* argv[]) {
     options.cache_root = online_m1_cache_root;
     options.pictures_root = online_m1_pictures;
     options.records_root = online_records_root;
+    options.cache_hit_menu = online_quality_switch_cache_hit_menu;
     online_quality_switch_runner =
         std::make_unique<lapian::app::OnlineQualitySwitchUiTestRunner>(
             &window, options);

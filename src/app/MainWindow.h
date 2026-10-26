@@ -518,6 +518,13 @@ class MainWindow : public QMainWindow {
   QString OnlineQualitySummaryForTest() const;
   int OnlineQualityRequestsForTest() const;
   bool WaitForOnlineQualityForTest(int timeout_ms);
+  // B（缓存命中清晰度菜单）：点开菜单 = 产品入口，按需拉完整 DASH 目录。
+  void ShowOnlineQualityMenuForTest();
+  void HideOnlineQualityMenuForTest();
+  bool OnlineQualityMenuVisibleForTest() const;
+  bool OnlineQualityCatalogLoadingForTest() const {
+    return online_quality_loading_;
+  }
   // 触发菜单项：返回 false = 不存在/置灰（*status 可读）；true = 已触发。
   bool TriggerOnlineQualityEntryForTest(int qn, QString* status);
   // 菜单模型（与产品菜单共用 BuildQualityMenuModel）；T8.9 只列示不切档。
@@ -929,6 +936,8 @@ class MainWindow : public QMainWindow {
   QMenu* quality_menu_ = nullptr;
   lapian::app::OnlineQualityCatalog online_quality_;
   bool online_quality_enabled_ = true;
+  // B：用户点开菜单后按需拉目录的在途标记（只 GUI 线程）。
+  bool online_quality_loading_ = false;
   bool has_online_test_quality_ = false;
   lapian::app::OnlineQualityCatalog online_test_quality_;
   std::shared_ptr<lapian::media::MediaSession> session_;

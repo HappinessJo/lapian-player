@@ -5196,6 +5196,10 @@ lapian::online::QualityMenuContext MainWindow::CurrentQualityMenuContext() const
   context.requested_qn = online_request_.requested_qn;
   context.requested_codecid = online_request_.requested_codecid;
   context.current_from_cache = online_cache_hit_;
+  // B：只有“缓存 meta 单档目录”才是未联网口径；服务端目录（online_quality_.
+  // cache_hit=false）必须换成服务端措辞。
+  context.catalog_from_server = !online_quality_.cache_hit;
+  context.catalog_loading = online_quality_loading_;
   // T8.12：只有真实在线会话就绪且服务端目录成功返回时才允许手动切档。
   // 离线合成菜单/T8.9 诊断仍会置灰，避免把“列示”写成“可达”。
   context.dash_playback_available =
@@ -5265,6 +5269,16 @@ void MainWindow::ShowOnlineQualityMenu() {
   if (quality_button_ == nullptr) {
     return;
   }
+  // B：缓存命中的菜单最初只有 meta 里的当前档。用户点开菜单时才按需拉一次
+  // **完整 DASH 目录**（只拉目录：不启播/不换流/不建 DownloadJob；缓存播放
+  // 仍是 0 网络）。请求在途或已有 >1 档时 OnlineSession 会幂等返回 false。
+  if (online_mode_ && online_ready_ && online_cache_hit_ &&
+      online_ != nullptr && online_quality_.catalog.tiers.size() <= 1 &&
+      !online_quality_loading_) {
+    if (online_->RequestQualityCatalog()) {
+      online_quality_loading_ = true;
+    }
+  }
   RebuildOnlineQualityMenu();
   if (quality_menu_ == nullptr || quality_menu_->isEmpty()) {
     return;
@@ -5277,16 +5291,19 @@ void MainWindow::ShowOnlineQualityMenu() {
 
 void MainWindow::ApplyOnlineQuality(
     const lapian::app::OnlineQualityCatalog& info) {
+  online_quality_loading_ = false;
+  // B：显式刷新失败时 OnlineSession 会保留上一次目录（ok=false + 旧目录 +
+  // 错误），所以这里直接采用；播放/缓存命中/当前档不受影响。
   online_quality_ = info;
   online_quality_.fetched = true;
   if (quality_button_ != nullptr) {
     quality_button_->setVisible(online_mode_ && online_ready_);
     quality_button_->setEnabled(true);
     const int shown_qn =
-        online_qn_ > 0 ? online_qn_ : info.catalog.DefaultQn();
+        online_qn_ > 0 ? online_qn_ : online_quality_.catalog.DefaultQn();
     QString text = QStringLiteral("清晰度 %1")
                        .arg(lapian::online::QualityName(shown_qn));
-    if (info.cache_hit) {
+    if (online_quality_.cache_hit) {
       text += QStringLiteral("（缓存）");
     }
     quality_button_->setText(text);
@@ -5299,6 +5316,11 @@ void MainWindow::ApplyOnlineQuality(
                      ? QString::number(online_request_.requested_qn)
                      : QStringLiteral("自动")));
   }
+  // 菜单开着时目录到达/失败都立即重建，用户不用关掉再点开。
+  if (quality_menu_ != nullptr && quality_menu_->isVisible()) {
+    RebuildOnlineQualityMenu();
+    quality_menu_->adjustSize();
+  }
   if (!info.ok && !info.error.isEmpty()) {
     // 档位目录失败不改变会话状态：播放/缓存/首帧都不受影响。
     statusBar()->showMessage(
@@ -5308,6 +5330,7 @@ void MainWindow::ApplyOnlineQuality(
 
 void MainWindow::ResetOnlineQuality() {
   online_quality_ = lapian::app::OnlineQualityCatalog{};
+  online_quality_loading_ = false;
   if (quality_menu_ != nullptr) {
     quality_menu_->clear();
   }
@@ -5513,6 +5536,18 @@ void MainWindow::SetOnlineQualityForTest(
 
 bool MainWindow::OnlineQualityButtonVisibleForTest() const {
   return quality_button_ != nullptr && quality_button_->isVisible();
+}
+
+void MainWindow::ShowOnlineQualityMenuForTest() { ShowOnlineQualityMenu(); }
+
+void MainWindow::HideOnlineQualityMenuForTest() {
+  if (quality_menu_ != nullptr) {
+    quality_menu_->hide();
+  }
+}
+
+bool MainWindow::OnlineQualityMenuVisibleForTest() const {
+  return quality_menu_ != nullptr && quality_menu_->isVisible();
 }
 
 int MainWindow::OnlineQualityRequestsForTest() const {

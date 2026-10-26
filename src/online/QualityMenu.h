@@ -46,6 +46,11 @@ struct QualityMenuContext {
   int requested_codecid = 0;
   // 缓存命中：档位来自 meta，未联网。
   bool current_from_cache = false;
+  // B：当前目录是否是“服务端拉回来的完整目录”（false = 缓存 meta 单档）。
+  // 拿到服务端目录后必须改成 true，标题不能再谎称“未联网”。
+  bool catalog_from_server = false;
+  // B：用户点开菜单后正在按需拉完整 DASH 目录；菜单可打开并提示“正在获取”。
+  bool catalog_loading = false;
   // T8.12：DASH 会话已可切档时为 true；缓存 meta 只有当前档时仍只列当前档。
   bool dash_playback_available = false;
   // 未登录时菜单明确写出“最高约 480P30（以实际返回为准）”。

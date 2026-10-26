@@ -1,4 +1,4 @@
-﻿// T8.13 网络异常/并发加固单测（纯注入，不联网、不需要 SESSDATA、无 GUI）。
+// T8.13 网络异常/并发加固单测（纯注入，不联网、不需要 SESSDATA、无 GUI）。
 //
 // 覆盖（对应 tasks-v2 T8.13 / delta O7、O4-A5/A7、O5-A5/A6/A7）：
 // - 下载中断网：重试 + Range 续传，字节不重复、hash 一致；
@@ -56,6 +56,7 @@
 #include "online/DownloadTransport.h"
 #include "online/GrowingSource.h"
 #include "online/PlayUrl.h"
+#include "online/QualityMenu.h"
 #include "online/WinHttpClient.h"
 
 extern "C" {
@@ -1154,6 +1155,8 @@ struct SessionHarness {
   int state_events = 0;
   bool ready = false;
   OnlineReadyInfo ready_info;
+  // B：清晰度目录回调序列（缓存 meta → 显式请求结果）。
+  std::vector<lapian::app::OnlineQualityCatalog> quality_events;
   QHash<QString, int> state_counts;
   // 可选：错误/首帧相对计时的起点（由各测试设置），用于断言“≤5s”。
   QElapsedTimer* clock = nullptr;
@@ -1192,7 +1195,9 @@ struct SessionHarness {
           }
         },
         [this](const QString& message) { NoteError(message); },
-        [](const lapian::app::OnlineQualityCatalog&) {});
+        [this](const lapian::app::OnlineQualityCatalog& info) {
+          quality_events.push_back(info);
+        });
   }
 };
 
@@ -1613,8 +1618,190 @@ void TestDashCompleteCacheHit() {
   harness.session->Close();
 }
 
-void TestDashMissingAudio() {
-  Section("T8.17 DASH 视频完整/音频缺失：复用视频、只补音频、不误报");
+// B（缓存命中清晰度菜单）：打开/播放 0 网络；用户显式请求目录才拉完整 DASH
+// 目录（注入，不联网）；失败时保留缓存 meta 单档 + 可读错误，不退出缓存命中。
+void TestCacheHitQualityCatalogOnDemand() {
+  Section("B 缓存命中清晰度菜单：按需拉目录、不启播/不改缓存");
+  QTemporaryDir root;
+  CacheStore cache(root.path());
+  const QString bvid = QStringLiteral("BV1BMnv6jE5S");
+  const qint64 cid = 42915922022;
+  const QString video_url = QStringLiteral("https://cdn.test/dash-v-qmenu.m4s");
+  const QString audio_url = QStringLiteral("https://cdn.test/dash-a-qmenu.m4s");
+  auto transport = std::make_shared<FakeTransport>();
+  transport->data = MakeSample(400 * 1024);
+  auto http = std::make_shared<FakeHttp>();
+  http->body = MakeDashJson(video_url, audio_url);
+  const CacheKey video_key = MakeKey(bvid, cid, 64, 7);
+  const CacheKey audio_key = MakeAudioKey(bvid, cid, 30280);
+  lapian::online::CacheMetadata meta;
+  meta.dash = true;
+  meta.audio_id = 30280;
+  meta.duration_ms = 10000;
+  meta.width = 1280;
+  meta.height = 720;
+  meta.fps = 29.412;
+  Check(SeedComplete(&cache, video_key, transport->data, &meta),
+        "qmenu: seed video");
+  Check(SeedComplete(&cache, audio_key, transport->data), "qmenu: seed audio");
+  const QString video_mp4 = cache.Mp4Path(video_key);
+  const QString video_hash = HashFile(video_mp4);
+  const qint64 video_bytes = QFileInfo(video_mp4).size();
+
+  // 注入“服务端完整目录”（720P + 1080P 两档）；不联网。
+  lapian::app::OnlineQualityCatalog full;
+  full.ok = true;
+  full.fetched = true;
+  full.http_status = 200;
+  lapian::online::DashStream low;
+  low.qn = 64;
+  low.codecid = 7;
+  low.width = 1280;
+  low.height = 720;
+  low.fps = 29.412;
+  lapian::online::DashStream high;
+  high.qn = 80;
+  high.codecid = 7;
+  high.width = 1920;
+  high.height = 1080;
+  high.fps = 30.0;
+  full.catalog.videos = {low, high};
+  lapian::online::RebuildDashTiers(&full.catalog);
+  Check(full.catalog.tiers.size() == 2, "qmenu: injected catalog has 2 tiers");
+
+  auto run_session = [&](const lapian::app::OnlineQualityCatalog& injected,
+                         SessionHarness* harness) {
+    harness->session = std::make_unique<OnlineSession>(&cache);
+    harness->session->SetHttpClientForTest(std::make_unique<HttpRef>(http));
+    harness->session->SetDownloadTransportForTest(
+        std::make_unique<TransportRef>(transport));
+    harness->session->SetQualityCatalogForTest(injected);
+    harness->Connect();
+    OnlineRequest request = MakeSessionRequest(video_key);
+    request.requested_qn = 64;
+    request.requested_codecid = 7;
+    QString start_error;
+    const bool started = harness->session->Start(request, &start_error);
+    Check(started, "qmenu: session started");
+    Check(PumpUntil([&]() { return harness->session->cache_hit(); }, 8000),
+          "qmenu: cache hit");
+  };
+
+  // 1) 打开阶段：0 网络（playurl/DASH/HTTP 都不发）。
+  SessionHarness harness;
+  run_session(full, &harness);
+  OnlineSession* session = harness.session.get();
+  CheckEqI64(session->PlayUrlRequestsForTest(), 0, "qmenu: open 0 playurl");
+  CheckEqI64(session->DashRequestsForTest(), 0, "qmenu: open 0 dash");
+  CheckEqI64(http->call_count(), 0, "qmenu: open 0 HTTP");
+  Check(PumpUntil([&]() { return !harness.quality_events.empty(); }, 5000),
+        "qmenu: cache-meta catalog emitted");
+  Check(harness.quality_events.size() == 1 &&
+            harness.quality_events.at(0).catalog.tiers.size() == 1,
+        "qmenu: initial catalog is the single cached tier");
+  Check(harness.quality_events.at(0).cache_hit,
+        "qmenu: initial catalog marked cache-meta");
+
+  // 2) 点开菜单 → 显式请求目录：替换成完整目录，会话仍是缓存命中、0 流请求。
+  Check(session->RequestQualityCatalog(), "qmenu: explicit request accepted");
+  Check(PumpUntil([&]() { return harness.quality_events.size() >= 2; }, 5000),
+        "qmenu: second catalog callback");
+  Check(harness.quality_events.size() == 2 &&
+            harness.quality_events.at(1).catalog.tiers.size() == 2,
+        "qmenu: server catalog has 2 tiers");
+  Check(!harness.quality_events.at(1).cache_hit,
+        "qmenu: server catalog not cache-meta");
+  Check(session->cache_hit(), "qmenu: session still cache hit");
+  CheckEqI64(session->PlayUrlRequestsForTest(), 0, "qmenu: catalog 0 playurl");
+  CheckEqI64(session->DashRequestsForTest(), 0,
+             "qmenu: catalog 0 dash (injected)");
+  CheckEqI64(http->call_count(), 0, "qmenu: catalog 0 HTTP (injected)");
+  Check(session->quality_catalog().catalog.tiers.size() == 2,
+        "qmenu: session catalog updated");
+  Check(!session->RequestQualityCatalog(),
+        "qmenu: repeated request is a no-op (no duplicate fetch)");
+  CheckEqI64(QFileInfo(video_mp4).size(), video_bytes,
+             "qmenu: cache bytes unchanged");
+  Check(HashFile(video_mp4) == video_hash, "qmenu: cache hash unchanged");
+  session->Close();
+
+  // 3) 目录请求失败：保留缓存 meta 单档 + 可读错误，不退出缓存命中。
+  lapian::app::OnlineQualityCatalog failed;
+  failed.fetched = true;
+  failed.ok = false;
+  failed.error = QStringLiteral("注入：目录请求失败");
+  SessionHarness failed_harness;
+  run_session(failed, &failed_harness);
+  OnlineSession* failed_session = failed_harness.session.get();
+  Check(PumpUntil([&]() { return !failed_harness.quality_events.empty(); },
+                  5000),
+        "qmenu_fail: cache-meta catalog emitted");
+  Check(failed_session->RequestQualityCatalog(),
+        "qmenu_fail: explicit request accepted");
+  Check(PumpUntil(
+            [&]() { return failed_harness.quality_events.size() >= 2; }, 5000),
+        "qmenu_fail: failure callback arrives");
+  const lapian::app::OnlineQualityCatalog& failure =
+      failed_harness.quality_events.at(
+          failed_harness.quality_events.size() - 1);
+  Check(!failure.ok && !failure.error.isEmpty(),
+        "qmenu_fail: readable error");
+  Check(failure.catalog.tiers.size() == 1 && failure.cache_hit,
+        "qmenu_fail: cached tier kept");
+  Check(failed_session->cache_hit(), "qmenu_fail: still cache hit");
+  CheckEqI64(failed_session->PlayUrlRequestsForTest(), 0,
+             "qmenu_fail: 0 playurl");
+  CheckEqI64(failed_session->DashRequestsForTest(), 0, "qmenu_fail: 0 dash");
+  Check(failed_session->quality_catalog().catalog.tiers.size() == 1,
+        "qmenu_fail: session catalog kept at 1 tier");
+  // 菜单模型：仍是缓存 meta 标题、当前档 checked+enabled，并显示失败原因。
+  lapian::online::QualityMenuContext menu_ctx;
+  menu_ctx.current_qn = 64;
+  menu_ctx.current_codecid = 7;
+  menu_ctx.current_from_cache = true;
+  menu_ctx.catalog_from_server = !failure.cache_hit;
+  menu_ctx.dash_playback_available = failure.ok;
+  menu_ctx.error = failure.error;
+  const QString menu_text = lapian::online::QualityMenuModelText(
+      lapian::online::BuildQualityMenuModel(failure.catalog, menu_ctx));
+  Check(menu_text.contains(QStringLiteral("缓存命中档位（未联网")),
+        "qmenu_fail: menu keeps cache-meta header");
+  Check(menu_text.contains(QStringLiteral("qn=64")) &&
+            menu_text.contains(QStringLiteral("checked=1")),
+        "qmenu_fail: current tier still checked");
+  Check(menu_text.contains(QStringLiteral("档位目录刷新失败")),
+        "qmenu_fail: menu shows refresh failure");
+  failed_session->Close();
+
+  // 4) 服务端目录到达后菜单模型：>1 档、非当前档 enabled、不谎称未联网。
+  lapian::online::QualityMenuContext server_ctx;
+  server_ctx.current_qn = 64;
+  server_ctx.current_codecid = 7;
+  server_ctx.current_from_cache = true;
+  server_ctx.catalog_from_server = true;
+  server_ctx.dash_playback_available = true;
+  const QVector<lapian::online::QualityMenuEntry> server_entries =
+      lapian::online::BuildQualityMenuModel(full.catalog, server_ctx);
+  int enabled_other = 0;
+  int tier_count = 0;
+  for (const lapian::online::QualityMenuEntry& entry : server_entries) {
+    if (entry.kind != lapian::online::QualityMenuKind::kTier) {
+      continue;
+    }
+    ++tier_count;
+    if (!entry.checked && entry.enabled) {
+      ++enabled_other;
+    }
+  }
+  Check(tier_count == 2, "qmenu: menu lists 2 tiers");
+  Check(enabled_other == 1, "qmenu: non-current tier enabled");
+  const QString server_text = lapian::online::QualityMenuModelText(server_entries);
+  Check(server_text.contains(QStringLiteral("实际可用档位")) &&
+            !server_text.contains(QStringLiteral("未联网")),
+        "qmenu: server catalog wording (not offline)");
+}
+
+void TestDashMissingAudio() {  Section("T8.17 DASH 视频完整/音频缺失：复用视频、只补音频、不误报");
   QTemporaryDir root;
   CacheStore cache(root.path());
   const QString bvid = QStringLiteral("BV1BMnv6jE5S");
@@ -2121,6 +2308,7 @@ int main(int argc, char** argv) {
   TestDiskFull();
   TestDashSingleStreamFailure();
   TestDashCompleteCacheHit();
+  TestCacheHitQualityCatalogOnDemand();
   TestDashMissingAudio();
   TestDashRequestedCodecMismatch();
   TestDashResolvedBothComplete();

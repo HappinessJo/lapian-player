@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // T8.6 在线会话状态机：确认 → playurl → CacheStore + GrowingSource + DownloadJob
 // → 等 0.3MB → 通知 UI 打开可增长媒体 → 关闭/完成前 finalize。
@@ -173,6 +173,13 @@ class OnlineSession : public QObject {
   // UI 线程调用。失败返回 false + 可读错误（不启动会话）。
   bool Start(const OnlineRequest& request, QString* error);
 
+  // B（缓存命中清晰度菜单）：用户显式点开清晰度菜单时才按需拉**完整 DASH
+  // 目录**（playurl fnval=4048；只列档，不启播/不换流/不建 DownloadJob）。
+  // 幂等：已有 >1 档目录或请求在途时返回 false（不重复联网）。
+  // 缓存命中会话允许（绕过 cache_hit_ 早退），但不改变缓存播放/读层。
+  bool RequestQualityCatalog();
+  bool QualityCatalogLoadingForTest() const { return quality_request_inflight_; }
+
   // 用户取消：立即唤醒所有 reader + 中断下载；不 join（避免卡 UI）。
   void Cancel();
   // 关窗/切文件：取消并 join 所有后台线程。reader 需由调用方先关闭。
@@ -304,9 +311,12 @@ class OnlineSession : public QObject {
 
   // T8.9 档位目录：首帧后起一个独立线程；失败不影响播放/会话状态。
   void StartQualityWorker(std::uint64_t generation);
+  // B：真正起线程/注入回放的部分；StartQualityWorker（自动一次）与
+  // RequestQualityCatalog（用户显式，可重试）都走这里。
+  void LaunchQualityWorker(std::uint64_t generation);
   void JoinQualityWorker();
   void OnQualityDone(std::uint64_t generation);
-  void EmitQuality(const OnlineQualityCatalog& info);
+  void EmitQuality(const OnlineQualityCatalog& info, bool replace = false);
   OnlineQualityCatalog CacheQualityFromEntry() const;
 
   lapian::online::CacheStore* cache_ = nullptr;
@@ -350,6 +360,9 @@ class OnlineSession : public QObject {
   OnlineQualityCatalog injected_quality_;
   bool quality_started_ = false;
   bool quality_emitted_ = false;
+  // B：用户显式目录请求在途/来源标记（只 GUI 线程读写）。
+  bool quality_request_inflight_ = false;
+  bool quality_user_requested_ = false;
   int quality_requests_ = 0;
   OnlineQualityCatalog quality_;
 

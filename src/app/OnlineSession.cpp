@@ -1,4 +1,4 @@
-﻿#include "app/OnlineSession.h"
+#include "app/OnlineSession.h"
 
 #include <QMetaObject>
 #include <QTimer>
@@ -585,10 +585,39 @@ void OnlineSession::JoinResolveWorker() {
 }
 
 void OnlineSession::StartQualityWorker(std::uint64_t generation) {
-  if (quality_started_) {
+  if (quality_started_ || quality_request_inflight_) {
     return;
   }
   quality_started_ = true;
+  LaunchQualityWorker(generation);
+}
+
+// B：显式目录请求只在“用户点开清晰度菜单”时触发；和首帧后的自动 quality
+// 共用同一条 worker/回调路径，但允许缓存命中（只拉目录，不启播/不换流）。
+bool OnlineSession::RequestQualityCatalog() {
+  if (!active_.load() || closing_.load() || !ready_emitted_) {
+    return false;
+  }
+  if (!quality_enabled_.load()) {
+    return false;
+  }
+  // 已有完整目录 / 同一次请求仍在途：幂等，不重复联网。
+  if (quality_request_inflight_ || quality_thread_.joinable()) {
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (quality_.ok && quality_.catalog.tiers.size() > 1) {
+      return false;
+    }
+  }
+  quality_request_inflight_ = true;
+  quality_user_requested_ = true;
+  LaunchQualityWorker(generation_);
+  return true;
+}
+
+void OnlineSession::LaunchQualityWorker(std::uint64_t generation) {
   auto outcome = std::make_shared<QualityOutcome>();
   outcome->generation = generation;
   quality_outcome_ = outcome;
@@ -601,8 +630,9 @@ void OnlineSession::StartQualityWorker(std::uint64_t generation) {
     QTimer::singleShot(0, this, [this, generation]() { OnQualityDone(generation); });
     return;
   }
-  if (cache_hit_) {
-    // 缓存命中在 EmitCacheHitReady 里用 meta 直接发；不应走到网络。
+  if (cache_hit_ && !quality_user_requested_) {
+    // 缓存命中在 EmitCacheHitReady 里用 meta 直接发；自动路径不应走到网络。
+    quality_request_inflight_ = false;
     return;
   }
   auto cancel = std::make_shared<lapian::online::HttpCancelToken>();
@@ -680,6 +710,9 @@ void OnlineSession::JoinQualityWorker() {
 
 void OnlineSession::OnQualityDone(std::uint64_t generation) {
   JoinQualityWorker();
+  quality_request_inflight_ = false;
+  const bool replace = quality_user_requested_;
+  quality_user_requested_ = false;
   if (generation != generation_ || !active_.load() || closing_.load()) {
     return;
   }
@@ -696,7 +729,8 @@ void OnlineSession::OnQualityDone(std::uint64_t generation) {
     info = outcome->info;
   }
   quality_outcome_.reset();
-  EmitQuality(info);
+  // B：显式菜单请求允许替换缓存 meta 的单档目录；自动路径仍只发一次。
+  EmitQuality(info, replace);
 }
 
 OnlineSession::CacheLookupResult OnlineSession::TryCacheHit(
@@ -1191,18 +1225,31 @@ OnlineQualityCatalog OnlineSession::CacheQualityFromEntry() const {
   return info;
 }
 
-void OnlineSession::EmitQuality(const OnlineQualityCatalog& info) {
-  if (quality_emitted_) {
+void OnlineSession::EmitQuality(const OnlineQualityCatalog& info, bool replace) {
+  if (quality_emitted_ && !replace) {
     return;
   }
   quality_emitted_ = true;
+  OnlineQualityCatalog emitted = info;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    quality_ = info;
+    if (replace && !info.ok && quality_.ok &&
+        !quality_.catalog.tiers.isEmpty()) {
+      // B：显式刷新目录失败不清掉已有目录。会话仍保持缓存命中/当前档，错误
+      // 照常回给 UI（菜单据此提示）；不回退会话状态、不静默换档。
+      emitted.catalog = quality_.catalog;
+      emitted.cache_hit = quality_.cache_hit;
+      quality_.fetched = true;
+      quality_.error = info.error;
+      quality_.http_status = info.http_status;
+      quality_.elapsed_ms = info.elapsed_ms;
+    } else {
+      quality_ = info;
+    }
   }
   quality_requests_ += info.http_requests;
   if (quality_callback_) {
-    quality_callback_(info);
+    quality_callback_(emitted);
   }
 }
 
@@ -1267,6 +1314,8 @@ bool OnlineSession::Start(const OnlineRequest& request, QString* error) {
   quality_started_ = false;
   quality_emitted_ = false;
   quality_requests_ = 0;
+  quality_request_inflight_ = false;
+  quality_user_requested_ = false;
   quality_outcome_.reset();
   quality_cancel_.reset();
   ++generation_;

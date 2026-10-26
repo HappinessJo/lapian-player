@@ -710,16 +710,36 @@ void TestMenuModel() {
             empty_entries.last().text.contains(QStringLiteral("档位获取失败")),
         "空目录显示可读失败，不伪造档位");
 
-  // 缓存命中：header 说明未联网。
+  // 缓存命中：meta 单档 header 说明未联网；拿到服务端目录后不再谎称未联网。
   QualityMenuContext cache;
   cache.current_qn = 80;
   cache.current_codecid = 7;
   cache.current_from_cache = true;
+  DashCatalog cache_meta_catalog;
+  cache_meta_catalog.videos = {[] {
+    DashStream value;
+    value.qn = 80;
+    value.codecid = 7;
+    value.width = 1920;
+    value.height = 1080;
+    value.fps = 30.0;
+    return value;
+  }()};
+  lapian::online::RebuildDashTiers(&cache_meta_catalog);
   const QVector<QualityMenuEntry> cache_entries =
-      lapian::online::BuildQualityMenuModel(catalog, cache);
+      lapian::online::BuildQualityMenuModel(cache_meta_catalog, cache);
   Check(!cache_entries.isEmpty() &&
             cache_entries.first().text.contains(QStringLiteral("缓存命中档位")),
-        "缓存命中 header 说明未联网");
+        "缓存 meta 单档 header 说明未联网");
+  // B：同一缓存命中会话拿到服务端完整目录后，标题改成服务端口径。
+  QualityMenuContext cache_server = cache;
+  cache_server.catalog_from_server = true;
+  const QVector<QualityMenuEntry> server_entries =
+      lapian::online::BuildQualityMenuModel(catalog, cache_server);
+  Check(!server_entries.isEmpty() &&
+            server_entries.first().text.contains(QStringLiteral("实际可用档位")) &&
+            !server_entries.first().text.contains(QStringLiteral("未联网")),
+        "服务端目录到达后不谎称未联网");
 }
 
 }  // namespace
