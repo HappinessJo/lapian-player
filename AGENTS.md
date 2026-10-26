@@ -295,9 +295,10 @@
 | `plan.md` | v0.2 + v2 章节 v0.3 | 2026-10-19 / 2026-10-23 | v1 技术规划（已同步 v0.3）+ v2 在线增量章节（定稿） |
 | `tasks.md` | v0.28 | 2026-10-22 | 任务清单；T7.7 清单/预检、内部预览收口；正式 T7.7/P14 暂缓 |
 | `docs/spec-v0.3-delta.md` | v0.2 | 2026-10-19 | 历史回补提案，已并入 v0.3 |
-| `docs/ui-v2-plan.md` | v1.0 | 2026-10-26 | **UI v2 规划（P1–P8）已批准**：4 项决策按建议通过（去掉画面区 26px 表头 / M4 改为 62-62-55-59 + 每栏 ±2px / 三档密度按客户区高度自动取档 / QSplitter+自定义 handle）；空态隐藏 GfxWidget（实测 HWND 不重建）、TimelineModel 仍是唯一 source of truth、InfoBar 删除、`LAPIAN_UI_V2` 环境变量；零产品代码改动。评审版原型 [plan.html](docs/ui-v2-proto/plan.html)；3A 开工提示词 [next-session-prompt-ui-v2-3a.md](docs/next-session-prompt-ui-v2-3a.md) |
+| `docs/ui-v2-plan.md` | v1.0 | 2026-10-26 | **UI v2 规划（P1–P8）已批准**：4 项决策按建议通过（去掉画面区 26px 表头 / M4 改为 62-62-55-59 + 每栏 ±2px / 三档密度按客户区高度自动取档 / QSplitter+自定义 handle）；空态隐藏 GfxWidget（实测 HWND 不重建）、TimelineModel 仍是唯一 source of truth、InfoBar 删除、`LAPIAN_UI_V2` 环境变量；零产品代码改动。评审版原型 [plan.html](docs/ui-v2-proto/plan.html)；3A 开工提示词 [next-session-prompt-ui-v2-3a.md](docs/next-session-prompt-ui-v2-3a.md)；3B 开工提示词 [next-session-prompt-ui-v2-3b.md](docs/next-session-prompt-ui-v2-3b.md) |
 | `docs/handoff-2026-10-26-ui-v2-3a.md` | — | 2026-10-26 | UI v2 3A 壳层交接：改了什么（`src/app/ui/` + MainWindow/main.cpp/TimelineWidget）、"搬不换"做法（InfoBar 仍是状态源，10 个原对象 reparent）、门禁数字（新旧壳各一遍 / M4 表 / M2 截屏采样 / M3/M7/M8）、10 条与规划的偏差、8 条残余（首条 = `window.show()` 慢 0.5s 未定位）、3B 入口 |
 | `docs/ui-v2-visual-reference.md` | — | 2026-10-26 | **UI 视觉基准（原型 = 唯一参考稿）**：渲图命令、组件对照表（原型 → Qt objectName → 状态）、令牌/配色/圆角、3A.5 已对 vs 遗留差距（时间轴两条滑块=3B / 检查器 tab=3C / 状态栏压缩=3D）、视觉验收口径 |
+| `docs/next-session-prompt-ui-v2-3b.md` | — | 2026-10-26 | **3B 播放层开工提示词**（可直接复制给新会话）：Transport 收尾（帧号/时间码内联输入、速度按钮、缓冲槽、§3.3 四档宽度降级）+ 时间轴 `RangeBar` 两条滑块 + 播放头常驻/越界箭头 + 波形 Fill + 删内部滚动条 + 去 250ms 轮询；含 M5/M7 退出条件、门禁清单（含 Medium 副本的在线用例）、事实附录（代码地图 + 11 条已知坑） |
 | `docs/ui-v2-proto/` | — | 2026-10-26 | 可点原型：`index.html`（讨论版，含三档密度/`?hdr=0`）、`plan.html`（评审版，默认即规划形态）、`NOTES.md` |
 | `docs/spec-v0.3-p6p7-proposal.md` | v1.0 | 2026-10-19 | P6/P7 方案 A 提案，已拍板并应用 |
 | `docs/adr/ADR-001`–`006` | v1 | 2026-10-19 | 已接受 |
