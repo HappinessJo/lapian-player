@@ -6,6 +6,7 @@
 #include <QWidget>
 
 #include "app/ui/Tokens.h"
+#include "core/FrameMath.h"
 
 class QAction;
 class QLabel;
@@ -38,14 +39,20 @@ class TransportBar : public QWidget {
                    QAction* mute);
 
   // 全部是 MainWindow 里已有的原对象（保留 objectName 与 getter）。
-  void AdoptTimecode(QWidget* timecode);  // v2Timecode
-  void AdoptFrame(QWidget* frame);        // v2FrameNumber
-  void AdoptTotal(QWidget* total);        // v2FrameTotal
   void AdoptVolume(QWidget* volume);      // volumeSlider
 
   void SetLoopEnabled(bool enabled);
   void SetInspectorCollapsed(bool collapsed);
   bool inspector_toggle_checked() const;
+  // 3D：帧号/时间码/总帧的唯一主人（原 InfoBar::SetFrame/SetTotal/SetMedia 的
+  // 后半段搬到 Transport）。三个 QLabel 对象与 objectName 不变（M7）。
+  void SetFrameRate(const lapian::core::FrameRate& rate, bool vfr);
+  void SetFrame(qint64 frame_index);
+  void SetTotal(const lapian::core::TotalFrameCount& total);
+  void ClearReadouts();
+  QString FrameText() const;
+  QString TotalText() const;
+  QString TimecodeText() const;
   // 速度文本仍由 MainWindow 给（FormatSpeed），这里只显示。
   void SetSpeedText(const QString& text);
   // 全屏时全屏按钮的 tooltip 变成"退出全屏（Esc）"（M5 第 17 行）。
@@ -54,6 +61,9 @@ class TransportBar : public QWidget {
   void SetBufferState(bool visible, qint64 cached_bytes, qint64 total_bytes);
   void SetTimecodeCommit(TimecodeCommit commit);
   bool editing_timecode() const { return editing_timecode_; }
+
+  // 点击时才建菜单（规划 §7.6）；测试/截图入口复用同一条路径。
+  void ShowSpeedMenuForTest() { ShowSpeedMenu(); }
 
   void ApplyTokens(const lapian::ui::Tokens& tokens);
 
@@ -143,6 +153,9 @@ class TransportBar : public QWidget {
   QWidget* frame_ = nullptr;
   QWidget* total_ = nullptr;
   QWidget* volume_ = nullptr;
+  lapian::core::FrameRate rate_;
+  bool vfr_ = false;
+  lapian::core::TotalFrameCount total_count_;
   QAction* play_action_ = nullptr;
   QAction* fullscreen_action_ = nullptr;
   QMenu* speed_menu_ = nullptr;

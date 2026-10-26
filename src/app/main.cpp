@@ -82,7 +82,8 @@ bool HasArgument(int argc, char* argv[], const char* flag) {
 // 专用参数在进链之前先摘出来（连同它们的值一起从列表里删掉，否则值会被当成
 // 位置参数当成文件路径）。
 QStringList ExtractUiV2Args(const QStringList& args, int* timeline_height,
-                            bool* readout_edit_test) {
+                            bool* readout_edit_test, bool* dpi_empty,
+                            bool* ui_shots_test) {
   QStringList filtered;
   filtered.reserve(args.size());
   for (int i = 0; i < args.size(); ++i) {
@@ -98,6 +99,20 @@ QStringList ExtractUiV2Args(const QStringList& args, int* timeline_height,
     if (args[i] == QStringLiteral("--readout-edit-test")) {
       if (readout_edit_test != nullptr) {
         *readout_edit_test = true;
+      }
+      continue;
+    }
+    // 3D：M3 的空态相位（不需要 --file）。与 --dpi-test 一起用。
+    if (args[i] == QStringLiteral("--empty")) {
+      if (dpi_empty != nullptr) {
+        *dpi_empty = true;
+      }
+      continue;
+    }
+    // 3D：M2 主题截图（主窗 + 设置/帮助/在线对话框 + 速度菜单）。
+    if (args[i] == QStringLiteral("--ui-shots-test")) {
+      if (ui_shots_test != nullptr) {
+        *ui_shots_test = true;
       }
       continue;
     }
@@ -798,12 +813,14 @@ int main(int argc, char* argv[]) {
   };
   const bool ui_v2 =
       HasArgument(argc, argv, "--ui-v2") || env_flag_enabled("LAPIAN_UI_V2");
-  if (ui_v2) {
-    // 主题只在 v2 下应用：旧壳外观必须与 352b29f 完全一致（回滚要求）。
+  // 3D：只剩一套壳层；LAPIAN_UI_V2/--ui-v2 仍解析但无效果（旧脚本不炸）。
+  // 主题必须无条件应用（旧壳已删除，不存在"旧外观"回滚分支）。
+  {
     QElapsedTimer theme_timer;
     theme_timer.start();
     lapian::ui::ApplyTheme(app);
-    std::fprintf(stderr, "ui_v2 enabled=1 theme=applied theme_ms=%.2f\n",
+    std::fprintf(stderr, "ui_v2 enabled=%d theme=applied theme_ms=%.2f\n",
+                 ui_v2 ? 1 : 0,
                  static_cast<double>(theme_timer.nsecsElapsed()) / 1.0e6);
     std::fflush(stderr);
   }
@@ -828,6 +845,9 @@ int main(int argc, char* argv[]) {
   bool settings_test = false;
   bool settings_expect = false;
   bool dpi_test = false;
+  // 3D：`--dpi-test --empty` 跑空态相位（不需要 --file）。
+  bool dpi_empty = false;
+  bool ui_shots_test = false;
   bool banner_test = false;
   // T7.1：冷启动测量模式；有 --file 时等首帧真正 Present 后退出，否则等事件循环可交互。
   bool startup_test = false;
@@ -966,7 +986,7 @@ int main(int argc, char* argv[]) {
   bool has_playback_rate = false;
   const QStringList arguments =
       ExtractUiV2Args(QCoreApplication::arguments(), &timeline_height,
-                      &readout_edit_test);
+                      &readout_edit_test, &dpi_empty, &ui_shots_test);
   for (int i = 1; i < arguments.size(); ++i) {
     if (arguments[i] == QStringLiteral("--file") && i + 1 < arguments.size()) {
       file_path = arguments[++i];
@@ -1593,6 +1613,16 @@ int main(int argc, char* argv[]) {
     window.SetOnlineDashEnabledForTest(false);
   }
   log_startup("window_created");
+  if (ui_shots_test) {
+    if (!file_path.isEmpty()) {
+      window.OpenFile(file_path);
+    }
+    QTimer::singleShot(1200, &window, [&window]() {
+      window.CaptureThemeShotsForTest(
+          QDir::currentPath() + QStringLiteral("/build/ui-v2-shots"));
+      QCoreApplication::exit(0);
+    });
+  }
   if (online_quality_no_catalog) {
     window.SetOnlineQualityCatalogEnabledForTest(false);
     std::fprintf(stderr, "online_quality_catalog disabled=1\n");
@@ -2148,14 +2178,15 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if (!file_path.isEmpty() && !memory_test && !drag_test && !robust_test &&
-      !gop_boundary_test) {
+  if ((!file_path.isEmpty() || (dpi_test && dpi_empty)) && !memory_test &&
+      !drag_test && !robust_test && !gop_boundary_test && !ui_shots_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
                                     mark_test, note_test, readout_edit_test,
                                     snapshot_test, fullscreen_test, key_test, settings_test,
                                     settings_expect, settings_expect_volume,
                                     settings_expect_waveform, settings_root, dpi_test,
+                                    dpi_empty,
                                     dpi_expect_scale, dpi_tag, banner_test, banner_tag,
                                     banner_vfr, banner_tenbit, banner_noaudio,
                                     snapshot_pictures_root, playback_rate,
@@ -2167,7 +2198,9 @@ int main(int argc, char* argv[]) {
                      startup_ms(std::chrono::steady_clock::now()));
         std::fflush(stderr);
       }
-      window.OpenFile(file_path);
+      if (!file_path.isEmpty()) {
+        window.OpenFile(file_path);
+      }
       log_startup("open_returned");
       // 3B：--timeline-height 让 P4/P6 在"时间轴 132 / 340"两种几何下各测一次
       // （规划 R6/R11）。走 SetSplitSizesForTest 的同一条夹取路径。
@@ -3965,7 +3998,8 @@ int main(int argc, char* argv[]) {
         };
         QTimer::singleShot(
             600, &window,
-            [&window, failures, check, verify, dpi_expect_scale, dpi_tag]() {
+            [&window, failures, check, verify, dpi_expect_scale, dpi_tag,
+             dpi_empty]() {
           if (dpi_expect_scale > 0.0) {
             check("dpr", std::abs(window.devicePixelRatioF() - dpi_expect_scale) < 0.01);
           }
@@ -3978,30 +4012,43 @@ int main(int argc, char* argv[]) {
                        window.InfoFileLabelForTest().toUtf8().constData(),
                        window.InfoFileNameForTest().toUtf8().constData());
           std::fflush(stderr);
-          verify("normal");
+          verify(dpi_empty ? "empty" : "normal");
+          if (dpi_empty) {
+            // M3 空态列（规划 §3.2 状态 1）：模式 chip=`未打开`、检查器折叠 44、
+            // 横幅槽高 0；LayoutProblemsForTest() 已由 verify 断言为空。
+            std::fprintf(stderr,
+                         "T6.4 dpi_empty mode=%s collapsed=%d banner_h=%d\n",
+                         window.TopBarModeForTest().toUtf8().constData(),
+                         window.InspectorCollapsedForTest() ? 1 : 0,
+                         window.InfoBarHeightForTest());
+            std::fflush(stderr);
+            check("empty-mode",
+                  window.TopBarModeForTest() == QStringLiteral("未打开"));
+            check("empty-inspector-collapsed",
+                  window.InspectorCollapsedForTest());
+            check("empty-banner-height", window.InfoBarHeightForTest() == 0);
+          }
           window.PressFullScreenKeyForTest();
           QTimer::singleShot(
               350, &window,
-              [&window, check, verify, available, failures, dpi_tag]() {
+              [&window, check, verify, available, failures, dpi_tag,
+               dpi_empty]() {
             check("fullscreen", window.IsFullScreenForTest());
-            verify("fullscreen");
+            verify(dpi_empty ? "empty-fullscreen" : "fullscreen");
             window.PressEscapeKeyForTest();
             QTimer::singleShot(
                 250, &window,
-                [&window, check, verify, available, failures, dpi_tag]() {
+                [&window, check, verify, available, failures, dpi_tag,
+                 dpi_empty]() {
               check("exit-fullscreen", !window.IsFullScreenForTest());
               const int narrow_height =
                   std::min(500, std::max(360, available.height() - 64));
               window.resize(820, narrow_height);
               QTimer::singleShot(250, &window,
-                                 [&window, verify, failures, check, dpi_tag]() {
-                verify("narrow");
-                // 3B 的两个新用例只对新壳有意义（旧壳没有时间轴面板/两条滑块，
-                // 也没有 Transport 档位）；旧壳保持 3A 的 3 相位不动。
-                if (!window.UiV2ForTest()) {
-                  QCoreApplication::exit(*failures == 0 ? 0 : 1);
-                  return;
-                }
+                                 [&window, verify, failures, check, dpi_tag,
+                                  dpi_empty]() {
+                verify(dpi_empty ? "empty-narrow" : "narrow");
+                // 3B/3C 的新用例在空态下同样成立（时间轴/检查器/两条滑块都存在）。
                 // 3B 新用例 ①：档位切换（640/520 边界来回拖）——每次落档后
                 // 布局断言必须仍为空（"每栏 = 令牌 ±2" 在换档后同样成立）。
                 // 注意 1：20px 迟滞带（620–639 / 500–519）里画面占比**必然**低于

@@ -137,6 +137,16 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   timecode_layout->setSpacing(0);
   timecode_layout->addStretch(1);
   timecode_layout->addStretch(1);
+  // 3D：时间码主读数由 Transport 自己建（原 InfoBar 的标签在 3D 删除）。
+  // objectName 仍是 `v2Timecode`（M5/M7 与 --readout-edit-test 依赖）。
+  auto* timecode = new QLabel(QStringLiteral("--:--:--:--"), timecode_slot_);
+  timecode->setObjectName(QStringLiteral("v2Timecode"));
+  timecode->setAlignment(Qt::AlignCenter);
+  timecode->setTextFormat(Qt::PlainText);
+  timecode->setFont(lapian::ui::MonoFont(26.0, QFont::DemiBold));
+  timecode->installEventFilter(this);
+  timecode_layout->insertWidget(1, timecode);
+  timecode_ = timecode;
   readout_layout->addWidget(timecode_slot_, 0);
   meta_slot_ = new QWidget(readout_slot_);
   meta_slot_->setObjectName(QStringLiteral("v2TransportMeta"));
@@ -144,6 +154,19 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   meta_layout->setContentsMargins(0, 0, 0, 0);
   meta_layout->setSpacing(7);
   meta_layout->addStretch(1);
+  // 3D：帧号/总帧次读数由 Transport 自己建（objectName 沿用 v2FrameNumber /
+  // v2FrameTotal，--banner-test / M7 / 全屏断言依赖）。
+  frame_ = new QLabel(QStringLiteral("帧 —"), meta_slot_);
+  frame_->setObjectName(QStringLiteral("v2FrameNumber"));
+  frame_->setMinimumWidth(0);
+  meta_layout->addWidget(frame_, 0, Qt::AlignVCenter);
+  auto* slash = new QLabel(QStringLiteral("/"), meta_slot_);
+  slash->setObjectName(QStringLiteral("v2MetaSlash"));
+  meta_layout->addWidget(slash, 0, Qt::AlignVCenter);
+  total_ = new QLabel(meta_slot_);
+  total_->setObjectName(QStringLiteral("v2FrameTotal"));
+  total_->setMinimumWidth(0);
+  meta_layout->addWidget(total_, 0, Qt::AlignVCenter);
   readout_layout->addWidget(meta_slot_, 0);
   row->addWidget(readout_slot_, 0, Qt::AlignVCenter);
   row->addStretch(1);
@@ -336,6 +359,66 @@ void TransportBar::SetSpeedText(const QString& text) {
   speed_button_->setText(text);
 }
 
+// ---- 3D：帧号 / 时间码 / 总帧（原 InfoBar 的显示侧，口径不变）----
+
+void TransportBar::SetFrameRate(const lapian::core::FrameRate& rate, bool vfr) {
+  rate_ = rate;
+  vfr_ = vfr;
+}
+
+void TransportBar::SetFrame(qint64 frame_index) {
+  if (auto* label = qobject_cast<QLabel*>(frame_)) {
+    label->setText(QStringLiteral("帧 %1").arg(frame_index));
+  }
+  if (auto* label = qobject_cast<QLabel*>(timecode_)) {
+    if (vfr_ || !rate_.valid()) {
+      label->setText(QStringLiteral("--:--:--:--"));
+    } else {
+      const lapian::core::TimecodeFormatter formatter(rate_);
+      label->setText(QString::fromStdString(
+          formatter.FromFrame(frame_index).ToString()));
+    }
+  }
+}
+
+void TransportBar::SetTotal(const lapian::core::TotalFrameCount& total) {
+  total_count_ = total;
+  if (auto* label = qobject_cast<QLabel*>(total_)) {
+    label->setText(QStringLiteral("总帧数 %1")
+                       .arg(QString::fromStdString(total.Display())));
+  }
+}
+
+void TransportBar::ClearReadouts() {
+  rate_ = lapian::core::FrameRate();
+  vfr_ = false;
+  total_count_ = lapian::core::TotalFrameCount{};
+  if (auto* label = qobject_cast<QLabel*>(frame_)) {
+    label->setText(QStringLiteral("帧 —"));
+  }
+  if (auto* label = qobject_cast<QLabel*>(timecode_)) {
+    label->setText(QStringLiteral("--:--:--:--"));
+  }
+  if (auto* label = qobject_cast<QLabel*>(total_)) {
+    label->clear();
+  }
+}
+
+QString TransportBar::FrameText() const {
+  auto* label = qobject_cast<QLabel*>(frame_);
+  return label == nullptr ? QString() : label->text();
+}
+
+QString TransportBar::TotalText() const {
+  auto* label = qobject_cast<QLabel*>(total_);
+  return label == nullptr ? QString() : label->text();
+}
+
+QString TransportBar::TimecodeText() const {
+  auto* label = qobject_cast<QLabel*>(timecode_);
+  return label == nullptr ? QString() : label->text();
+}
+
 void TransportBar::SetFullScreenActive(bool fullscreen) {
   fullscreen_active_ = fullscreen;
   if (full_button_ == nullptr) {
@@ -386,53 +469,6 @@ void TransportBar::SetBufferState(bool visible, qint64 cached_bytes,
 
 void TransportBar::SetTimecodeCommit(TimecodeCommit commit) {
   commit_ = std::move(commit);
-}
-
-void TransportBar::AdoptTimecode(QWidget* timecode) {
-  if (timecode == nullptr || timecode_slot_ == nullptr) {
-    return;
-  }
-  auto* layout = qobject_cast<QHBoxLayout*>(timecode_slot_->layout());
-  if (layout == nullptr) {
-    return;
-  }
-  timecode_ = timecode;
-  // 读数允许被压缩：窗口 820 宽时先挤读数，不推高最小宽度。
-  timecode->setMinimumWidth(0);
-  // M5 第 6 行：定位到帧号（Ctrl+G）的可见入口就是这个可点击的时间码。
-  timecode->setToolTip(QStringLiteral("点击输入时间码或帧号（Ctrl+G）"));
-  timecode->setCursor(Qt::IBeamCursor);
-  timecode->installEventFilter(this);
-  layout->insertWidget(1, timecode);
-}
-
-void TransportBar::AdoptFrame(QWidget* frame) {
-  if (frame == nullptr || meta_slot_ == nullptr) {
-    return;
-  }
-  auto* layout = qobject_cast<QHBoxLayout*>(meta_slot_->layout());
-  if (layout == nullptr) {
-    return;
-  }
-  frame_ = frame;
-  frame->setMinimumWidth(0);
-  layout->insertWidget(1, frame);
-  auto* slash = new QLabel(QStringLiteral("/"), meta_slot_);
-  slash->setObjectName(QStringLiteral("v2MetaSlash"));
-  layout->insertWidget(2, slash);
-}
-
-void TransportBar::AdoptTotal(QWidget* total) {
-  if (total == nullptr || meta_slot_ == nullptr) {
-    return;
-  }
-  auto* layout = qobject_cast<QHBoxLayout*>(meta_slot_->layout());
-  if (layout == nullptr) {
-    return;
-  }
-  total_ = total;
-  total->setMinimumWidth(0);
-  layout->insertWidget(3, total);
 }
 
 void TransportBar::AdoptVolume(QWidget* volume) {

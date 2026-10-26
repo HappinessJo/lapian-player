@@ -42,7 +42,6 @@ class QResizeEvent;
 class QSlider;
 class QTimer;
 class GfxWidget;
-class InfoBar;
 class MarkPanel;
 class OnlineResolveDialog;
 class CacheSettingsDialog;
@@ -59,6 +58,7 @@ class SettingsStore;
 
 namespace lapian::media {
 enum class FrameCacheMode;
+struct MediaInfo;
 class MediaSession;
 class OnlinePreviewDecoder;
 class PreviewDecoder;
@@ -163,8 +163,8 @@ class MainWindow : public QMainWindow {
                       bool ui_v2 = false);
   ~MainWindow() override;
 
-  // UI v2（3A）：壳层开关与视图根。旧壳（false）行为与 352b29f 完全一致。
-  bool UiV2ForTest() const { return ui_v2_enabled_; }
+  // UI v2（3D）：只剩一套布局；开关仍是 no-op 别名（旧脚本不炸）。
+  bool UiV2ForTest() const { return true; }
   PlayerShell* ShellForTest() const { return shell_; }
   // §7.8 测试缝（全部只读/无副作用，除 SetSplitSizes/DragSplitter）。
   QString ShellStateForTest() const;
@@ -188,6 +188,10 @@ class MainWindow : public QMainWindow {
   QString FullScreenChromeForTest() const;
   QString ReadoutTextForTest() const;
   QRect ReadoutGeometryForTest() const;
+  // 3D：M2 视觉证据（主题内 主窗/设置对话框/帮助/在线对话框/速度菜单 各一张）。
+  void CaptureThemeShotsForTest(const QString& directory);
+  // 3D：顶栏模式 chip 的完整文本（空态断言 `未打开`）。
+  QString TopBarModeForTest() const;
   // 3B：视图窗 = 画布可见范围（规划 Q3 同源断言）+ 播放头常驻 + 宽度档位 +
   // 缓冲槽 + 两条滑块的合成拖拽（与真实鼠标同一路径）。
   QString TimelineViewFramesForTest() const;
@@ -654,9 +658,7 @@ class MainWindow : public QMainWindow {
   // 在线缓冲槽（仅 buffering/stalled 时可见；不看本地播放）。
   void UpdateBufferSlot();
   void ShowShellHelp();
-  QStringList LayoutProblemsLegacy() const;
   QStringList LayoutProblemsV2() const;
-  QString LayoutStateLegacy() const;
   QString LayoutStateV2() const;
   void ShowOnlineDialog();
   bool LookupOnlineCacheForDialog(const QString& bvid,
@@ -821,6 +823,14 @@ class MainWindow : public QMainWindow {
   void UpdateResponsiveLayout();
   // T6.5：InfoBar 只显示一条横幅，其余提示汇总到状态栏常驻标签。
   void UpdateStatusNotices();
+  // 3D：InfoBar 拆解后的推送点（文件/规格 → TopBar，帧号/时间码/总帧 →
+  // Transport，唯一横幅 → BannerSlot）。名字保持"UI 推送"语义，不做业务。
+  void ApplyMediaInfoToUi(const lapian::media::MediaInfo& info, bool vfr);
+  void ClearMediaInfoUi();
+  void SetFrameForUi(std::int64_t frame_index);
+  void SetTotalForUi(const lapian::core::TotalFrameCount& total);
+  void ClearOnlineFrameRateUi();
+  void UpdateCacheMetric();
   // T7.1：索引后置。首帧先出，索引在后台线程建；扫描中禁用依赖索引的导航。
   void BeginIndexScan();
   void StartIndexBuild();
@@ -833,8 +843,7 @@ class MainWindow : public QMainWindow {
 
   GfxWidget* gfx_ = nullptr;
   QWidget* stage_ = nullptr;
-  // UI v2（3A）：视图根与画面区栈；旧壳下为 nullptr。
-  bool ui_v2_enabled_ = false;
+  // UI v2（3D）：只有一套壳层；`ui_v2` 构造参数仍解析但不再影响布局。
   PlayerShell* shell_ = nullptr;
   StageStack* stage_stack_ = nullptr;
   bool media_open_requested_ = false;
@@ -843,7 +852,8 @@ class MainWindow : public QMainWindow {
   bool inspector_auto_decided_ = false;
   bool updating_layout_ = false;
   TimelineWidget* timeline_ = nullptr;
-  InfoBar* info_bar_ = nullptr;
+  // 3D：帧号/总帧的唯一状态源（Inspector 信息页与 IndexStateForTest 共用）。
+  lapian::core::TotalFrameCount total_for_ui_;
   MarkPanel* mark_panel_ = nullptr;
   OnlineResolveDialog* online_dialog_ = nullptr;
   QLabel* status_label_ = nullptr;
@@ -852,6 +862,8 @@ class MainWindow : public QMainWindow {
   QLabel* loop_label_ = nullptr;
   QLabel* waveform_label_ = nullptr;
   QLabel* notice_label_ = nullptr;
+  // 3D：状态栏第 3 个指标（音频/缓存/波形）。
+  QLabel* cache_label_ = nullptr;
   QSlider* volume_slider_ = nullptr;
   QPushButton* cache_settings_button_ = nullptr;
   QAction* mute_action_ = nullptr;

@@ -14,6 +14,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -29,6 +30,16 @@
 #include "online/WinHttpClient.h"
 
 namespace {
+
+// 3D：对话框进主题。语义色走全局 QSS 的属性选择器，不再 per-widget setStyleSheet。
+void SetStateProperty(QWidget* widget, const char* state) {
+  if (widget == nullptr) {
+    return;
+  }
+  widget->setProperty("state", QString::fromLatin1(state));
+  widget->style()->unpolish(widget);
+  widget->style()->polish(widget);
+}
 
 QString FormatDuration(qint64 seconds) {
   if (seconds < 0) {
@@ -102,8 +113,6 @@ void OnlineResolveDialog::SetupUi() {
   privacy_label_->setObjectName(QStringLiteral("onlinePrivacyNotice"));
   privacy_label_->setWordWrap(true);
   privacy_label_->setTextFormat(Qt::PlainText);
-  privacy_label_->setStyleSheet(
-      QStringLiteral("color:#444; background:#f4f4f4; padding:6px;"));
   privacy_hide_button_ = new QPushButton(QStringLiteral("隐藏说明"), this);
   privacy_hide_button_->setObjectName(QStringLiteral("onlinePrivacyHide"));
   privacy_row->addWidget(privacy_label_, 1);
@@ -124,7 +133,6 @@ void OnlineResolveDialog::SetupUi() {
 
   status_label_ = new QLabel(QStringLiteral("尚未解析"), this);
   status_label_->setObjectName(QStringLiteral("onlineStatus"));
-  status_label_->setStyleSheet(QStringLiteral("color:#666;"));
   status_label_->setWordWrap(true);
   root->addWidget(status_label_);
 
@@ -152,7 +160,6 @@ void OnlineResolveDialog::SetupUi() {
   quality_label_ = new QLabel(this);
   quality_label_->setObjectName(QStringLiteral("onlineQualityHint"));
   quality_label_->setWordWrap(true);
-  quality_label_->setStyleSheet(QStringLiteral("color:#b8860b;"));
 
   form->addRow(QStringLiteral("标题："), title_label_);
   form->addRow(QStringLiteral("UP主："), owner_label_);
@@ -166,7 +173,6 @@ void OnlineResolveDialog::SetupUi() {
   error_label_ = new QLabel(this);
   error_label_->setObjectName(QStringLiteral("onlineError"));
   error_label_->setWordWrap(true);
-  error_label_->setStyleSheet(QStringLiteral("color:#c0392b;"));
   error_label_->hide();
   root->addWidget(error_label_);
 
@@ -232,7 +238,7 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
       box);
   hint->setWordWrap(true);
   hint->setTextFormat(Qt::PlainText);
-  hint->setStyleSheet(QStringLiteral("color:#666;"));
+  hint->setObjectName(QStringLiteral("onlineCredentialHint"));
   box_layout->addWidget(hint);
 
   // T8.2.2：扫码是并存的第二条入口；粘贴入口永远是主路径，不删除/不降级。
@@ -242,7 +248,7 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
       box);
   qr_hint->setWordWrap(true);
   qr_hint->setTextFormat(Qt::PlainText);
-  qr_hint->setStyleSheet(QStringLiteral("color:#666;"));
+  qr_hint->setObjectName(QStringLiteral("onlineQrHint"));
   qr_start_button_ = new QPushButton(QStringLiteral("扫码登录"), box);
   qr_start_button_->setObjectName(QStringLiteral("onlineQrStart"));
   qr_row->addWidget(qr_hint, 1);
@@ -257,8 +263,6 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
   qr_image_label_->setObjectName(QStringLiteral("onlineQrImage"));
   qr_image_label_->setFixedSize(240, 240);
   qr_image_label_->setAlignment(Qt::AlignCenter);
-  qr_image_label_->setStyleSheet(
-      QStringLiteral("background:#fff; border:1px solid #ccc;"));
   qr_image_label_->setToolTip(
       QStringLiteral("用 B 站手机客户端扫描；本图由本地渲染，不联网加载"));
   qr_panel_layout->addWidget(qr_image_label_, 0, Qt::AlignHCenter);
@@ -683,18 +687,18 @@ void OnlineResolveDialog::UpdateAuthUi() {
   }
 
   QString text;
-  QString color = QStringLiteral("#666");
+  const char* state = "muted";
   if (auth_checking_) {
     text = QStringLiteral("登录检查中…（最多 %1ms；失败继续匿名解析）")
                .arg(auth_timeout_ms_);
-    color = QStringLiteral("#b8860b");
+    state = "warn";
   } else {
     switch (auth_.state()) {
       case lapian::online::AuthState::kAnonymous:
         if (credential_corrupt_) {
           text = QStringLiteral(
               "凭据文件损坏，已按未登录处理；请重新粘贴 SESSDATA 保存");
-          color = QStringLiteral("#c0392b");
+          state = "error";
         } else {
           text = QStringLiteral("未配置凭据：按未登录处理（清晰度受限）");
         }
@@ -705,7 +709,7 @@ void OnlineResolveDialog::UpdateAuthUi() {
         break;
       case lapian::online::AuthState::kLoggedIn:
         text = QStringLiteral("已登录（清晰度以取流时返回为准）");
-        color = QStringLiteral("#2e7d32");
+        state = "ok";
         break;
       case lapian::online::AuthState::kLoginUnavailable: {
         text = auth_.result().message;
@@ -713,17 +717,17 @@ void OnlineResolveDialog::UpdateAuthUi() {
           text = QStringLiteral(
               "登录不可用/凭据失效；将按未登录清晰度播放");
         }
-        color = QStringLiteral("#c0392b");
+        state = "error";
         break;
       }
       case lapian::online::AuthState::kChecking:
         text = QStringLiteral("登录检查中…");
-        color = QStringLiteral("#b8860b");
+        state = "warn";
         break;
     }
   }
   auth_status_label_->setText(text);
-  auth_status_label_->setStyleSheet(QStringLiteral("color:%1;").arg(color));
+  SetStateProperty(auth_status_label_, state);
 
   const bool can_edit = !auth_checking_;
   if (credential_input_ != nullptr) {
@@ -912,7 +916,7 @@ bool OnlineResolveDialog::ClearCredentialNow() {
   if (!credentials_.Clear(&clear_error)) {
     if (auth_status_label_ != nullptr) {
       auth_status_label_->setText(clear_error);
-      auth_status_label_->setStyleSheet(QStringLiteral("color:#c0392b;"));
+      SetStateProperty(auth_status_label_, "error");
     }
     return false;
   }
@@ -931,7 +935,7 @@ void OnlineResolveDialog::OnSaveCredential() {
   QString error;
   if (!SaveCredentialText(text, &error)) {
     auth_status_label_->setText(error);
-    auth_status_label_->setStyleSheet(QStringLiteral("color:#c0392b;"));
+    SetStateProperty(auth_status_label_, "error");
     credential_input_->setFocus();
     return;
   }

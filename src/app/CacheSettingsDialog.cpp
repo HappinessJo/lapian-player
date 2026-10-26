@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -24,6 +25,20 @@ namespace lapian::app {
 
 using lapian::online::CacheManager;
 using lapian::online::CacheStore;
+
+namespace {
+
+// 3D：语义色走全局 QSS 的属性选择器（禁止 per-widget setStyleSheet）。
+void SetStateProperty(QWidget* widget, const char* state) {
+  if (widget == nullptr) {
+    return;
+  }
+  widget->setProperty("state", QString::fromLatin1(state));
+  widget->style()->unpolish(widget);
+  widget->style()->polish(widget);
+}
+
+}  // namespace
 
 CacheSettingsDialog::CacheSettingsDialog(CacheStore* cache, QString records_root,
                                          bool session_active,
@@ -83,6 +98,7 @@ void CacheSettingsDialog::BuildUi() {
   root_hint_label_->setWordWrap(true);
   dir_layout->addWidget(root_hint_label_);
   root_state_label_ = new QLabel(dir_group);
+  root_state_label_->setObjectName(QStringLiteral("cacheRootState"));
   root_state_label_->setWordWrap(true);
   dir_layout->addWidget(root_state_label_);
   root_layout->addWidget(dir_group);
@@ -217,7 +233,7 @@ void CacheSettingsDialog::UpdatePendingUi() {
       cache_ != nullptr &&
       QDir::cleanPath(pending_root_) != QDir::cleanPath(cache_->root());
   if (changed) {
-    root_state_label_->setStyleSheet(QStringLiteral("color:#d8b45a;"));
+    SetStateProperty(root_state_label_, "warn");
     root_state_label_->setText(QStringLiteral("目录已更改，点击“保存”后生效。"));
   }
 }
@@ -251,14 +267,14 @@ void CacheSettingsDialog::UpdateSummaryUi() {
             .arg(CacheStore::FormatBytes(summary.free_bytes)));
   }
   if (!summary.root_error.isEmpty()) {
-    root_state_label_->setStyleSheet(QStringLiteral("color:#e06c75;"));
+    SetStateProperty(root_state_label_, "error");
     root_state_label_->setText(
         QStringLiteral("目录不可用：%1").arg(summary.root_error));
   } else if (summary.root_exists) {
-    root_state_label_->setStyleSheet(QStringLiteral("color:#6fbf73;"));
+    SetStateProperty(root_state_label_, "ok");
     root_state_label_->setText(QStringLiteral("目录可写。"));
   } else {
-    root_state_label_->setStyleSheet(QStringLiteral("color:#9aa0a6;"));
+    SetStateProperty(root_state_label_, "muted");
     root_state_label_->setText(QStringLiteral("目录尚未创建。"));
   }
 
@@ -399,8 +415,7 @@ void CacheSettingsDialog::SetStatus(const QString& text, bool error) {
   if (status_label_ == nullptr) {
     return;
   }
-  status_label_->setStyleSheet(error ? QStringLiteral("color:#e06c75;")
-                                     : QStringLiteral("color:#6fbf73;"));
+  SetStateProperty(status_label_, error ? "error" : "ok");
   status_label_->setText(text);
 }
 

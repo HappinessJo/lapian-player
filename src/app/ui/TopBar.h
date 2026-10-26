@@ -9,6 +9,7 @@
 #include "app/ui/Tokens.h"
 
 class QAction;
+class QHBoxLayout;
 class QLabel;
 class QResizeEvent;
 
@@ -68,9 +69,7 @@ class TopBar : public QWidget {
   // 按钮绑定既有 QAction：动作的 enabled/checked/text 是唯一真源。
   void BindActions(QAction* open, QAction* online);
 
-  void AdoptFileLabel(QWidget* label);
-  void AdoptSpecLabel(QWidget* label);
-  void AdoptFpsBadge(QWidget* badge);
+  // 3D：文件/规格标签与 fps 角标由 TopBar 自己创建（不再从 InfoBar reparent）。
   void AdoptSettingsButton(QWidget* button);
   void AdoptQualityButton(QWidget* button);
 
@@ -78,12 +77,20 @@ class TopBar : public QWidget {
   void SetFileName(const QString& file_name);
   QString FileName() const { return file_name_; }
   QString FileLabelText() const;
+  void SetSpecText(const QString& text);
   QString SpecText() const;
   bool NarrowMode() const { return narrow_; }
 
   void SetMode(const QString& text, ModeKind kind);
   QString ModeText() const;
   QString ModeKindName() const;
+
+  // T8.12/DEC-4：实际流 fps 角标（原 InfoBar 的 onlineFpsBadge 对象）。
+  // 3D 起角标放进模式 chip 内部；warn=true 时用 warn 色（有降帧证据）。
+  void SetOnlineFpsBadge(const QString& text, bool warn);
+  void ClearOnlineFpsBadge();
+  QString FpsBadgeText() const;
+  bool FpsBadgeVisible() const;
 
   void ApplyTokens(const lapian::ui::Tokens& tokens);
 
@@ -115,6 +122,7 @@ class TopBar : public QWidget {
   QWidget* spec_label_ = nullptr;
   QWidget* spec_icon_ = nullptr;
   QWidget* mode_chip_ = nullptr;
+  QHBoxLayout* mode_layout_ = nullptr;
   QLabel* mode_icon_ = nullptr;
   QLabel* mode_text_ = nullptr;
   QWidget* fps_badge_ = nullptr;

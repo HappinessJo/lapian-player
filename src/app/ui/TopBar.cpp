@@ -1,4 +1,4 @@
-﻿#include "app/ui/TopBar.h"
+#include "app/ui/TopBar.h"
 
 #include <QAction>
 #include <QEnterEvent>
@@ -135,6 +135,13 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   auto* file_layout = new QHBoxLayout(file_holder);
   file_layout->setContentsMargins(0, 0, 0, 0);
   file_layout->setSpacing(0);
+  // 3D：文件名标签由 TopBar 自己建（原 InfoBar 的 infoFile 对象在 3D 删除）。
+  auto* file_label = new QLabel(QStringLiteral("未打开文件"), file_holder);
+  file_label->setObjectName(QStringLiteral("infoFile"));
+  file_label->setFont(lapian::ui::UiFont(13.0, QFont::DemiBold));
+  file_label->setMinimumWidth(0);
+  file_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  file_layout->addWidget(file_label, 1);
   row->addWidget(file_holder, 1, Qt::AlignVCenter);
   file_label_ = file_holder;
 
@@ -152,6 +159,13 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   spec_icon->setPixmap(
       lapian::ui::GlyphPixmap(lapian::ui::GlyphId::kFilter, 12, DimColor()));
   spec_layout->addWidget(spec_icon, 0, Qt::AlignVCenter);
+  // 3D：规格标签由 TopBar 自己建（原 InfoBar 的 infoFormat 对象在 3D 删除）。
+  auto* spec_label = new QLabel(spec_chip);
+  spec_label->setObjectName(QStringLiteral("infoFormat"));
+  spec_label->setFont(lapian::ui::UiFont(11.0));
+  spec_label->setContentsMargins(0, 0, 0, 0);
+  spec_layout->addWidget(spec_label, 0, Qt::AlignVCenter);
+  spec_label_ = spec_label;
   row->addWidget(spec_chip, 0, Qt::AlignVCenter);
   spec_chip_ = spec_chip;
   spec_icon_ = spec_icon;
@@ -171,8 +185,19 @@ TopBar::TopBar(QWidget* parent) : QWidget(parent) {
   mode_text_->setObjectName(QStringLiteral("v2ModeText"));
   mode_text_->setFont(lapian::ui::UiFont(11.0));
   mode_layout->addWidget(mode_text_, 0, Qt::AlignVCenter);
+  // 3D：实际 fps 角标（原 InfoBar 的 onlineFpsBadge）进 chip 内部。
+  auto* fps_badge = new QLabel(mode_chip);
+  fps_badge->setObjectName(QStringLiteral("onlineFpsBadge"));
+  fps_badge->setTextFormat(Qt::PlainText);
+  fps_badge->setFont(lapian::ui::UiFont(10.0));
+  fps_badge->setToolTip(
+      QStringLiteral("当前在线流实际 fps（playurl/容器）；不用于重算帧号"));
+  fps_badge->hide();
+  mode_layout->addWidget(fps_badge, 0, Qt::AlignVCenter);
+  fps_badge_ = fps_badge;
   row->addWidget(mode_chip, 0, Qt::AlignVCenter);
   mode_chip_ = mode_chip;
+  mode_layout_ = mode_layout;
 
   // 在线清晰度入口（T8.9/T8.12 的原对象，默认隐藏）；放在模式 chip 右侧。
   auto* quality_holder = new QWidget(this);
@@ -230,50 +255,38 @@ void TopBar::BindActions(QAction* open, QAction* online) {
   }
 }
 
-void TopBar::AdoptFileLabel(QWidget* label) {
-  if (label == nullptr || file_label_ == nullptr) {
+void TopBar::SetOnlineFpsBadge(const QString& text, bool warn) {
+  if (fps_badge_ == nullptr) {
     return;
   }
-  auto* layout = qobject_cast<QHBoxLayout*>(file_label_->layout());
-  if (layout == nullptr) {
-    return;
+  auto* label = qobject_cast<QLabel*>(fps_badge_);
+  if (label != nullptr) {
+    label->setText(text);
   }
-  layout->addWidget(label);
-  if (auto* qlabel = qobject_cast<QLabel*>(label)) {
-    qlabel->setFont(lapian::ui::UiFont(13.0, QFont::DemiBold));
-    qlabel->setMinimumWidth(0);
-    qlabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  }
+  fps_badge_->setProperty("kind",
+                          QString::fromLatin1(warn ? "warn" : "neutral"));
+  fps_badge_->style()->unpolish(fps_badge_);
+  fps_badge_->style()->polish(fps_badge_);
+  fps_badge_->setVisible(!text.trimmed().isEmpty());
 }
 
-void TopBar::AdoptSpecLabel(QWidget* label) {
-  if (label == nullptr || spec_chip_ == nullptr) {
+void TopBar::ClearOnlineFpsBadge() {
+  if (fps_badge_ == nullptr) {
     return;
   }
-  auto* layout = qobject_cast<QHBoxLayout*>(spec_chip_->layout());
-  if (layout == nullptr) {
-    return;
+  if (auto* label = qobject_cast<QLabel*>(fps_badge_)) {
+    label->clear();
   }
-  layout->addWidget(label);
-  if (auto* qlabel = qobject_cast<QLabel*>(label)) {
-    qlabel->setFont(lapian::ui::UiFont(11.0));
-    qlabel->setContentsMargins(0, 0, 0, 0);
-  }
-  spec_label_ = label;
-  RefreshChips();
+  fps_badge_->hide();
 }
 
-void TopBar::AdoptFpsBadge(QWidget* badge) {
-  if (badge == nullptr) {
-    return;
-  }
-  auto* row = qobject_cast<QHBoxLayout*>(layout());
-  if (row == nullptr) {
-    return;
-  }
-  // 角标跟着模式 chip（DEC-4），插在模式 chip 之后。
-  row->insertWidget(5, badge, 0, Qt::AlignVCenter);
-  fps_badge_ = badge;
+QString TopBar::FpsBadgeText() const {
+  auto* label = qobject_cast<QLabel*>(fps_badge_);
+  return label == nullptr ? QString() : label->text();
+}
+
+bool TopBar::FpsBadgeVisible() const {
+  return fps_badge_ != nullptr && fps_badge_->isVisible();
 }
 
 void TopBar::AdoptSettingsButton(QWidget* button) {
@@ -343,6 +356,14 @@ QString TopBar::SpecText() const {
     return label->text();
   }
   return QString();
+}
+
+void TopBar::SetSpecText(const QString& text) {
+  if (auto* label = qobject_cast<QLabel*>(spec_label_)) {
+    label->setText(text);
+    label->setToolTip(text);
+  }
+  RefreshChips();
 }
 
 void TopBar::SetMode(const QString& text, ModeKind kind) {

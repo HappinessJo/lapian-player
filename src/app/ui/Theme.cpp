@@ -81,6 +81,15 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
 #v2PlayerShell, #v2Workspace { background: @appbg; }
 #v2TopBar { background: @surface; border-bottom: 1px solid @border; }
 #v2BannerSlot { background: @surface; border-bottom: 1px solid @border; }
+#v2BannerSlot[kind="warn"] { background: #1b1a13; border-bottom-color: @warn_border; }
+#v2BannerSlot[kind="error"] { background: @err_bg; border-bottom-color: @err_border; }
+#v2BannerSlot[kind="info"] { background: @surface2; border-bottom-color: @border; }
+#infoBanner { color: @warn; }
+#v2BannerSlot[kind="error"] #infoBanner { color: @err; }
+#v2BannerSlot[kind="info"] #infoBanner { color: @text_dim; }
+#infoBannerClose { color: @text_meta; background: transparent; border: none;
+  padding: 0 4px; }
+#infoBannerClose:hover { color: @text; background: @surface3; border-radius: 3px; }
 #v2TimelinePanel, #v2Inspector {
   background: @surface; border: 1px solid @border; border-radius: 4px; }
 #v2VideoCard { background: @surface; border: 1px solid transparent;
@@ -129,6 +138,10 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
   border-color: @warn_border; }
 #v2ModeChip[kind="error"] { color: @err; background: @err_bg;
   border-color: @err_border; }
+#onlineFpsBadge { color: @text_dim; background: @surface3;
+  border: 1px solid @border; border-radius: 3px; padding: 0 5px; }
+#onlineFpsBadge[kind="warn"] { color: @warn; background: @warn_bg;
+  border-color: @warn_border; }
 #v2KbdBadge { color: @text_mute; background: @kbdbg; border: 1px solid @kbdborder;
   border-radius: 2px; }
 #v2Timecode { color: @text; }
@@ -139,6 +152,8 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
 #v2BufferSlot { background: transparent; }
 #v2BufferText { color: @text_meta; }
 #v2StatusMessage { color: @text_dim; }
+#noticeInfo { color: @warn; }
+#cacheInfo { color: @text_dim; }
 #v2StatusSep { background: @border; }
 QStatusBar { background: @surface; border-top: 1px solid @border; }
 QStatusBar::item { border: none; }
@@ -169,6 +184,30 @@ QMenu::item { padding: 4px 18px; }
 QMenu::item:selected { background: @accent_on_bg; color: @text; }
 QMenu::item:disabled { color: @text_mute; }
 QMenu::separator { height: 1px; background: @border; margin: 4px 8px; }
+/* 对话框：CacheSettingsDialog / OnlineResolveDialog / 帮助 QMessageBox 全部走
+   这一份 QSS + 令牌（3D 收口；不再有 per-widget setStyleSheet）。 */
+QDialog { background: @appbg; }
+QDialog QLabel, QMessageBox QLabel { color: @text_dim; }
+QGroupBox { color: @text_dim; }
+#onlinePrivacyNotice { color: @text_meta; background: @surface2;
+  border: 1px solid @border; border-radius: 3px; padding: 6px; }
+#onlineStatus { color: @text_meta; }
+#onlineQualityHint { color: @warn; }
+#onlineError { color: @err; }
+#onlineCredentialHint, #onlineQrHint, #onlineQrStatus { color: @text_meta; }
+#onlineAuthStatus { color: @text_meta; }
+#onlineAuthStatus[state="ok"] { color: @ok; }
+#onlineAuthStatus[state="warn"] { color: @warn; }
+#onlineAuthStatus[state="error"] { color: @err; }
+#onlineQrImage { background: #ffffff; border: 1px solid @border_strong; }
+#cacheRootState { color: @text_meta; }
+#cacheRootState[state="ok"] { color: @ok; }
+#cacheRootState[state="warn"] { color: @warn; }
+#cacheRootState[state="error"] { color: @err; }
+#cacheStatusLabel { color: @text_meta; }
+#cacheStatusLabel[state="ok"] { color: @ok; }
+#cacheStatusLabel[state="error"] { color: @err; }
+#v2HelpDialog QLabel { color: @text; }
 QToolTip { background: @surface3; color: @text; border: 1px solid @border_strong;
   padding: 3px 6px; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {

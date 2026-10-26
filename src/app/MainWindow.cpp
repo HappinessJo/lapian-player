@@ -77,7 +77,6 @@ extern "C" {
 
 #include "app/CacheSettingsDialog.h"
 #include "app/GfxWidget.h"
-#include "app/InfoBar.h"
 #include "app/MarkPanel.h"
 #include "app/OnlineResolveDialog.h"
 #include "app/OnlineSession.h"
@@ -171,8 +170,10 @@ QString EscapeForLog(QString text) {
 MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
                        bool enable_cache_maintenance, bool ui_v2)
     : QMainWindow(parent) {
+  // 3D：`ui_v2`/`LAPIAN_UI_V2` 仍然是可解析的 no-op 别名（旧脚本不炸），
+  // 但只有一套布局（旧壳已删除，git revert 本 commit 可整体回到 3C 双壳）。
+  (void)ui_v2;
   cache_maintenance_enabled_ = enable_cache_maintenance;
-  ui_v2_enabled_ = ui_v2;
   settings_log_ = qEnvironmentVariableIsSet("LAPIAN_SETTINGS_LOG");
   startup_log_ = qEnvironmentVariableIsSet("LAPIAN_STARTUP_LOG");
   // T6.3：构造期间只建立 store；文件读取放在 UI 建好之后、首次打开文件之前，
@@ -183,34 +184,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   ApplyInitialWindowSize();
   setAcceptDrops(true);
 
-  // UI v2（3A）：两套布局**互斥构建**，不共存（规划 §7.3）。
-  // 旧壳路径一行不动，保证 LAPIAN_UI_V2 关掉时行为与 352b29f 完全一致。
-  if (ui_v2_enabled_) {
-    BuildShellUi();
-  } else {
-    auto* central = new QWidget(this);
-    auto* central_layout = new QHBoxLayout(central);
-    central_layout->setContentsMargins(0, 0, 0, 0);
-    central_layout->setSpacing(0);
-
-    stage_ = new QWidget(central);
-    stage_->setObjectName(QStringLiteral("videoStage"));
-    auto* stage_layout = new QVBoxLayout(stage_);
-    stage_layout->setContentsMargins(0, 0, 0, 0);
-    stage_layout->setSpacing(0);
-    gfx_ = new GfxWidget(stage_);
-    timeline_ = new TimelineWidget(stage_);
-    info_bar_ = new InfoBar(stage_);
-    stage_layout->addWidget(gfx_, 1);
-    stage_layout->addWidget(timeline_);
-    stage_layout->addWidget(info_bar_);
-
-    mark_panel_ = new MarkPanel(central);
-    mark_panel_->setFixedWidth(300);
-    central_layout->addWidget(stage_, 1);
-    central_layout->addWidget(mark_panel_);
-    setCentralWidget(central);
-  }
+  BuildShellUi();
 
   open_action_ = new QAction(QStringLiteral("打开视频..."), this);
   open_action_->setShortcut(QKeySequence::Open);
@@ -464,6 +438,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
             }
             // 3B 缓冲槽：只在在线 buffering/stalled 时出现（本地一律隐藏）。
             UpdateBufferSlot();
+            UpdateShellModeChip();
           });
 
   preview_timer_ = new QTimer(this);
@@ -472,9 +447,9 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   connect(preview_timer_, &QTimer::timeout, this, &MainWindow::OnPreviewTick);
 
   // T6.5：InfoBar 只显示一条横幅；其余状态提示汇总到这里，常驻状态栏。
+  // 3D：状态栏压到"1 条消息 + 3 指标（音频/缓存/波形）"，语义色走全局 QSS。
   notice_label_ = new QLabel(this);
   notice_label_->setObjectName(QStringLiteral("noticeInfo"));
-  notice_label_->setStyleSheet(QStringLiteral("color:#e8c46a;"));
   notice_label_->setMaximumWidth(240);
   notice_label_->setToolTip(QStringLiteral("其他状态提示"));
   notice_label_->hide();
@@ -485,19 +460,24 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   audio_label_->setToolTip(QStringLiteral("音频轨道与输出状态"));
   statusBar()->addPermanentWidget(audio_label_);
 
+  // 3D：第 3 个指标（音频/缓存/波形）。在线缓存占用；本地显示 "缓存 —"。
+  cache_label_ = new QLabel(QStringLiteral("缓存 —"), this);
+  cache_label_->setObjectName(QStringLiteral("cacheInfo"));
+  cache_label_->setToolTip(QStringLiteral("在线缓存占用"));
+  statusBar()->addPermanentWidget(cache_label_);
+
   speed_label_ = new QLabel(QStringLiteral("1x"), this);
   speed_label_->setObjectName(QStringLiteral("speedInfo"));
   speed_label_->setToolTip(QStringLiteral("播放速度（[ / ] 调整）"));
-  // UI v2：速度读数搬到 Transport（对象不变）；旧壳留在状态栏。
-  if (!ui_v2_enabled_) {
-    statusBar()->addPermanentWidget(speed_label_);
-  }
+  // 3D：速度读数只在 Transport（对象不变，状态栏不再常驻）。
+  speed_label_->hide();
 
   loop_label_ = new QLabel(QStringLiteral("循环：关"), this);
   loop_label_->setObjectName(QStringLiteral("loopInfo"));
   loop_label_->setToolTip(
       QStringLiteral("A/B 循环：I 入点 · O 出点 · L 开关 · Shift+L 清除"));
-  statusBar()->addPermanentWidget(loop_label_);
+  // 3D：循环数值只在时间轴标题；对象保留（SyncLoopUi 仍写它），但不进状态栏。
+  loop_label_->hide();
 
   waveform_label_ = new QLabel(QStringLiteral("波形：—"), this);
   waveform_label_->setObjectName(QStringLiteral("waveformInfo"));
@@ -512,10 +492,7 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   volume_slider_->setEnabled(false);
   volume_slider_->setToolTip(QStringLiteral("音量 %1%").arg(volume_));
   connect(volume_slider_, &QSlider::valueChanged, this, &MainWindow::OnVolumeChanged);
-  // UI v2：音量滑条搬到 Transport（对象不变，getter 不变）；旧壳留在状态栏。
-  if (!ui_v2_enabled_) {
-    statusBar()->addPermanentWidget(volume_slider_);
-  }
+  // 3D：音量滑条搬到 Transport（对象不变，getter 不变）；状态栏不再有它。
 
   // T8.3.1：可见的“设置”入口（Ctrl+, 同一路径）；不新增主菜单/不改变 v1 快捷键。
   cache_settings_button_ = new QPushButton(QStringLiteral("设置"), this);
@@ -524,9 +501,6 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   cache_settings_button_->setToolTip(QStringLiteral("在线缓存设置（Ctrl+,）"));
   connect(cache_settings_button_, &QPushButton::clicked, this,
           &MainWindow::ShowCacheSettingsDialog);
-  if (!ui_v2_enabled_) {
-    statusBar()->addPermanentWidget(cache_settings_button_);
-  }
 
   // T8.9：清晰度入口。只列示 playurl 实际返回的档位；DASH 播放/切档属
   // T8.10/T8.12，本任务不假装切换。本地模式隐藏。
@@ -542,14 +516,9 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   quality_button_->setEnabled(false);
   connect(quality_button_, &QPushButton::clicked, this,
           &MainWindow::ShowOnlineQualityMenu);
-  if (!ui_v2_enabled_) {
-    statusBar()->addPermanentWidget(quality_button_);
-  }
 
-  // UI v2：把 InfoBar / 状态栏里的既有控件原对象 reparent 进新壳（不换外观）。
-  if (ui_v2_enabled_) {
-    AdoptShellWidgets();
-  }
+  // UI v2（3D）：把状态栏里的既有控件原对象交给新壳（对象/getter 不变）。
+  AdoptShellWidgets();
 
   mute_action_ = new QAction(QStringLiteral("静音"), this);
   mute_action_->setShortcut(Qt::Key_M);
@@ -562,9 +531,12 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
   status_label_ = new QLabel(this);
   status_label_->setObjectName(QStringLiteral("statusInfo"));
   status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  statusBar()->addPermanentWidget(status_label_);
+  // 3D：状态栏只留"1 条消息 + 3 指标"（消息 = notice_label_，指标 = 音频/
+  // 缓存/波形）。statusInfo 对象保留（诊断/版本信息仍写入），不再常驻。
+  status_label_->hide();
 
-  connect(info_bar_, &InfoBar::noticesChanged, this, &MainWindow::UpdateStatusNotices);
+  connect(shell_->banner(), &BannerSlot::noticesChanged, this,
+          &MainWindow::UpdateStatusNotices);
   UpdateStatusNotices();
 
   audio_status_timer_ = new QTimer(this);
@@ -764,11 +736,27 @@ void MainWindow::BuildShellUi() {
   if (lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel()) {
     inspector->AdoptMarkPanel(mark_panel_);
   }
+  // 3D：预热 MarkPanel 的树/编辑器。Qt 在**第一次给 QTreeWidget 设置 current
+  // item**时会做一次 ~600ms 的样式/字体初始化（本机实测 580–650ms）；不预热
+  // 就会落在第一个 Ctrl+M/截图跳转上，把 --online-m1-test 的 ui_gap 直接推到
+  // 600ms。预热放在窗口 show 之前，只影响一次性的冷启动（P1/P2 仍 ≤1.5s/2.5s），
+  // 不进交互路径。
+  {
+    lapian::core::Mark warm;
+    warm.id = "warmup";
+    warm.frame = 0;
+    warm.pts_us = 0;
+    mark_panel_->SetMarks({warm});
+    mark_panel_->SelectMark(warm.id);
+    mark_panel_->SetMarks({});
+    // 预热选中可能把焦点留在标记树；把初始焦点还给画面（键位/长按回归依赖）。
+    if (gfx_ != nullptr) {
+      gfx_->setFocus(Qt::OtherFocusReason);
+    }
+  }
 
-  // InfoBar 继续做通知/规格/帧号的"状态源"（media::StatusNotice 的构建/择一/
-  // 次级摘要一行不改），只是自己不进布局；子控件随后 reparent 到新壳。
-  info_bar_ = new InfoBar(this);
-  info_bar_->hide();
+  // 3D：InfoBar 已删除。文件/规格/模式 chip 由 TopBar 自己建；帧号/时间码/
+  // 总帧由 Transport 自己建；唯一横幅由 BannerSlot 自己建。
 
   connect(stage_stack_, &StageStack::openLocalRequested, this,
           &MainWindow::OpenDialog);
@@ -793,18 +781,9 @@ void MainWindow::BuildShellUi() {
 }
 
 void MainWindow::AdoptShellWidgets() {
-  if (shell_ == nullptr) {
-    return;
-  }
   TopBar* top = shell_->topBar();
-  if (info_bar_ != nullptr) {
-    top->AdoptFileLabel(
-        info_bar_->findChild<QWidget*>(QStringLiteral("infoFile")));
-    top->AdoptSpecLabel(
-        info_bar_->findChild<QWidget*>(QStringLiteral("infoFormat")));
-    top->AdoptFpsBadge(
-        info_bar_->findChild<QWidget*>(QStringLiteral("onlineFpsBadge")));
-  }
+  // 3D：文件/规格/模式 chip 里的 fps 角标都由 TopBar 自己建，不再搬 InfoBar 的
+  // 控件；设置/清晰度入口仍是 T8.3.1/T8.9 的原对象。
   top->AdoptSettingsButton(cache_settings_button_);
   top->AdoptQualityButton(quality_button_);
   top->BindActions(open_action_, online_action_);
@@ -823,15 +802,13 @@ void MainWindow::AdoptShellWidgets() {
           [this]() { JumpToEdgeFrame(true); });
   connect(transport, &TransportBar::inspectorToggled, this,
           [this](bool collapsed) { shell_->SetInspectorCollapsed(collapsed); });
-  if (info_bar_ != nullptr) {
-    transport->AdoptTimecode(
-        info_bar_->findChild<QWidget*>(QStringLiteral("v2Timecode")));
-    transport->AdoptFrame(
-        info_bar_->findChild<QWidget*>(QStringLiteral("v2FrameNumber")));
-    transport->AdoptTotal(
-        info_bar_->findChild<QWidget*>(QStringLiteral("v2FrameTotal")));
-  }
   transport->AdoptVolume(volume_slider_);
+  if (shell_->banner() != nullptr) {
+    connect(shell_->banner(), &BannerSlot::noticesChanged, this,
+            &MainWindow::UpdateStatusNotices);
+    connect(shell_->banner(), &BannerSlot::noticesChanged, this,
+            &MainWindow::UpdateShellModeChip);
+  }
   // 3C：检查器的 `+` 绑既有“添加标记”QAction（M5 第 13 行的第二入口）；
   // 截图格点击 → 与标记跳转相同的“先重绘 UI、再 singleShot(0) 精确解码”。
   if (lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel()) {
@@ -860,18 +837,6 @@ void MainWindow::AdoptShellWidgets() {
   });
   // 定时器只用于把状态推给 V2 壳层（3B 起改信号驱动，ui_meta_timer_ 已删）。
 
-  if (info_bar_ != nullptr) {
-    // 横幅：把 InfoBar 内部的 infoBannerRow（label + 关闭按钮）原对象搬进槽里，
-    // 这样 --banner-test 的 8 个字符串键与"唯一横幅"语义都不用改。
-    if (QWidget* banner_row = info_bar_->findChild<QWidget*>(
-            QStringLiteral("infoBannerRow"))) {
-      shell_->banner()->AdoptBannerRow(banner_row);
-    }
-    connect(info_bar_, &InfoBar::noticesChanged, shell_->banner(),
-            &BannerSlot::Refresh);
-    connect(info_bar_, &InfoBar::noticesChanged, this,
-            &MainWindow::UpdateShellModeChip);
-  }
   top->SetFileName(QString());
   UpdateShellModeChip();
   shell_->ApplyClientHeight(height());
@@ -883,7 +848,7 @@ void MainWindow::AdoptShellWidgets() {
 }
 
 void MainWindow::UpdateDensity() {
-  if (shell_ == nullptr || updating_layout_) {
+  if (updating_layout_) {
     return;
   }
   updating_layout_ = true;
@@ -896,8 +861,7 @@ void MainWindow::UpdateDensity() {
     }
     const int widget_h = std::max(12, status_h - 2);
     const std::vector<QWidget*> widgets = {
-        notice_label_, audio_label_, speed_label_,     loop_label_,
-        waveform_label_, status_label_};
+        notice_label_, audio_label_, cache_label_, waveform_label_};
     for (QWidget* widget : widgets) {
       if (widget != nullptr && widget->parentWidget() == statusBar()) {
         widget->setMaximumHeight(widget_h);
@@ -908,20 +872,54 @@ void MainWindow::UpdateDensity() {
 }
 
 void MainWindow::UpdateShellModeChip() {
-  if (shell_ == nullptr) {
-    return;
-  }
   TopBar* top = shell_->topBar();
   if (online_mode_) {
+    // 打开失败（还没拿到首帧）：错误优先于"解析中/切档中"。
+    if (!online_ready_ && !online_last_error_.isEmpty()) {
+      top->SetMode(QStringLiteral("打开失败"), TopBar::ModeKind::kError);
+      return;
+    }
+    if (online_switch_pending_) {
+      const int target_qn = online_switch_target_qn_ > 0
+                                ? online_switch_target_qn_
+                                : online_request_.requested_qn;
+      top->SetMode(target_qn > 0
+                       ? QStringLiteral("切档中 → %1")
+                             .arg(lapian::online::QualityName(target_qn))
+                       : QStringLiteral("切档中"),
+                   TopBar::ModeKind::kWarn);
+      return;
+    }
     if (!online_ready_) {
-      top->SetMode(QStringLiteral("在线·加载中"), TopBar::ModeKind::kWarn);
+      top->SetMode(QStringLiteral("在线 · 解析中"), TopBar::ModeKind::kWarn);
       return;
     }
     if (online_cache_hit_) {
-      top->SetMode(QStringLiteral("缓存命中 · 0 网络"), TopBar::ModeKind::kOnline);
+      top->SetMode(QStringLiteral("缓存命中 · 0 网络"),
+                   TopBar::ModeKind::kOnline);
       return;
     }
-    top->SetMode(QStringLiteral("在线"), TopBar::ModeKind::kOnline);
+    if (playback_ != nullptr && playback_->IsBuffering()) {
+      top->SetMode(QStringLiteral("在线 · 缓冲中"), TopBar::ModeKind::kWarn);
+      return;
+    }
+    // 就绪：用**实际** qn / 实际流 fps（不拿 API 标称冒充）。
+    QString text = QStringLiteral("在线");
+    if (online_qn_ > 0) {
+      text += QStringLiteral(" · %1").arg(lapian::online::QualityName(online_qn_));
+    }
+    const double actual_fps =
+        online_actual_fps_ > 0.0 ? online_actual_fps_ : online_fps_;
+    if (actual_fps > 0.0) {
+      text += QStringLiteral(" · %1fps")
+                  .arg(lapian::online::FormatOnlineFps(actual_fps));
+    }
+    if (online_frame_rate_drop_) {
+      text += QStringLiteral(" · 降帧");
+      top->SetMode(text, TopBar::ModeKind::kWarn);
+    } else {
+      top->SetMode(text, TopBar::ModeKind::kOnline);
+    }
     return;
   }
   if (HasMediaForTest()) {
@@ -929,6 +927,110 @@ void MainWindow::UpdateShellModeChip() {
     return;
   }
   top->SetMode(QStringLiteral("未打开"), TopBar::ModeKind::kNeutral);
+}
+
+void MainWindow::ApplyMediaInfoToUi(const lapian::media::MediaInfo& info,
+                                    bool vfr) {
+  const lapian::core::FrameRate rate(info.video.frame_rate.num,
+                                     info.video.frame_rate.den);
+  const std::int64_t known_frames =
+      info.video.nb_frames_known ? info.video.nb_frames : 0;
+  total_for_ui_ = lapian::core::TotalFrameCount::FromContainer(
+      known_frames, info.duration_us, rate);
+  if (vfr) {
+    total_for_ui_ = lapian::core::TotalFrameCount::Scanning();
+  }
+  TopBar* top = shell_->topBar();
+  const QString path = QString::fromUtf8(info.path_utf8.c_str());
+  const QFileInfo file(path);
+  top->SetFileName(file.fileName());
+  top->SetSpecText(QStringLiteral("%1×%2 · %3 · %4 fps")
+                       .arg(info.video.width)
+                       .arg(info.video.height)
+                       .arg(QString::fromStdString(info.video.codec))
+                       .arg(rate.valid() ? QString::number(rate.ToDouble(), 'f', 3)
+                                         : QStringLiteral("—")));
+  top->ClearOnlineFpsBadge();
+  if (shell_->transport() != nullptr) {
+    shell_->transport()->SetFrameRate(rate, vfr);
+    shell_->transport()->SetTotal(total_for_ui_);
+  }
+  if (shell_->banner() != nullptr) {
+    // 新会话不能继承上一份媒体的提示/错误/降帧横幅。
+    shell_->banner()->SetMedia(info, vfr);
+    shell_->banner()->SetScanning(
+        total_for_ui_.state() == lapian::core::TotalFramesState::kScanning);
+  }
+  SetFrameForUi(0);
+  UpdateShellModeChip();
+}
+
+void MainWindow::ClearMediaInfoUi() {
+  total_for_ui_ = lapian::core::TotalFrameCount{};
+  if (shell_->topBar() != nullptr) {
+    shell_->topBar()->SetFileName(QString());
+    shell_->topBar()->SetSpecText(QString());
+    shell_->topBar()->ClearOnlineFpsBadge();
+  }
+  if (shell_->transport() != nullptr) {
+    shell_->transport()->ClearReadouts();
+  }
+  if (shell_->banner() != nullptr) {
+    shell_->banner()->Clear();
+  }
+}
+
+void MainWindow::SetFrameForUi(std::int64_t frame_index) {
+  if (shell_ != nullptr && shell_->transport() != nullptr) {
+    shell_->transport()->SetFrame(frame_index);
+  }
+}
+
+void MainWindow::SetTotalForUi(const lapian::core::TotalFrameCount& total) {
+  total_for_ui_ = total;
+  if (shell_->transport() != nullptr) {
+    shell_->transport()->SetTotal(total);
+  }
+  if (shell_->banner() != nullptr) {
+    shell_->banner()->SetScanning(
+        total.state() == lapian::core::TotalFramesState::kScanning);
+  }
+}
+
+void MainWindow::ClearOnlineFrameRateUi() {
+  if (shell_ != nullptr) {
+    if (shell_->topBar() != nullptr) {
+      shell_->topBar()->ClearOnlineFpsBadge();
+    }
+    if (shell_->banner() != nullptr) {
+      shell_->banner()->ClearOnlineFrameRateBanner();
+    }
+  }
+  UpdateShellModeChip();
+}
+
+void MainWindow::UpdateCacheMetric() {
+  if (cache_label_ == nullptr) {
+    return;
+  }
+  // 只读 UI 线程已有的字节计数，**不查 CacheStore::UsageBytes()**：
+  // 那个接口要拿缓存锁，下载线程写盘/落盘时会和进度回调（UI 线程）抢锁，
+  // 实测会把在线首帧的 UI gap 从 ~36ms 拖到 ~600ms。
+  qint64 used = online_published_bytes_;
+  if (used <= 0 && !online_mode_) {
+    used = online_total_bytes_;
+  }
+  const QString text =
+      used > 0
+          ? QStringLiteral("缓存 %1").arg(
+                lapian::online::CacheStore::FormatBytes(used))
+          : QStringLiteral("缓存 —");
+  if (cache_label_->text() != text) {
+    cache_label_->setText(text);
+  }
+  cache_label_->setToolTip(
+      used > 0 ? QStringLiteral("在线缓存占用（清缓存请用设置）")
+               : QStringLiteral("在线缓存占用；本地模式不写缓存"));
 }
 
 void MainWindow::JumpToEdgeFrame(bool to_end) {
@@ -944,7 +1046,7 @@ void MainWindow::JumpToEdgeFrame(bool to_end) {
 }
 
 void MainWindow::UpdateTimelineMeta() {
-  if (shell_ == nullptr || shell_->timelinePanel() == nullptr ||
+  if (shell_->timelinePanel() == nullptr ||
       timeline_ == nullptr) {
     return;
   }
@@ -981,9 +1083,6 @@ void MainWindow::UpdateTimelineMeta() {
 }
 
 void MainWindow::SyncShellChrome() {
-  if (shell_ == nullptr) {
-    return;
-  }
   UpdateTimelineMeta();
   if (shell_->timelinePanel() != nullptr) {
     shell_->timelinePanel()->SetWorkRange(loop_);
@@ -998,7 +1097,7 @@ void MainWindow::SyncShellChrome() {
 }
 
 void MainWindow::SyncInspectorChrome() {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return;
   }
   lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel();
@@ -1030,7 +1129,7 @@ QString MainWindow::SnapshotPicturesRoot() const {
 }
 
 void MainWindow::RefreshInspectorInfo() {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return;
   }
   QVector<lapian::ui::InspectorPanel::InfoRow> rows;
@@ -1131,10 +1230,10 @@ void MainWindow::RefreshInspectorInfo() {
   }
   add(QStringLiteral("时长"), duration);
 
-  // 总帧数三态：直接复用 InfoBar 持有的 TotalFrameCount（不从标签文本反解析）。
+  // 总帧数三态：读 3D 的 total_for_ui_（与 Transport 的 `总帧数` 同源）。
   QString total_text = QStringLiteral("—");
-  if (info_bar_ != nullptr) {
-    const lapian::core::TotalFrameCount& total = info_bar_->TotalForTest();
+  {
+    const lapian::core::TotalFrameCount& total = total_for_ui_;
     switch (total.state()) {
       case lapian::core::TotalFramesState::kExact:
         total_text = QStringLiteral("%1（精确）").arg(total.value());
@@ -1188,7 +1287,7 @@ void MainWindow::RefreshInspectorInfo() {
 }
 
 void MainWindow::RefreshInspectorShots() {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return;
   }
   QVector<lapian::ui::InspectorPanel::ShotItem> items;
@@ -1332,7 +1431,7 @@ void MainWindow::RefreshInspectorShots() {
 }
 
 void MainWindow::EnsureInspectorMarksVisible() {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return;
   }
   if (shell_->inspector_collapsed()) {
@@ -1343,7 +1442,7 @@ void MainWindow::EnsureInspectorMarksVisible() {
 
 void MainWindow::ActivateShot(std::int64_t frame) {
   if (session_ == nullptr || !session_->IsOpen() || timeline_ == nullptr ||
-      info_bar_ == nullptr) {
+      shell_->transport() == nullptr) {
     return;
   }
   const lapian::media::FrameIndex& index = session_->index();
@@ -1364,9 +1463,9 @@ void MainWindow::ActivateShot(std::int64_t frame) {
   }
   // T5.2 顺序：播放头/帧号先可见，再让精确解码在下一个事件循环执行。
   timeline_->SetCurrentFrame(target);
-  info_bar_->SetFrame(static_cast<int>(target));
+  SetFrameForUi(target);
   timeline_->repaint();
-  info_bar_->repaint();
+  shell_->transport()->repaint();
   statusBar()->showMessage(
       QStringLiteral("截图：第 %1 帧（跳转中）").arg(
           static_cast<qlonglong>(target)),
@@ -1536,25 +1635,9 @@ void MainWindow::ApplyInitialWindowSize() {
 }
 
 void MainWindow::UpdateResponsiveLayout() {
-  if (shell_ != nullptr) {
-    // UI v2：检查器宽度由 QSplitter 管（折叠 = 44），这里只做档位/令牌/状态栏高度。
-    if (status_label_ != nullptr && !status_label_->isVisible()) {
-      status_label_->setVisible(true);
-    }
-    UpdateDensity();
-    return;
-  }
-  if (mark_panel_ != nullptr) {
-    // 100% 保持 300；高 DPI/窄窗口逐步让到 240，给画面与信息栏留空间。
-    const int target = std::clamp(static_cast<int>(width() * 0.26), 240, 300);
-    if (mark_panel_->width() != target) {
-      mark_panel_->setFixedWidth(target);
-    }
-  }
-  if (status_label_ != nullptr) {
-    // Qt/FFmpeg 版本是次要信息；窄窗口先让位，避免状态栏把最小宽度撑大。
-    status_label_->setVisible(width() >= 1000);
-  }
+  // 3D：只有一套壳层；检查器宽度由 QSplitter 管（折叠 = 44），这里只做
+  // 档位/令牌/状态栏高度。
+  UpdateDensity();
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
@@ -1571,67 +1654,45 @@ QSize MainWindow::AvailableScreenForTest() const {
 }
 
 QString MainWindow::InfoFileLabelForTest() const {
-  if (shell_ != nullptr) {
-    return shell_->topBar()->FileLabelText();
-  }
-  return info_bar_ == nullptr ? QString() : info_bar_->FileLabelTextForTest();
+  return shell_->topBar()->FileLabelText();
 }
 
 QString MainWindow::InfoFileNameForTest() const {
-  if (shell_ != nullptr) {
-    return shell_->topBar()->FileName();
-  }
-  return info_bar_ == nullptr ? QString() : info_bar_->FileNameForTest();
+  return shell_->topBar()->FileName();
 }
 
 bool MainWindow::InfoNarrowModeForTest() const {
-  if (shell_ != nullptr) {
-    return shell_->topBar()->NarrowMode();
-  }
-  return info_bar_ != nullptr && info_bar_->NarrowModeForTest();
+  return shell_->topBar()->NarrowMode();
 }
 
 void MainWindow::SetBannerNoticesForTest(const QStringList& kinds) {
-  if (info_bar_ != nullptr) {
-    info_bar_->SetSyntheticNoticesForTest(kinds);
-  }
+  shell_->banner()->SetSyntheticNoticesForTest(kinds);
 }
 
 void MainWindow::ClearBannerNoticesForTest() {
-  if (info_bar_ != nullptr) {
-    info_bar_->ClearSyntheticNoticesForTest();
-  }
+  shell_->banner()->ClearSyntheticNoticesForTest();
 }
 
 QString MainWindow::BannerStateForTest() const {
-  if (info_bar_ == nullptr) {
-    return QStringLiteral("none");
-  }
-  // 横幅 label 可能已被 reparent 到 BannerSlot（v2），所以从窗口向下找。
-  auto* banner_label = findChild<QLabel*>(QStringLiteral("infoBanner"));
+  // 3D：横幅的主人 = BannerSlot；键与顺序是硬契约（--banner-test 读）。
+  const BannerSlot* slot = shell_->banner();
   const int banner_count =
       findChildren<QLabel*>(QStringLiteral("infoBanner")).size();
-  QRect banner_rect;
-  if (banner_label != nullptr) {
-    QWidget* host = shell_ != nullptr ? static_cast<QWidget*>(shell_->banner())
-                                      : static_cast<QWidget*>(info_bar_);
-    banner_rect = QRect(banner_label->mapTo(host, QPoint(0, 0)),
-                        banner_label->size());
-  }
+  const QRect banner_rect = slot->BannerGeometry();
   return QStringLiteral(
              "kind=%1 visible=%2 banners=%3 text=%4 banner=%5,%6 %7x%8 info_h=%9 "
              "secondary=%10 active=%11")
-      .arg(info_bar_->BannerKindForTest())
-      .arg(info_bar_->BannerVisibleForTest() ? 1 : 0)
+      .arg(slot->KindName())
+      .arg(slot->BannerVisible() ? 1 : 0)
       .arg(banner_count)
-      .arg(info_bar_->BannerTextForTest())
+      .arg(slot->Text())
       .arg(banner_rect.x())
       .arg(banner_rect.y())
       .arg(banner_rect.width())
       .arg(banner_rect.height())
       .arg(InfoBarHeightForTest())
-      .arg(info_bar_->SecondarySummaryForTest())
-      .arg(info_bar_->ActiveNoticeKindsForTest().join(QLatin1Char(',')));
+      .arg(slot->SecondarySummary())
+      .arg(slot->ActiveNoticeKinds().join(QLatin1Char(',')));
 }
 
 QString MainWindow::BannerUiStateForTest() const {
@@ -1644,12 +1705,20 @@ QString MainWindow::BannerUiStateForTest() const {
     QToolButton* mute = shell_->transport()->muteButton();
     volume_affordance = mute != nullptr && mute->isVisible();
   }
+  // 3D / A.3：`loop=` 改指 Transport 的循环开关（状态栏 loop_label_ 不再常驻）。
+  bool loop_affordance = false;
+  if (shell_ != nullptr && shell_->transport() != nullptr) {
+    QToolButton* loop_button = shell_->transport()->loopButton();
+    loop_affordance = loop_button != nullptr && loop_button->isVisible();
+  } else {
+    loop_affordance = loop_label_ != nullptr && loop_label_->isVisible();
+  }
   return QStringLiteral("timeline=%1 frame=%2 play=%3 volume=%4 loop=%5 notice=%6")
       .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0)
       .arg(InfoFrameTextForTest())
       .arg(play_action_ != nullptr && play_action_->isEnabled() ? 1 : 0)
       .arg(volume_affordance ? 1 : 0)
-      .arg(loop_label_ != nullptr && loop_label_->isVisible() ? 1 : 0)
+      .arg(loop_affordance ? 1 : 0)
       .arg(notice_label_ != nullptr && notice_label_->isVisible() ? 1 : 0);
 }
 
@@ -1659,18 +1728,19 @@ QString MainWindow::SecondaryStatusTextForTest() const {
 
 int MainWindow::InfoBarHeightForTest() const {
   // v2：语义变成"横幅槽高度"（0 或令牌），名字保留避免改 ~20 处断言（附录 A.3）。
-  if (shell_ != nullptr) {
-    return shell_->banner()->height();
-  }
-  return info_bar_ == nullptr ? 0 : info_bar_->height();
+  return shell_->banner()->height();
 }
 
 void MainWindow::UpdateStatusNotices() {
-  if (notice_label_ == nullptr || info_bar_ == nullptr) {
+  if (notice_label_ == nullptr) {
     return;
   }
-  const QString summary = info_bar_->SecondarySummaryForTest();
-  const QString tooltip = info_bar_->SecondaryTooltipForTest();
+  const BannerSlot* slot = shell_->banner();
+  if (slot == nullptr) {
+    return;
+  }
+  const QString summary = slot->SecondarySummary();
+  const QString tooltip = slot->SecondaryTooltip();
   const int available = std::max(0, notice_label_->maximumWidth() - 6);
   const QString shown =
       summary.isEmpty()
@@ -1684,236 +1754,11 @@ void MainWindow::UpdateStatusNotices() {
 }
 
 QString MainWindow::LayoutStateForTest() const {
-  return shell_ != nullptr ? LayoutStateV2() : LayoutStateLegacy();
-}
-
-QString MainWindow::LayoutStateLegacy() const {
-  auto rect_text = [](const QRect& rect) {
-    return QStringLiteral("%1,%2 %3x%4")
-        .arg(rect.x())
-        .arg(rect.y())
-        .arg(rect.width())
-        .arg(rect.height());
-  };
-  QScreen* screen = this->screen();
-  if (screen == nullptr) {
-    screen = QGuiApplication::primaryScreen();
-  }
-  const QRect available =
-      screen == nullptr ? QRect() : screen->availableGeometry();
-  const QSize min_hint = minimumSizeHint();
-  QStringList parts;
-  parts << QStringLiteral("dpr=%1").arg(devicePixelRatioF(), 0, 'f', 2);
-  parts << QStringLiteral("window=%1x%2").arg(width()).arg(height());
-  parts << QStringLiteral("frame=%1").arg(rect_text(frameGeometry()));
-  parts << QStringLiteral("available=%1").arg(rect_text(available));
-  parts << QStringLiteral("min=%1x%2").arg(min_hint.width()).arg(min_hint.height());
-  if (stage_ != nullptr) {
-    parts << QStringLiteral("stage=%1").arg(rect_text(stage_->geometry()));
-  }
-  if (mark_panel_ != nullptr) {
-    parts << QStringLiteral("panel=%1").arg(rect_text(mark_panel_->geometry()));
-  }
-  if (gfx_ != nullptr) {
-    parts << QStringLiteral("gfx=%1").arg(rect_text(gfx_->geometry()));
-  }
-  if (timeline_ != nullptr) {
-    parts << QStringLiteral("timeline=%1").arg(rect_text(timeline_->geometry()));
-  }
-  if (info_bar_ != nullptr) {
-    parts << QStringLiteral("info=%1").arg(rect_text(info_bar_->geometry()));
-    parts << QStringLiteral("info_narrow=%1")
-                 .arg(info_bar_->NarrowModeForTest() ? 1 : 0);
-    for (QLabel* label : info_bar_->findChildren<QLabel*>()) {
-      if (label->isVisible()) {
-        parts << QStringLiteral("info_%1=%2")
-                     .arg(label->objectName(), rect_text(label->geometry()));
-      }
-    }
-  }
-  if (statusBar() != nullptr) {
-    parts << QStringLiteral("status=%1").arg(rect_text(statusBar()->geometry()));
-    for (QWidget* widget : {static_cast<QWidget*>(notice_label_),
-                            static_cast<QWidget*>(audio_label_),
-                            static_cast<QWidget*>(speed_label_),
-                            static_cast<QWidget*>(loop_label_),
-                            static_cast<QWidget*>(waveform_label_),
-                            static_cast<QWidget*>(volume_slider_),
-                            static_cast<QWidget*>(status_label_)}) {
-      if (widget != nullptr && widget->isVisible() &&
-          widget->parentWidget() == statusBar()) {
-        parts << QStringLiteral("status_%1=%2")
-                     .arg(widget->objectName(), rect_text(widget->geometry()));
-      }
-    }
-  }
-  return parts.join(QLatin1Char(' '));
+  return LayoutStateV2();
 }
 
 QStringList MainWindow::LayoutProblemsForTest() const {
-  return shell_ != nullptr ? LayoutProblemsV2() : LayoutProblemsLegacy();
-}
-
-QStringList MainWindow::LayoutProblemsLegacy() const {
-  QStringList problems;
-  QScreen* screen = this->screen();
-  if (screen == nullptr) {
-    screen = QGuiApplication::primaryScreen();
-  }
-  const QRect available =
-      screen == nullptr ? QRect() : screen->availableGeometry();
-  const QRect screen_geometry =
-      screen == nullptr ? QRect() : screen->geometry();
-  if (isFullScreen()) {
-    if (!screen_geometry.isEmpty() && size() != screen_geometry.size()) {
-      problems << QStringLiteral("fullscreen-size");
-    }
-  } else if (!available.isEmpty()) {
-    if (!available.contains(frameGeometry())) {
-      problems << QStringLiteral("window-outside-screen");
-    }
-    const QSize min_hint = minimumSizeHint();
-    if (min_hint.width() > available.width()) {
-      problems << QStringLiteral("min-width-exceeds-screen");
-    }
-    if (min_hint.height() > available.height()) {
-      problems << QStringLiteral("min-height-exceeds-screen");
-    }
-  }
-  if (centralWidget() == nullptr || stage_ == nullptr || mark_panel_ == nullptr) {
-    problems << QStringLiteral("missing-widgets");
-    return problems;
-  }
-  if (!centralWidget()->rect().contains(stage_->geometry())) {
-    problems << QStringLiteral("stage-outside-central");
-  }
-  if (!centralWidget()->rect().contains(mark_panel_->geometry())) {
-    problems << QStringLiteral("panel-outside-central");
-  }
-  if (stage_->geometry().right() >= mark_panel_->geometry().left()) {
-    problems << QStringLiteral("stage-panel-overlap");
-  }
-  if (mark_panel_->width() < 240 || mark_panel_->width() > 300) {
-    problems << QStringLiteral("panel-width");
-  }
-  if (stage_->width() < 420) {
-    problems << QStringLiteral("stage-too-narrow");
-  }
-  if (gfx_ == nullptr || !gfx_->isVisible() || gfx_->width() < 320 ||
-      gfx_->height() < 120) {
-    problems << QStringLiteral("gfx-too-small");
-  }
-  if (timeline_ == nullptr || !timeline_->isVisible() ||
-      timeline_->height() < 72) {
-    problems << QStringLiteral("timeline-too-small");
-  }
-  if (info_bar_ == nullptr || !info_bar_->isVisible() ||
-      info_bar_->height() < 30) {
-    problems << QStringLiteral("info-bar-too-small");
-  }
-  if (statusBar() == nullptr || statusBar()->height() < 20) {
-    problems << QStringLiteral("status-bar-too-small");
-  }
-
-  const QList<QLabel*> info_labels =
-      info_bar_ == nullptr ? QList<QLabel*>() : info_bar_->findChildren<QLabel*>();
-  // T8.12：横幅有独立行容器，子 label 的 geometry 是相对父控件的；统一映射到
-  // InfoBar 坐标系再判断裁切/重叠，避免把不同父控件的坐标混用。
-  auto rect_in_info_bar = [this](QWidget* widget) {
-    return QRect(widget->mapTo(info_bar_, QPoint(0, 0)), widget->size());
-  };
-  for (QLabel* label : info_labels) {
-    if (!label->isVisible()) {
-      continue;
-    }
-    if (!info_bar_->rect().contains(rect_in_info_bar(label))) {
-      problems << QStringLiteral("info-label-outside");
-    }
-    if (!label->text().isEmpty() && label->width() < 24) {
-      problems << QStringLiteral("info-label-narrow");
-    }
-  }
-  for (int i = 0; i < info_labels.size(); ++i) {
-    for (int j = i + 1; j < info_labels.size(); ++j) {
-      QLabel* first = info_labels[i];
-      QLabel* second = info_labels[j];
-      if (first->isVisible() && second->isVisible() &&
-          rect_in_info_bar(first).intersects(rect_in_info_bar(second))) {
-        problems << QStringLiteral("info-label-overlap");
-      }
-    }
-  }
-  QLabel* file_label = info_bar_ == nullptr
-                           ? nullptr
-                           : info_bar_->findChild<QLabel*>(QStringLiteral("infoFile"));
-  if (file_label != nullptr && file_label->isVisible() &&
-      !file_label->text().isEmpty() &&
-      file_label->fontMetrics().horizontalAdvance(file_label->text()) >
-          file_label->width() + 2) {
-    problems << QStringLiteral("file-label-clipped");
-  }
-  QLabel* banner_label = info_bar_ == nullptr
-                             ? nullptr
-                             : info_bar_->findChild<QLabel*>(
-                                   QStringLiteral("infoBanner"));
-  if (banner_label != nullptr && banner_label->isVisible()) {
-    if (banner_label->height() < banner_label->fontMetrics().height()) {
-      problems << QStringLiteral("banner-clipped");
-    }
-    if (banner_label->hasHeightForWidth() &&
-        banner_label->heightForWidth(banner_label->width()) >
-            banner_label->height() + 2) {
-      problems << QStringLiteral("banner-text-clipped");
-    }
-    auto global_rect = [](QWidget* widget) {
-      return QRect(widget->mapToGlobal(QPoint(0, 0)), widget->size());
-    };
-    const QRect banner_rect = global_rect(banner_label);
-    QLabel* frame_label =
-        info_bar_->findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
-    if (frame_label != nullptr && frame_label->isVisible() &&
-        banner_rect.intersects(global_rect(frame_label))) {
-      problems << QStringLiteral("banner-overlaps-frame");
-    }
-    if (timeline_ != nullptr && timeline_->isVisible() &&
-        banner_rect.intersects(global_rect(timeline_))) {
-      problems << QStringLiteral("banner-overlaps-timeline");
-    }
-    if (statusBar() != nullptr &&
-        banner_rect.intersects(global_rect(statusBar()))) {
-      problems << QStringLiteral("banner-overlaps-status");
-    }
-  }
-
-  if (statusBar() != nullptr) {
-    const std::vector<QWidget*> status_widgets = {
-        notice_label_, audio_label_, speed_label_, loop_label_, waveform_label_,
-        volume_slider_, status_label_};
-    for (QWidget* widget : status_widgets) {
-      if (widget == nullptr || !widget->isVisible()) {
-        continue;
-      }
-      if (!statusBar()->rect().contains(widget->geometry())) {
-        problems << QStringLiteral("status-widget-outside");
-      }
-      const int minimum_width = widget == volume_slider_ ? 80 : 10;
-      if (widget->width() < minimum_width) {
-        problems << QStringLiteral("status-widget-narrow");
-      }
-    }
-    for (std::size_t i = 0; i < status_widgets.size(); ++i) {
-      for (std::size_t j = i + 1; j < status_widgets.size(); ++j) {
-        QWidget* first = status_widgets[i];
-        QWidget* second = status_widgets[j];
-        if (first != nullptr && second != nullptr && first->isVisible() &&
-            second->isVisible() &&
-            first->geometry().intersects(second->geometry())) {
-          problems << QStringLiteral("status-widget-overlap");
-        }
-      }
-    }
-  }
-  return problems;
+  return LayoutProblemsV2();
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,10 +1801,8 @@ QString MainWindow::LayoutStateV2() const {
     parts << QStringLiteral("status=%1").arg(rect_text(statusBar()->geometry()));
     for (QWidget* widget : {static_cast<QWidget*>(notice_label_),
                             static_cast<QWidget*>(audio_label_),
-                            static_cast<QWidget*>(speed_label_),
-                            static_cast<QWidget*>(loop_label_),
-                            static_cast<QWidget*>(waveform_label_),
-                            static_cast<QWidget*>(status_label_)}) {
+                            static_cast<QWidget*>(cache_label_),
+                            static_cast<QWidget*>(waveform_label_)}) {
       if (widget != nullptr && widget->isVisible() &&
           widget->parentWidget() == statusBar()) {
         parts << QStringLiteral("status_%1=%2")
@@ -1979,9 +1822,6 @@ QString MainWindow::LayoutStateV2() const {
   parts << QStringLiteral("chrome=%1").arg(shell_->fullscreen_chrome() ? 1 : 0);
   parts << QStringLiteral("playhead_visible=%1")
                .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0);
-  // 3A 保留 info= / info_h= 作为 banner= 的别名（附录 A.2，3D 删除）。
-  parts << QStringLiteral("info=%1").arg(rect_text(shell_->banner()->geometry()));
-  parts << QStringLiteral("info_h=%1").arg(InfoBarHeightForTest());
   return parts.join(QLatin1Char(' '));
 }
 
@@ -2011,7 +1851,7 @@ QStringList MainWindow::LayoutProblemsV2() const {
       problems << QStringLiteral("min-height-exceeds-screen");
     }
   }
-  if (centralWidget() == nullptr || shell_ == nullptr || stage_ == nullptr ||
+  if (centralWidget() == nullptr || stage_ == nullptr ||
       timeline_ == nullptr || mark_panel_ == nullptr) {
     problems << QStringLiteral("missing-widgets");
     return problems;
@@ -2159,12 +1999,10 @@ QStringList MainWindow::LayoutProblemsV2() const {
     }
   }
 
-  // 状态栏次级控件：v2 的指标（notice/audio/waveform/status + loop）；
-  // 速度读数已搬进 Transport，只检查仍挂在状态栏上的控件。
+  // 状态栏次级控件：v2 = 1 条消息（notice）+ 3 指标（音频/缓存/波形）。
   if (statusBar() != nullptr && status_visible) {
     const std::vector<QWidget*> status_widgets = {
-        notice_label_, audio_label_, speed_label_, loop_label_,
-        waveform_label_, status_label_};
+        notice_label_, audio_label_, cache_label_, waveform_label_};
     for (QWidget* widget : status_widgets) {
       if (widget == nullptr || !widget->isVisible() ||
           widget->parentWidget() != statusBar()) {
@@ -2194,9 +2032,6 @@ QStringList MainWindow::LayoutProblemsV2() const {
 }
 
 QString MainWindow::ShellStateForTest() const {
-  if (shell_ == nullptr) {
-    return QStringLiteral("tier=legacy");
-  }
   auto rect_text = [](const QRect& rect) {
     return QStringLiteral("%1,%2 %3x%4")
         .arg(rect.x())
@@ -2231,9 +2066,6 @@ QString MainWindow::ShellStateForTest() const {
 }
 
 QString MainWindow::DensityNameForTest() const {
-  if (shell_ == nullptr) {
-    return QStringLiteral("legacy");
-  }
   return QString::fromLatin1(shell_->tokens().name);
 }
 
@@ -2242,46 +2074,33 @@ int MainWindow::GfxVisibleForTest() const {
 }
 
 QString MainWindow::StagePageForTest() const {
-  if (stage_stack_ != nullptr) {
-    return stage_stack_->PageName();
-  }
-  return gfx_ != nullptr && gfx_->isVisible() ? QStringLiteral("video")
-                                              : QStringLiteral("legacy");
+  return stage_stack_->PageName();
 }
 
 int MainWindow::BannerSlotHeightForTest() const {
-  return shell_ == nullptr ? 0 : shell_->banner()->height();
+  return shell_->banner()->height();
 }
 
 QRect MainWindow::BannerSlotGeometryForTest() const {
-  return shell_ == nullptr ? QRect() : shell_->banner()->geometry();
+  return shell_->banner()->geometry();
 }
 
 QString MainWindow::SplitterStateForTest() const {
-  return shell_ == nullptr ? QStringLiteral("tl=0 ins=0") : shell_->SplitterState();
+  return shell_->SplitterState();
 }
 
 void MainWindow::SetSplitSizesForTest(int timeline, int inspector) {
-  if (shell_ == nullptr) {
-    return;
-  }
   shell_->SetSplitSizes(timeline, inspector);
   UpdateDensity();
 }
 
 void MainWindow::SetTimelineHeightForTest(int timeline) {
-  if (shell_ == nullptr) {
-    return;
-  }
   // 检查器保持当前宽度（折叠时 SetSplitSizes 会忽略它）。
   shell_->SetSplitSizes(timeline, shell_->InspectorWidth());
   UpdateDensity();
 }
 
 void MainWindow::DragSplitterForTest(bool vertical, int delta) {
-  if (shell_ == nullptr) {
-    return;
-  }
   shell_->DragSplitter(vertical, delta);
   UpdateDensity();
 }
@@ -2291,16 +2110,13 @@ bool MainWindow::InspectorCollapsedForTest() const {
 }
 
 void MainWindow::SetInspectorCollapsedForTest(bool collapsed) {
-  if (shell_ == nullptr) {
-    return;
-  }
   shell_->SetInspectorCollapsed(collapsed);
   // 折叠会改左右分栏（Transport 档位/画面宽），按现有路径重算一次布局。
   UpdateDensity();
 }
 
 void MainWindow::SetInspectorTabForTest(int tab) {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return;
   }
   switch (tab) {
@@ -2322,7 +2138,7 @@ void MainWindow::SetInspectorTabForTest(int tab) {
 }
 
 QString MainWindow::InspectorStateForTest() const {
-  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+  if (shell_->inspectorPanel() == nullptr) {
     return QStringLiteral("v2=0 inspector=none");
   }
   QString text = QStringLiteral("v2=1 host_w=%1 host_visible=%2 ")
@@ -2333,14 +2149,6 @@ QString MainWindow::InspectorStateForTest() const {
 }
 
 QString MainWindow::FullScreenChromeForTest() const {
-  if (shell_ == nullptr) {
-    return QStringLiteral("v2=0 appbar=0 banner=%1 status=%2 inspector=%3 "
-                          "transport=0 timeline=%4")
-        .arg(info_bar_ != nullptr && info_bar_->isVisible() ? 1 : 0)
-        .arg(statusBar() != nullptr && statusBar()->isVisible() ? 1 : 0)
-        .arg(mark_panel_ != nullptr && mark_panel_->isVisible() ? 1 : 0)
-        .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0);
-  }
   return QStringLiteral(
              "v2=1 appbar=%1 banner=%2 status=%3 inspector=%4 transport=%5 "
              "timeline=%6")
@@ -2352,6 +2160,41 @@ QString MainWindow::FullScreenChromeForTest() const {
       .arg(timeline_ != nullptr && timeline_->isVisible() ? 1 : 0);
 }
 
+QString MainWindow::TopBarModeForTest() const {
+  return shell_->topBar()->ModeText();
+}
+
+void MainWindow::CaptureThemeShotsForTest(const QString& directory) {
+  QDir().mkpath(directory);
+  grab().save(directory + QStringLiteral("/3d-main.png"));
+  auto grab_modal = [directory](const char* name) {
+    QWidget* modal = QApplication::activeModalWidget();
+    if (modal == nullptr) {
+      return;
+    }
+    modal->grab().save(directory + QLatin1Char('/') + QLatin1String(name));
+    modal->close();
+  };
+  QTimer::singleShot(200, this, [grab_modal]() { grab_modal("3d-dialog-settings.png"); });
+  ShowCacheSettingsDialog();
+  QTimer::singleShot(200, this, [grab_modal]() { grab_modal("3d-dialog-help.png"); });
+  ShowShellHelp();
+  OpenOnlineDialogForTest();
+  QCoreApplication::processEvents();
+  if (online_dialog_ != nullptr) {
+    online_dialog_->grab().save(directory + QStringLiteral("/3d-dialog-online.png"));
+    online_dialog_->Shutdown();
+    online_dialog_->close();
+    online_dialog_ = nullptr;
+  }
+  shell_->transport()->ShowSpeedMenuForTest();
+  QCoreApplication::processEvents();
+  if (QWidget* popup = QApplication::activePopupWidget()) {
+    popup->grab().save(directory + QStringLiteral("/3d-menu-speed.png"));
+    popup->close();
+  }
+}
+
 QString MainWindow::ReadoutTextForTest() const {
   auto* label = findChild<QLabel*>(QStringLiteral("v2Timecode"));
   return label == nullptr ? QString() : label->text();
@@ -2359,7 +2202,7 @@ QString MainWindow::ReadoutTextForTest() const {
 
 QRect MainWindow::ReadoutGeometryForTest() const {
   QWidget* widget = findChild<QWidget*>(QStringLiteral("v2Timecode"));
-  if (widget == nullptr || shell_ == nullptr) {
+  if (widget == nullptr) {
     return QRect();
   }
   return QRect(shell_->mapFromGlobal(widget->mapToGlobal(QPoint(0, 0))),
@@ -2367,7 +2210,7 @@ QRect MainWindow::ReadoutGeometryForTest() const {
 }
 
 QString MainWindow::TimelineViewFramesForTest() const {
-  if (timeline_ == nullptr || shell_ == nullptr ||
+  if (timeline_ == nullptr ||
       shell_->timelinePanel() == nullptr) {
     return QStringLiteral("view=none");
   }
@@ -2384,7 +2227,7 @@ bool MainWindow::TimelinePlayheadVisibleForTest() const {
 }
 
 QString MainWindow::TransportTierForTest() const {
-  if (shell_ == nullptr || shell_->transport() == nullptr) {
+  if (shell_->transport() == nullptr) {
     return QStringLiteral("tier=legacy");
   }
   return shell_->transport()->TierStateForTest();
@@ -2395,7 +2238,7 @@ QString MainWindow::TimelineBarAlignForTest() const {
   //   画布：canvas_x + 画布的左边距（8）
   //   滑块：工作区条上的 x（它自己已含 8px 轨道内边距）
   // 两者必须相等（±1px），否则工作区端点会与画布上的同一帧错位。
-  if (shell_ == nullptr || shell_->timelinePanel() == nullptr ||
+  if (shell_->timelinePanel() == nullptr ||
       timeline_ == nullptr) {
     return QStringLiteral("align=none");
   }
@@ -2432,7 +2275,7 @@ QString MainWindow::TimelineBarAlignForTest() const {
 
 QString MainWindow::M7StateForTest() const {
   auto* label = findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
-  if (label == nullptr || shell_ == nullptr || shell_->transport() == nullptr) {
+  if (label == nullptr || shell_->transport() == nullptr) {
     return QStringLiteral("visible=0 rect=none transport=none rel=none");
   }
   auto rect_text = [](const QRect& rect) {
@@ -2461,7 +2304,7 @@ QString MainWindow::M7StateForTest() const {
 }
 
 QString MainWindow::BufferSlotStateForTest() const {
-  if (shell_ == nullptr || shell_->transport() == nullptr ||
+  if (shell_->transport() == nullptr ||
       shell_->transport()->bufferSlot() == nullptr) {
     return QStringLiteral("visible=0 text=");
   }
@@ -2473,7 +2316,7 @@ QString MainWindow::BufferSlotStateForTest() const {
 }
 
 bool MainWindow::TimelineBarDragForTest(bool work_bar, int from_x, int to_x) {
-  if (shell_ == nullptr || shell_->timelinePanel() == nullptr) {
+  if (shell_->timelinePanel() == nullptr) {
     return false;
   }
   RangeBar* bar = work_bar ? shell_->timelinePanel()->workBar()
@@ -2485,7 +2328,7 @@ bool MainWindow::TimelineBarDragForTest(bool work_bar, int from_x, int to_x) {
 }
 
 QString MainWindow::TimelineBarGeometryForTest() const {
-  if (shell_ == nullptr || shell_->timelinePanel() == nullptr) {
+  if (shell_->timelinePanel() == nullptr) {
     return QStringLiteral("bars=none");
   }
   auto rect_text = [](const QRect& rect) {
@@ -2570,9 +2413,7 @@ void MainWindow::ShowEmptyState() {
   if (timeline_ != nullptr) {
     timeline_->Clear();
   }
-  if (info_bar_ != nullptr) {
-    info_bar_->Clear();
-  }
+  ClearMediaInfoUi();
   if (audio_label_ != nullptr) {
     audio_label_->setText(QStringLiteral("无音频"));
   }
@@ -2645,6 +2486,7 @@ void MainWindow::ShowEmptyState() {
   if (shell_ != nullptr) {
     shell_->SetInspectorCollapsed(true);
     shell_->topBar()->SetFileName(QString());
+    UpdateCacheMetric();
     UpdateShellModeChip();
   }
 }
@@ -2827,9 +2669,10 @@ void MainWindow::EnsureOnlineSession() {
   if (!EnsureOnlineCacheReady(&cache_error)) {
     online_last_error_ =
         QStringLiteral("在线缓存目录不可用：%1").arg(cache_error);
-    if (info_bar_ != nullptr) {
-      info_bar_->SetError(online_last_error_);
+    if (shell_ != nullptr && shell_->banner() != nullptr) {
+      shell_->banner()->SetError(online_last_error_);
     }
+    UpdateShellModeChip();
     statusBar()->showMessage(online_last_error_, 12000);
     return;
   }
@@ -2864,9 +2707,10 @@ void MainWindow::EnsureOnlineSession() {
       },
       [this](const QString& message) {
         online_last_error_ = message;
-        if (info_bar_ != nullptr) {
-          info_bar_->SetError(message);
+        if (shell_ != nullptr && shell_->banner() != nullptr) {
+          shell_->banner()->SetError(message);
         }
+        UpdateShellModeChip();
         statusBar()->showMessage(QStringLiteral("在线错误：%1").arg(message), 12000);
       },
       [this](const lapian::app::OnlineQualityCatalog& info) {
@@ -3210,9 +3054,10 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     if (online_last_error_.isEmpty()) {
       online_last_error_ = QStringLiteral("无法开始在线会话");
     }
-    if (info_bar_ != nullptr) {
-      info_bar_->SetError(online_last_error_);
+    if (shell_ != nullptr && shell_->banner() != nullptr) {
+      shell_->banner()->SetError(online_last_error_);
     }
+    UpdateShellModeChip();
     statusBar()->showMessage(online_last_error_, 12000);
     return;
   }
@@ -3259,10 +3104,10 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   online_status_detail_.clear();
   online_gate_published_ = 0;
   online_gate_readpos_ = 0;
-  if (info_bar_ != nullptr) {
-    info_bar_->ClearOnlineFrameRateStatus();
-  }
+  ClearOnlineFrameRateUi();
   ResetOnlineQuality();
+  UpdateCacheMetric();
+  UpdateShellModeChip();
   if (online_cancel_action_ != nullptr) {
     online_cancel_action_->setEnabled(true);
   }
@@ -3284,9 +3129,10 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     lapian::online::ClearSecret(&online_request_.sessdata);
     online_request_ = lapian::app::OnlineRequest{};
     online_actual_fps_ = 0.0;
-    if (info_bar_ != nullptr) {
-      info_bar_->SetError(online_last_error_);
+    if (shell_ != nullptr && shell_->banner() != nullptr) {
+      shell_->banner()->SetError(online_last_error_);
     }
+    UpdateShellModeChip();
     statusBar()->showMessage(online_last_error_, 10000);
   }
   if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
@@ -3367,9 +3213,10 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   if (!opened) {
     online_last_error_ =
         QStringLiteral("在线首帧打开失败：%1").arg(QString::fromStdString(error));
-    if (info_bar_ != nullptr) {
-      info_bar_->SetError(online_last_error_);
+    if (shell_ != nullptr && shell_->banner() != nullptr) {
+      shell_->banner()->SetError(online_last_error_);
     }
+    UpdateShellModeChip();
     statusBar()->showMessage(online_last_error_, 10000);
     if (online_) {
       online_->Cancel();
@@ -3507,8 +3354,18 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   current_pts_us_ = frame.pts_us;
   gfx_->SetVideoFrame(frame.av_frame, media.rotation.counterclockwise_degrees);
   RememberDisplayedFrame(frame.av_frame, media.rotation.counterclockwise_degrees, 0);
-  info_bar_->SetMedia(media, session_->IsVfrSuspect());
-  info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+  ApplyMediaInfoToUi(media, session_->IsVfrSuspect());
+  SetTotalForUi(lapian::core::TotalFrameCount::Scanning());
+  if (shell_ != nullptr) {
+    shell_->topBar()->SetFileName(
+        online_bvid_.isEmpty()
+            ? QStringLiteral("在线视频")
+            : (online_request_.page > 0
+                   ? QStringLiteral("%1 · P%2")
+                         .arg(online_bvid_)
+                         .arg(online_request_.page)
+                   : online_bvid_));
+  }
   const QString quality = lapian::online::QualityName(online_qn_);
   setWindowTitle(QStringLiteral("%1 — 拉片软件（在线 · %2）")
                      .arg(online_title_.isEmpty() ? online_bvid_ : online_title_,
@@ -3532,7 +3389,6 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
                      ? QString::number(online_request_.requested_qn)
                      : QStringLiteral("自动")));
   }
-  RebuildOnlineQualityMenu();
   statusBar()->showMessage(QStringLiteral("在线首帧已呈现，默认暂停"), 6000);
   play_action_->setEnabled(true);
   if (snapshot_action_ != nullptr) {
@@ -3706,9 +3562,10 @@ bool MainWindow::ApplyOnlineCacheHit(
       session_ == nullptr) {
     online_last_error_ = QStringLiteral("缓存命中打开失败：%1")
                              .arg(QDir::toNativeSeparators(info.cache_mp4_path));
-    if (info_bar_ != nullptr) {
-      info_bar_->SetError(online_last_error_);
+    if (shell_ != nullptr && shell_->banner() != nullptr) {
+      shell_->banner()->SetError(online_last_error_);
     }
+    UpdateShellModeChip();
     statusBar()->showMessage(online_last_error_, 10000);
     online_mode_ = false;
     online_ready_ = false;
@@ -3739,7 +3596,6 @@ bool MainWindow::ApplyOnlineCacheHit(
       SaveMarks(false);
     }
   }
-  RebuildOnlineQualityMenu();
   TryApplyPendingOnlineQualitySwitch();
   return true;
 }
@@ -3846,8 +3702,14 @@ void MainWindow::ApplyOnlineFrameRateUi() {
   if (!online_mode_ || session_ == nullptr) {
     online_actual_fps_ = 0.0;
     online_frame_rate_drop_ = false;
-    if (info_bar_ != nullptr) {
-      info_bar_->ClearOnlineFrameRateStatus();
+    if (shell_ != nullptr) {
+      if (shell_->topBar() != nullptr) {
+        shell_->topBar()->ClearOnlineFpsBadge();
+      }
+      if (shell_->banner() != nullptr) {
+        shell_->banner()->ClearOnlineFrameRateBanner();
+      }
+      UpdateShellModeChip();
     }
     return;
   }
@@ -3857,9 +3719,13 @@ void MainWindow::ApplyOnlineFrameRateUi() {
       lapian::online::AssessOnlineFrameRate(evidence);
   online_actual_fps_ = assessment.actual_fps;
   online_frame_rate_drop_ = assessment.frame_drop;
-  if (info_bar_ != nullptr) {
-    info_bar_->SetOnlineFrameRateStatus(assessment.badge_text,
-                                        assessment.banner_text);
+  if (shell_ != nullptr) {
+    shell_->topBar()->SetOnlineFpsBadge(assessment.badge_text,
+                                       assessment.frame_drop);
+    if (shell_->banner() != nullptr) {
+      shell_->banner()->SetOnlineFrameRateBanner(assessment.banner_text);
+    }
+    UpdateShellModeChip();
   }
   if (assessment.frame_drop) {
     statusBar()->showMessage(
@@ -3925,9 +3791,10 @@ void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
     case OnlineState::kError:
       online_last_error_ = message;
       ClearOnlineQualitySwitch();
-      if (info_bar_ != nullptr) {
-        info_bar_->SetError(message);
+      if (shell_ != nullptr && shell_->banner() != nullptr) {
+        shell_->banner()->SetError(message);
       }
+      UpdateShellModeChip();
       status_label_->setText(base_info_ + QStringLiteral(" · 在线错误"));
       statusBar()->showMessage(QStringLiteral("在线错误：%1").arg(message), 12000);
       break;
@@ -3936,6 +3803,7 @@ void MainWindow::ApplyOnlineState(lapian::app::OnlineState state,
     default:
       break;
   }
+  UpdateShellModeChip();
 }
 
 void MainWindow::ApplyOnlineProgress(
@@ -3951,6 +3819,7 @@ void MainWindow::ApplyOnlineProgress(
   }
   // 3B：缓冲槽跟着下载进度刷新（缓冲中才可见）。
   UpdateBufferSlot();
+  UpdateCacheMetric();
   if (online_ready_) {
     return;  // 首帧后不覆盖播放/seek 状态栏；下载继续在后台。
   }
@@ -4678,7 +4547,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 gfx_->SetVideoFrame(result->frame.get(), rotation);
                 RememberDisplayedFrame(result->frame.get(), rotation, target);
                 ScheduleOnlinePreviewWarm(target);
-                info_bar_->SetFrame(static_cast<int>(target));
+                SetFrameForUi(target);
                 timeline_->SetCurrentFrame(target);
                 if (playback_) {
                   playback_->SetPosition(target, result->info.pts_us);
@@ -4836,10 +4705,9 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   online_seek_target_ = -1;
   online_status_detail_.clear();
   ClearOnlineQualitySwitch();
-  if (info_bar_ != nullptr) {
-    info_bar_->ClearOnlineFrameRateStatus();
-  }
+  ClearOnlineFrameRateUi();
   ResetOnlineQuality();
+  UpdateCacheMetric();
   mark("end");
 }
 
@@ -5124,15 +4992,15 @@ QString MainWindow::OnlineQualityMenuTextForTest() const {
 }
 
 QStringList MainWindow::OnlineQualityMenuActionsForTest() const {
+  // 3D：菜单在点击时才建（规划 §7.6），所以测试读的是"如果现在点开，会有
+  // 哪些菜单项"的模型，而不是要求菜单控件已经存在。
   QStringList lines;
-  if (quality_menu_ == nullptr) {
-    return lines;
-  }
-  for (QAction* action : quality_menu_->actions()) {
+  for (const lapian::online::QualityMenuEntry& entry :
+       OnlineQualityMenuEntriesForTest()) {
     lines.append(QStringLiteral("%1|enabled=%2|checked=%3")
-                     .arg(action->text())
-                     .arg(action->isEnabled() ? 1 : 0)
-                     .arg(action->isChecked() ? 1 : 0));
+                     .arg(entry.text)
+                     .arg(entry.enabled ? 1 : 0)
+                     .arg(entry.checked ? 1 : 0));
   }
   return lines;
 }
@@ -5174,9 +5042,9 @@ void MainWindow::ShowOnlineQualityMenu() {
   if (quality_menu_ == nullptr || quality_menu_->isEmpty()) {
     return;
   }
-  // 状态栏按钮在上方弹出：用按钮左上角作为锚点，Qt 会按屏幕边界修正。
+  // 顶栏按钮在下方弹出：用按钮左下角作为锚点，Qt 会按屏幕边界修正。
   const QPoint anchor =
-      quality_button_->mapToGlobal(QPoint(0, -quality_menu_->sizeHint().height()));
+      quality_button_->mapToGlobal(QPoint(0, quality_button_->height()));
   quality_menu_->popup(anchor);
 }
 
@@ -5204,7 +5072,6 @@ void MainWindow::ApplyOnlineQuality(
                      ? QString::number(online_request_.requested_qn)
                      : QStringLiteral("自动")));
   }
-  RebuildOnlineQualityMenu();
   if (!info.ok && !info.error.isEmpty()) {
     // 档位目录失败不改变会话状态：播放/缓存/首帧都不受影响。
     statusBar()->showMessage(
@@ -5367,9 +5234,8 @@ void MainWindow::TryApplyPendingOnlineQualitySwitch() {
           .arg(online_qn_)
           .arg(mapped_frame)
           .arg(online_switch_old_frame_);
-  // T8.17：切档期间菜单按“会话还不能重新取流”置灰；落地后 pending 已清，
-  // 必须重建一次，否则用户切回其它档时菜单仍是 disabled。
-  RebuildOnlineQualityMenu();
+  // T8.17：切档期间菜单按“会话还不能重新取流”置灰；菜单本身改为点击时重建
+  // （规划 §7.6），所以这里只需要更新档位状态，不需要预建菜单。
   if (online_switch_old_fps_ > 0.0 && online_actual_fps_ > 0.0 &&
       std::fabs(online_switch_old_fps_ - online_actual_fps_) > 0.01) {
     online_switch_status_ +=
@@ -5427,22 +5293,25 @@ int MainWindow::OnlineQualityRequestsForTest() const {
 }
 
 QString MainWindow::OnlineFpsBadgeTextForTest() const {
-  return info_bar_ != nullptr ? info_bar_->OnlineFpsBadgeTextForTest()
-                              : QString();
+  return shell_ != nullptr && shell_->topBar() != nullptr
+             ? shell_->topBar()->FpsBadgeText()
+             : QString();
 }
 
 bool MainWindow::OnlineFrameRateBannerVisibleForTest() const {
-  return info_bar_ != nullptr && info_bar_->BannerVisibleForTest() &&
-         info_bar_->BannerKindForTest() == QStringLiteral("frame-drop");
+  return shell_ != nullptr && shell_->banner() != nullptr &&
+         shell_->banner()->IsVisibleKind(
+             lapian::media::StatusNoticeKind::kFrameRateDrop);
 }
 
 bool MainWindow::OnlineFrameRateBannerCloseVisibleForTest() const {
-  return info_bar_ != nullptr && info_bar_->BannerCloseVisibleForTest();
+  return shell_ != nullptr && shell_->banner() != nullptr &&
+         shell_->banner()->BannerCloseVisible();
 }
 
 void MainWindow::DismissOnlineFrameRateBannerForTest() {
-  if (info_bar_ != nullptr) {
-    info_bar_->DismissOnlineFrameRateBannerForTest();
+  if (shell_ != nullptr && shell_->banner() != nullptr) {
+    shell_->banner()->Dismiss();
   }
 }
 
@@ -5501,20 +5370,21 @@ bool MainWindow::TriggerOnlineQualityEntryForTest(int qn, QString* status) {
   if (status != nullptr) {
     status->clear();
   }
-  if (quality_menu_ == nullptr) {
-    return false;
-  }
-  for (QAction* action : quality_menu_->actions()) {
-    if (!action->data().isValid() || action->data().toInt() != qn) {
+  // 3D：与点击菜单项同一条产品路径（OnOnlineQualityChosen），不依赖菜单已创建。
+  const QVector<lapian::online::QualityMenuEntry> entries =
+      OnlineQualityMenuEntriesForTest();
+  for (const lapian::online::QualityMenuEntry& entry : entries) {
+    if (entry.kind != lapian::online::QualityMenuKind::kTier ||
+        entry.qn != qn) {
       continue;
     }
-    if (!action->isEnabled()) {
+    if (!entry.enabled) {
       if (status != nullptr) {
-        *status = QStringLiteral("disabled: %1").arg(action->toolTip());
+        *status = QStringLiteral("disabled: %1").arg(entry.disabled_reason);
       }
       return false;
     }
-    action->trigger();
+    OnOnlineQualityChosen(qn);
     if (status != nullptr) {
       *status = StatusMessageForTest();
     }
@@ -5728,8 +5598,8 @@ void MainWindow::OpenLocalMedia(const QString& path,
     setWindowTitle(file_info.fileName() + QStringLiteral(" — 拉片软件"));
   }
 
-  info_bar_->SetMedia(info, session_->IsVfrSuspect());
-  // UI v2：文件名/规格是 InfoBar 里的原对象，reparent 到顶栏后由顶栏做 elide；
+  ApplyMediaInfoToUi(info, session_->IsVfrSuspect());
+  // UI v2：文件名/规格由 TopBar 自己持有（3D 后不再从 InfoBar reparent）；
   // 这里只把全名交给顶栏（tooltip 保留全名）。
   if (shell_ != nullptr) {
     shell_->topBar()->SetFileName(file_info.fileName());
@@ -5755,7 +5625,6 @@ void MainWindow::OpenLocalMedia(const QString& path,
       quality_button_->setText(QStringLiteral("清晰度：%1").arg(
           lapian::online::QualityName(online_qn_)));
     }
-    RebuildOnlineQualityMenu();
   } else {
     status_label_->setText(base_info_ + QStringLiteral(" · ") +
                            (frame.hardware ? QStringLiteral("硬解")
@@ -5907,7 +5776,7 @@ void MainWindow::BeginIndexScan() {
   index_scanning_ = true;
   index_scan_timer_.start();
   // 扫描中是过渡态：VFR 的扫描态已在 SetMedia 里给出，这里覆盖为同一状态。
-  info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+  SetTotalForUi(lapian::core::TotalFrameCount::Scanning());
   const lapian::core::TotalFrameCount estimate = ContainerTotal();
   const std::int64_t estimate_frames = estimate.has_value() ? estimate.value() : 0;
   if (timeline_ != nullptr) {
@@ -6097,21 +5966,20 @@ void MainWindow::ApplyIndexState() {
   // VFR 的总帧数按 T6.5 口径保持“扫描中”（帧号按显示帧计数，不承诺精确总数），
   // 不因为后台索引完成而改写这一提示语义。
   if (session_->IsVfrSuspect()) {
-    info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+    SetTotalForUi(lapian::core::TotalFrameCount::Scanning());
   } else if (online_growing) {
     // T8.11 三态：容器 duration×fps 可得时为“估算 ≈N”；索引读到 EOF 且缓存
     // 完整后才是“精确 N”。不拿 API fps/部分索引冒充精确总帧数。
     if (online_index_complete_ && online_stable_frames_ > 0) {
-      info_bar_->SetTotal(
-          lapian::core::TotalFrameCount::Exact(online_stable_frames_));
+      SetTotalForUi(lapian::core::TotalFrameCount::Exact(online_stable_frames_));
     } else if (container_total.has_value() && container_total.value() > 0) {
-      info_bar_->SetTotal(lapian::core::TotalFrameCount::Estimated(
+      SetTotalForUi(lapian::core::TotalFrameCount::Estimated(
           container_total.value()));
     } else {
-      info_bar_->SetTotal(lapian::core::TotalFrameCount::Scanning());
+      SetTotalForUi(lapian::core::TotalFrameCount::Scanning());
     }
   } else {
-    info_bar_->SetTotal(ready ? session_->index().Total() : ContainerTotal());
+    SetTotalForUi(ready ? session_->index().Total() : ContainerTotal());
   }
   SyncLoopUi();
   LoadMarksForCurrentSession();
@@ -6187,9 +6055,7 @@ QString MainWindow::IndexStateForTest() const {
   const bool has_session = session_ != nullptr;
   const bool ready = IndexReadyForTest();
   int total_state = -1;
-  if (info_bar_ != nullptr) {
-    total_state = static_cast<int>(info_bar_->TotalForTest().state());
-  }
+  total_state = static_cast<int>(total_for_ui_.state());
   return QStringLiteral(
              "session=%1 ready=%2 scanning=%3 frames=%4 nav=%5 timeline=%6 total=%7")
       .arg(has_session ? 1 : 0)
@@ -6812,7 +6678,7 @@ void MainWindow::UpdateSpeedText() {
 }
 
 void MainWindow::UpdateBufferSlot() {
-  if (shell_ == nullptr || shell_->transport() == nullptr) {
+  if (shell_->transport() == nullptr) {
     return;
   }
   const bool buffering =
@@ -7126,8 +6992,8 @@ QString MainWindow::LoopPlaybackStateForTest() const {
 }
 
 void MainWindow::ShowScrubTarget(std::int64_t frame) {
-  if (info_bar_ != nullptr) {
-    info_bar_->SetFrame(static_cast<int>(frame));
+  if (shell_ != nullptr && shell_->transport() != nullptr) {
+    shell_->transport()->SetFrame(static_cast<int>(frame));
   }
 }
 
@@ -7752,9 +7618,7 @@ void MainWindow::OnFrameReady(const AVFrame* frame, int rotation, int frame_inde
     gfx_->SetVideoFrame(frame, rotation);
     RememberDisplayedFrame(frame, rotation, frame_index);
   }
-  if (info_bar_ != nullptr) {
-    info_bar_->SetFrame(frame_index);
-  }
+  SetFrameForUi(frame_index);
   if (timeline_ != nullptr) {
     timeline_->SetCurrentFrame(frame_index);
   }
@@ -8355,12 +8219,10 @@ bool MainWindow::TimelineVisibleForTest() const {
 }
 
 bool MainWindow::InfoBarVisibleForTest() const {
-  // v2：信息（帧号/时间码读数）在 Transport 里，全屏仍在；旧壳读 InfoBar 可见性。
-  if (shell_ != nullptr) {
-    QWidget* frame = findChild<QWidget*>(QStringLiteral("v2FrameNumber"));
-    return frame != nullptr && frame->isVisible();
-  }
-  return info_bar_ != nullptr && info_bar_->isVisible();
+  // 3D：方法名保留（全屏/键位测试依赖）；实际读 Transport 里的帧号读数，
+  // 全屏时仍在。
+  QWidget* frame = findChild<QWidget*>(QStringLiteral("v2FrameNumber"));
+  return frame != nullptr && frame->isVisible();
 }
 
 qint64 MainWindow::CurrentFrameForTest() const {
@@ -8607,8 +8469,8 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
     if (timeline_ != nullptr) {
       timeline_->SetCurrentFrame(current_frame_);
     }
-    if (info_bar_ != nullptr) {
-      info_bar_->SetFrame(static_cast<int>(current_frame_));
+    if (shell_ != nullptr && shell_->transport() != nullptr) {
+      shell_->transport()->SetFrame(static_cast<int>(current_frame_));
     }
     statusBar()->showMessage(QStringLiteral("跳帧失败：") + QString::fromStdString(error), 5000);
     last_navigation_error_ = QString::fromStdString(error);
@@ -8619,7 +8481,7 @@ void MainWindow::GoToFrameInternal(std::int64_t frame,
   gfx_->SetVideoFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees);
   RememberDisplayedFrame(info.av_frame, session_->info().rotation.counterclockwise_degrees,
                          target);
-  info_bar_->SetFrame(static_cast<int>(target));
+  SetFrameForUi(target);
   timeline_->SetCurrentFrame(target);
   playback_->SetPosition(target, info.pts_us);
   current_frame_ = target;
@@ -8753,8 +8615,8 @@ void MainWindow::OnPlaybackEnded() {
 void MainWindow::ShowOpenError(const QString& message) {
   qWarning() << "打开失败:" << message;
   last_open_error_ = message;
-  if (info_bar_ != nullptr) {
-    info_bar_->SetError(message);
+  if (shell_ != nullptr && shell_->banner() != nullptr) {
+    shell_->banner()->SetError(message);
   }
   // UI v2：没有可用画面时切错误卡片；已有画面时保留 page0（"旧画面保留"，
   // --banner-test 的 error-kept-frame 语义不变）。
@@ -8922,7 +8784,8 @@ void MainWindow::FlushMarkEditor() {
 
 void MainWindow::ActivateMark(const QString& id, std::int64_t frame) {
   if (session_ == nullptr || !session_->IsOpen() || marks_ == nullptr ||
-      timeline_ == nullptr || info_bar_ == nullptr || mark_panel_ == nullptr) {
+      timeline_ == nullptr ||
+      shell_->transport() == nullptr || mark_panel_ == nullptr) {
     return;
   }
   const lapian::media::FrameIndex& index = session_->index();
@@ -8947,11 +8810,11 @@ void MainWindow::ActivateMark(const QString& id, std::int64_t frame) {
   }
   mark_panel_->SelectMark(id.toStdString());
   timeline_->SetCurrentFrame(target);
-  info_bar_->SetFrame(static_cast<int>(target));
+  SetFrameForUi(target);
   // F6-A8：选中/播放头/帧号先可见，再让解码在下一个事件循环执行。
   mark_panel_->repaint();
   timeline_->repaint();
-  info_bar_->repaint();
+  shell_->transport()->repaint();
   const double ui_ms = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
   mark_ui_samples_.push_back(ui_ms);
   if (qEnvironmentVariableIsSet("LAPIAN_MARK_LOG")) {
