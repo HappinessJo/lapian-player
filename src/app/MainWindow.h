@@ -134,6 +134,16 @@ struct PreviewTestDiagnostics {
   int published = 0;
   int presented = 0;
   int decoder_reopens = 0;
+  // A（缓存命中拖动跟手）诊断：preview_ 存在但 0 帧时，必须能区分“配置路径
+  // 不是真实文件”“预览解码器打开失败”“Begin 没调用/定时器空转取不到帧”。
+  bool open_attempted = false;
+  bool open_ok = false;
+  QString open_error;
+  QString last_error;
+  QString configure_path;
+  QString session_path;
+  qint64 begin_count = 0;
+  qint64 null_ticks = 0;
 };
 
 // P0：每次在线拖动的度量快照（只读；由 OnScrubFinished 在 Pause 前保存）。
@@ -527,6 +537,9 @@ class MainWindow : public QMainWindow {
   int OnlineStepRetargetCountForTest() const;
   // T8.6.1b 在线拖动预览：已缓存区预览呈现/等待/过期帧统计，供探针断言。
   bool PreviewActiveForTest() const;
+  // A：cache-hit-only 探针的显式预热（显示画面页 + D3D11 惰性初始化），返回
+  // 耗时毫秒；探针会把它打印出来，不隐藏一次性成本。
+  qint64 WarmupVideoStageForTest();
   bool OnlinePreviewActiveForTest() const { return online_preview_ != nullptr; }
   bool OnlinePreviewWaitingForTest() const;
   bool OnlinePreviewThreadRunningForTest() const;
@@ -781,6 +794,11 @@ class MainWindow : public QMainWindow {
   // DP-1：预览解码器借用的 D3D11 设备必须与 GfxWidget 当前设备一致；
   // 设备丢失重建后重开预览解码器。
   void EnsurePreviewDecoderDevice();
+  // A（缓存命中拖动跟手）：DASH 缓存命中走 growing 会话，session_->path_utf8()
+  // 是 display_path（只是展示名，磁盘上没有文件）；预览必须读缓存里真实的
+  // data.mp4（online_part_path_/online_cache_path_）。
+  QString CacheHitPreviewPath() const;
+  void EnsureCacheHitPreviewDecoder();
   void ShowOpenError(const QString& message);
   void ApplySpeed(double rate);
   void AddMarkAtCurrentFrame();
@@ -966,6 +984,11 @@ class MainWindow : public QMainWindow {
   bool online_preview_warm_pending_ = false;
   std::int64_t online_preview_warm_target_ = -1;
   int preview_presented_count_ = 0;
+  // A：预览解码器实际配置路径/Begin 次数/空 tick 计数（只 GUI 线程写；诊断用）。
+  QString preview_configure_path_;
+  QString preview_configure_session_path_;
+  qint64 preview_begin_count_ = 0;
+  qint64 preview_null_ticks_ = 0;
   // DP-1 本地预览诊断（只 GUI 线程写）：当前目标与最后成功上传的预览帧。
   std::int64_t preview_target_frame_ = -1;
   std::int64_t preview_displayed_frame_ = -1;

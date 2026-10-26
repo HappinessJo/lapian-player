@@ -3351,9 +3351,18 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     return false;
   }
   // UI v2：在线首帧路径同样先切画面页再取设备（规划 §7.5-2）。
+  QElapsedTimer stage_timer;
+  stage_timer.start();
   media_open_requested_ = true;
   if (stage_stack_ != nullptr) {
     stage_stack_->ShowVideo();
+  }
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    // 首次真正显示画面页会触发 GfxWidget 的 D3D11 惰性初始化（d3d_init_at_startup=0）；
+    // 这里只记录耗时，用于区分“打开成本”和“拖动预览成本”。
+    std::fprintf(stderr, "T8.9 online_ready stage_show_ms=%lld\n",
+                 static_cast<long long>(stage_timer.elapsed()));
+    std::fflush(stderr);
   }
   // T8.9 诊断：记录首帧就绪路径的分段耗时（只在 LAPIAN_ONLINE_LOG 下打印）。
   QElapsedTimer ready_steps;
@@ -6201,7 +6210,11 @@ void MainWindow::ApplyIndexState() {
   }
   SyncLoopUi();
   LoadMarksForCurrentSession();
-  if (ready && (!online_mode_ || online_cache_hit_)) {
+  if (online_mode_ && online_cache_hit_) {
+    // A：缓存命中必须用缓存里的真实 data.mp4；索引每增长一次都会走到这里，
+    // 预览器只在首次/路径变化时创建，避免拖到一半被重建。
+    EnsureCacheHitPreviewDecoder();
+  } else if (ready && !online_mode_) {
     // T2.9：索引就绪后再预热预览器；在线部分索引没有本地路径，预览器禁用。
     // DP-1：预览优先借用 GfxWidget 的 D3D11 设备硬解；设备生命周期由窗口保证。
     preview_ = std::make_unique<lapian::media::PreviewDecoder>();
@@ -6210,6 +6223,8 @@ void MainWindow::ApplyIndexState() {
                         gfx_ != nullptr ? gfx_->d3d_device() : nullptr, true,
                         session_->info().video.width,
                         session_->info().video.height);
+    preview_configure_path_ = QString::fromStdString(session_->path_utf8());
+    preview_configure_session_path_ = preview_configure_path_;
   }
   RefreshMarksUi();
   ShowMarkWarnings();
@@ -6518,6 +6533,21 @@ bool MainWindow::PreviewActiveForTest() const {
   return preview_timer_ != nullptr && preview_timer_->isActive();
 }
 
+qint64 MainWindow::WarmupVideoStageForTest() {
+  QElapsedTimer timer;
+  timer.start();
+  media_open_requested_ = true;
+  if (stage_stack_ != nullptr) {
+    stage_stack_->ShowVideo();
+  }
+  if (gfx_ != nullptr) {
+    // 触发 GfxWidget 的惰性 D3D11 初始化（showEvent 已做一次；这里兜底）。
+    gfx_->d3d_device();
+  }
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+  return timer.elapsed();
+}
+
 PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   PreviewTestDiagnostics result;
   result.active = PreviewActiveForTest();
@@ -6538,10 +6568,18 @@ PreviewTestDiagnostics MainWindow::PreviewDiagnosticsForTest() const {
   result.target_lag_frames = preview_target_lag_frames_;
   result.target_lag_ms = preview_target_lag_ms_;
   result.presented = preview_presented_count_;
+  result.configure_path = preview_configure_path_;
+  result.session_path = preview_configure_session_path_;
+  result.begin_count = preview_begin_count_;
+  result.null_ticks = preview_null_ticks_;
   if (preview_ == nullptr) {
     return result;
   }
   const lapian::media::PreviewDiagnostics diagnostics = preview_->diagnostics();
+  result.open_attempted = diagnostics.open_attempted;
+  result.open_ok = diagnostics.open_ok;
+  result.open_error = QString::fromStdString(diagnostics.open_error);
+  result.last_error = QString::fromStdString(preview_->last_error());
   result.hw_requested = diagnostics.hw_requested;
   result.hw_active = diagnostics.hw_active;
   result.hw_fallback_reason = QString::fromStdString(diagnostics.hw_fallback_reason);
@@ -6691,6 +6729,8 @@ void MainWindow::ResetPreviewStatsForTest() {
   online_preview_dropped_ = 0;
   online_preview_errors_ = 0;
   preview_presented_count_ = 0;
+  preview_begin_count_ = 0;
+  preview_null_ticks_ = 0;
   preview_target_frame_ = -1;
   preview_displayed_frame_ = -1;
   preview_displayed_pts_us_ = 0;
@@ -7238,6 +7278,11 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     playback_->Pause();
   }
   ShowScrubTarget(frame);
+  if (preview_ == nullptr && online_mode_ && online_cache_hit_) {
+    // A：索引完成/重新就绪的窗口里预览器可能还没建（或已被 StopPreview 清掉）。
+    // 拖动开始时懒建一次，保证缓存命中与本地/首次在线一样有跟手预览。
+    EnsureCacheHitPreviewDecoder();
+  }
   if (preview_ != nullptr) {
     preview_target_frame_ = frame;
     preview_displayed_frame_ = -1;
@@ -7261,6 +7306,7 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     EnsurePreviewDecoderDevice();
     preview_->SetDragMode(preview_drag_mode_);
     preview_->Begin(frame);
+    ++preview_begin_count_;
     if (preview_timer_ != nullptr) {
       // DP-1：Windows 默认 15.6ms 定时器粒度会把 16ms 推到 ~31ms，导致
       // 预览帧每隔一个 tick 才被取走（P4 掉到 ~35fps）。本地预览用 10ms
@@ -7727,6 +7773,51 @@ void MainWindow::TickOnlinePreview() {
   }
 }
 
+QString MainWindow::CacheHitPreviewPath() const {
+  // DASH 缓存命中：视频真身是 CacheStore 里的 data.mp4（.part/.mp4 同名原子改名，
+  // GrowingSource 直接读它），online_part_path_ 已由 EmitCacheHitReady 的
+  // cache_mp4_path 给出。durl 缓存命中走本地 OpenLocalMedia，online_cache_path_
+  // 就是同一个文件。最后才退回 session 路径（本地/诊断兜底）。
+  if (!online_part_path_.isEmpty()) {
+    return online_part_path_;
+  }
+  if (!online_cache_path_.isEmpty()) {
+    return online_cache_path_;
+  }
+  if (session_ != nullptr) {
+    return QString::fromStdString(session_->path_utf8());
+  }
+  return QString();
+}
+
+void MainWindow::EnsureCacheHitPreviewDecoder() {
+  if (!online_mode_ || !online_ready_ || !online_cache_hit_ ||
+      session_ == nullptr || !session_->IsOpen() || !session_->HasIndex() ||
+      gfx_ == nullptr) {
+    return;
+  }
+  const QString path = CacheHitPreviewPath();
+  if (path.isEmpty()) {
+    return;
+  }
+  if (preview_ != nullptr && preview_configure_path_ == path) {
+    // 在线索引继续增长会反复 ApplyIndexState；预览器已按同一真实文件配置，
+    // 不重建（IndexOfFrameIndex 对象身份不变，指针仍有效）。
+    return;
+  }
+  preview_.reset();
+  preview_ = std::make_unique<lapian::media::PreviewDecoder>();
+  const QByteArray path_utf8 = path.toUtf8();
+  preview_->Configure(
+      std::string(path_utf8.constData(),
+                  static_cast<std::size_t>(path_utf8.size())),
+      session_->video_stream_index(), &session_->index(),
+      gfx_->d3d_device(), true, session_->info().video.width,
+      session_->info().video.height);
+  preview_configure_path_ = path;
+  preview_configure_session_path_ = QString::fromStdString(session_->path_utf8());
+}
+
 void MainWindow::EnsurePreviewDecoderDevice() {
   if (preview_ == nullptr || session_ == nullptr || !session_->IsOpen()) {
     return;
@@ -7740,15 +7831,25 @@ void MainWindow::EnsurePreviewDecoderDevice() {
   const bool resume = preview_timer_ != nullptr && preview_timer_->isActive() &&
                       preview_target_frame_ >= 0;
   preview_->Close();
-  preview_->Configure(session_->path_utf8(), session_->video_stream_index(),
-                      &session_->index(), device, true,
-                      session_->info().video.width,
-                      session_->info().video.height);
+  // A：缓存命中重开设备时必须继续读缓存真实文件，不能用 display_path。
+  const QString preview_path =
+      (online_mode_ && online_cache_hit_)
+          ? CacheHitPreviewPath()
+          : QString::fromStdString(session_->path_utf8());
+  const QByteArray preview_path_utf8 = preview_path.toUtf8();
+  preview_->Configure(
+      std::string(preview_path_utf8.constData(),
+                  static_cast<std::size_t>(preview_path_utf8.size())),
+      session_->video_stream_index(), &session_->index(), device, true,
+      session_->info().video.width, session_->info().video.height);
+  preview_configure_path_ = preview_path;
+  preview_configure_session_path_ = QString::fromStdString(session_->path_utf8());
   if (resume) {
     // 设备重建后恢复同一次拖动的策略，避免 FarJump 退化成 Exact 而丢掉
     // “先粗后精”，或 Exact 被误当成快拖重新允许粗帧。
     preview_->SetDragMode(preview_drag_mode_);
     preview_->Begin(preview_target_frame_);
+    ++preview_begin_count_;
   }
 }
 
@@ -7794,6 +7895,7 @@ void MainWindow::OnPreviewTick() {
   }
   lapian::media::PreviewFrame preview_frame = preview_->TakeLatestFrame();
   if (preview_frame.frame == nullptr) {
+    ++preview_null_ticks_;
     return;
   }
   // DP-1：硬件帧上传失败不弹错误横幅，直接回退软件并记录 preview_hw_fallback。
