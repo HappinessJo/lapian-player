@@ -536,6 +536,10 @@ class MainWindow : public QMainWindow {
   std::int64_t OnlineLastFrameForTest() const;
   bool OnlineFrameCachedForTest(qint64 frame) const;
   qint64 OnlineFramePtsForTest(qint64 frame) const;
+  // C2（test-only）：目标帧距“前关键帧（含自身）”的帧数/毫秒。P6 前提是
+  // ≤2s；只读 session 索引，fps 用实际流 fps / 容器 fps / 30 回退。
+  qint64 OnlineKeyframeDistanceFramesForTest(qint64 frame) const;
+  double OnlineKeyframeDistanceMsForTest(qint64 frame) const;
   bool OnlineStepIdleForTest() const;
   QString OnlineStepStateForTest() const;
   std::vector<qint64> OnlineStepTraceForTest() const;

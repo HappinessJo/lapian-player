@@ -6522,6 +6522,36 @@ qint64 MainWindow::OnlineFramePtsForTest(qint64 frame) const {
   return session_->index().PtsOfFrame(frame);
 }
 
+qint64 MainWindow::OnlineKeyframeDistanceFramesForTest(qint64 frame) const {
+  // C2：P6 的前提是“目标距前关键帧 ≤2s”；这里只读索引里的关键帧位置，
+  // 给探针判定当前样本是否在保证档前提内（不改产品 seek/预览行为）。
+  if (session_ == nullptr || !session_->index().IsReady() || frame < 0 ||
+      frame >= static_cast<qint64>(session_->index().size())) {
+    return -1;
+  }
+  const std::int64_t keyframe =
+      session_->index().KeyframeAtOrBeforeFrame(frame);
+  if (keyframe < 0 || keyframe > frame) {
+    return -1;
+  }
+  return frame - keyframe;
+}
+
+double MainWindow::OnlineKeyframeDistanceMsForTest(qint64 frame) const {
+  const qint64 frames = OnlineKeyframeDistanceFramesForTest(frame);
+  if (frames < 0) {
+    return -1.0;
+  }
+  double fps = online_actual_fps_;
+  if (!(fps > 0.0) && session_ != nullptr) {
+    fps = session_->info().video.frame_rate.ToDouble();
+  }
+  if (!(fps > 0.0)) {
+    fps = 30.0;
+  }
+  return static_cast<double>(frames) * 1000.0 / fps;
+}
+
 bool MainWindow::OnlineStepIdleForTest() const {
   return !online_seek_running_ && !online_step_.inflight && !online_step_.queued;
 }
