@@ -765,6 +765,10 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationDomain(QStringLiteral("lapian.local"));
     QCoreApplication::setApplicationName(QStringLiteral("拉片软件"));
     QCoreApplication::setApplicationVersion(QStringLiteral(LAPIAN_VERSION));
+    if (ui_smoke) {
+      // P2：扫码态截图必须体现 3D 之后的深色主题（与产品路径一致）。
+      lapian::ui::ApplyTheme(static_cast<QApplication&>(*app));
+    }
 
     lapian::app::OnlineQrTestOptions options;
     options.real_generate = HasArgument(argc, argv, "--real-generate");

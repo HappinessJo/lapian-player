@@ -6,13 +6,18 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QTimer>
@@ -64,10 +69,13 @@ QString FormatDuration(qint64 seconds) {
 OnlineResolveDialog::OnlineResolveDialog(QWidget* parent) : QDialog(parent) {
   setWindowTitle(QStringLiteral("在线打开（BV / B 站视频链接）"));
   setModal(false);
-  setMinimumSize(560, 560);
+  // P2：最小高度必须低于 150%/200% 的可用逻辑高度，否则窗口无法被夹到屏幕内；
+  // 内容超高时由 QScrollArea 滚动（二维码/刷新/取消仍保证可见）。
+  setMinimumSize(560, 420);
   http_ = std::make_unique<lapian::online::WinHttpClient>();
   SetupUi();
   ReloadCredentialState();
+  AdjustToContent();
 }
 
 OnlineResolveDialog::~OnlineResolveDialog() {
@@ -89,7 +97,23 @@ OnlineResolveDialog::~OnlineResolveDialog() {
 }
 
 void OnlineResolveDialog::SetupUi() {
-  auto* root = new QVBoxLayout(this);
+  // P2：主体放进 QScrollArea——100%/125% 时窗口按内容长高，150%/200% 可用高度
+  // 不够时出现滚动条，而不是把二维码/刷新/取消裁掉。
+  auto* outer = new QVBoxLayout(this);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->setSpacing(0);
+  scroll_area_ = new QScrollArea(this);
+  scroll_area_->setObjectName(QStringLiteral("onlineScroll"));
+  scroll_area_->setWidgetResizable(true);
+  scroll_area_->setFrameShape(QFrame::NoFrame);
+  scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll_content_ = new QWidget(scroll_area_);
+  scroll_content_->setObjectName(QStringLiteral("onlineScrollContent"));
+  auto* root = new QVBoxLayout(scroll_content_);
+  root->setContentsMargins(14, 12, 14, 12);
+  root->setSpacing(8);
+  scroll_area_->setWidget(scroll_content_);
+  outer->addWidget(scroll_area_);
 
   auto* intro = new QLabel(
       QStringLiteral("输入 BV 号或 B 站视频链接（支持 ?p=2）。解析只读取公开元数据，"
@@ -299,6 +323,82 @@ void OnlineResolveDialog::SetupCredentialUi(QVBoxLayout* root) {
           &OnlineResolveDialog::OnQrRefresh);
   connect(qr_cancel_button_, &QPushButton::clicked, this,
           &OnlineResolveDialog::OnQrCancel);
+}
+
+void OnlineResolveDialog::AdjustToContent() {
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  const QRect avail =
+      screen == nullptr ? QRect() : screen->availableGeometry();
+  int max_w = 900;
+  int max_h = 900;
+  if (!avail.isEmpty()) {
+    max_w = std::max(320, avail.width() - 24);
+    max_h = std::max(320, avail.height() - 48);
+  }
+  // QScrollArea 不会把内容的 sizeHint 传给顶层窗口；先按目标宽度摆一次，再按
+  // 内容实际高度定窗口（100%/125% 一屏放下，150%/200% 夹到可用高并滚动）。
+  const int preferred_w =
+      std::min(max_w, std::max(560, std::min(720, width())));
+  resize(preferred_w, height());
+  updateGeometry();
+  if (layout() != nullptr) {
+    layout()->activate();
+  }
+  if (scroll_content_ != nullptr && scroll_content_->layout() != nullptr) {
+    scroll_content_->layout()->activate();
+  }
+  int content_h = scroll_content_ == nullptr ? 0 : scroll_content_->sizeHint().height();
+  if (scroll_content_ != nullptr && scroll_content_->layout() != nullptr) {
+    content_h = std::max(content_h,
+                         scroll_content_->layout()->sizeHint().height());
+  }
+  const int target_h = std::clamp(content_h + 4, 420, max_h);
+  resize(preferred_w, target_h);
+  if (layout() != nullptr) {
+    layout()->activate();
+  }
+  if (scroll_content_ != nullptr && scroll_content_->layout() != nullptr) {
+    scroll_content_->layout()->activate();
+  }
+  // 位置也夹回屏幕内（缩放后 frame 可能越界）。
+  const QRect frame = frameGeometry();
+  int x = frame.x();
+  int y = frame.y();
+  bool moved = false;
+  if (frame.right() > avail.right()) {
+    x -= frame.right() - avail.right();
+    moved = true;
+  }
+  if (frame.bottom() > avail.bottom()) {
+    y -= frame.bottom() - avail.bottom();
+    moved = true;
+  }
+  if (x < avail.left()) {
+    x = avail.left();
+    moved = true;
+  }
+  if (y < avail.top()) {
+    y = avail.top();
+    moved = true;
+  }
+  if (moved) {
+    move(x, y);
+  }
+  // 用户刚点“扫码登录/刷新”：把二维码面板滚进视口（小屏时顶部说明可滚走）。
+  if (scroll_area_ != nullptr && qr_panel_ != nullptr &&
+      qr_panel_->isVisible()) {
+    scroll_area_->ensureWidgetVisible(qr_panel_, 0, 0);
+    // 布局尚未完成时 ensureWidgetVisible 可能落在旧几何上；下一轮事件循环再滚一次。
+    QTimer::singleShot(0, this, [this]() {
+      if (scroll_area_ != nullptr && qr_panel_ != nullptr &&
+          qr_panel_->isVisible()) {
+        scroll_area_->ensureWidgetVisible(qr_panel_, 0, 0);
+      }
+    });
+  }
 }
 
 void OnlineResolveDialog::StartResolve() {
@@ -989,6 +1089,8 @@ void OnlineResolveDialog::OnStartQrLogin() {
   if (qr_start_button_ != nullptr) {
     qr_start_button_->setEnabled(false);
   }
+  // P2：隐藏面板 show 后顶层窗口不会自动长高，必须重算并夹到屏幕。
+  AdjustToContent();
   qr_controller_->Start();
 }
 
@@ -1067,6 +1169,7 @@ void OnlineResolveDialog::OnQrRefresh() {
   if (qr_panel_ != nullptr) {
     qr_panel_->show();
   }
+  AdjustToContent();
   qr_controller_->Refresh();
 }
 
@@ -1081,6 +1184,7 @@ void OnlineResolveDialog::OnQrCancel() {
   if (qr_start_button_ != nullptr) {
     qr_start_button_->setEnabled(true);
   }
+  AdjustToContent();
 }
 
 void OnlineResolveDialog::SetCredentialPathForTest(const QString& path) {
@@ -1164,6 +1268,95 @@ QSize OnlineResolveDialog::QrImageSizeForTest() const {
 
 bool OnlineResolveDialog::QrPanelVisibleForTest() const {
   return qr_panel_ != nullptr && !qr_panel_->isHidden();
+}
+
+QSize OnlineResolveDialog::QrLabelSizeForTest() const {
+  return qr_image_label_ == nullptr ? QSize() : qr_image_label_->size();
+}
+
+bool OnlineResolveDialog::QrImageFullyVisibleForTest() const {
+  if (qr_image_label_ == nullptr || !qr_image_label_->isVisible()) {
+    return false;
+  }
+  if (scroll_area_ == nullptr || !scroll_area_->viewport()->isVisible()) {
+    return false;
+  }
+  QWidget* viewport = scroll_area_->viewport();
+  const QRect rect(viewport->mapFromGlobal(
+                       qr_image_label_->mapToGlobal(QPoint(0, 0))),
+                   qr_image_label_->size());
+  return viewport->rect().contains(rect);
+}
+
+bool OnlineResolveDialog::QrControlsVisibleForTest() const {
+  if (scroll_area_ == nullptr || !scroll_area_->viewport()->isVisible()) {
+    return false;
+  }
+  QWidget* viewport = scroll_area_->viewport();
+  auto fully_visible = [viewport](QWidget* widget) {
+    if (widget == nullptr || !widget->isVisible()) {
+      return false;
+    }
+    const QRect rect(
+        viewport->mapFromGlobal(widget->mapToGlobal(QPoint(0, 0))),
+        widget->size());
+    return viewport->rect().contains(rect);
+  };
+  return fully_visible(qr_image_label_) &&
+         fully_visible(qr_refresh_button_) &&
+         fully_visible(qr_cancel_button_);
+}
+
+bool OnlineResolveDialog::DialogWithinScreenForTest() const {
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  if (screen == nullptr) {
+    return false;
+  }
+  return screen->availableGeometry().contains(frameGeometry());
+}
+
+QString OnlineResolveDialog::QrLayoutStateForTest() const {
+  auto rect_text = [](const QRect& rect) {
+    return QStringLiteral("%1,%2 %3x%4")
+        .arg(rect.x())
+        .arg(rect.y())
+        .arg(rect.width())
+        .arg(rect.height());
+  };
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  const QRect avail =
+      screen == nullptr ? QRect() : screen->availableGeometry();
+  const QRect qr_rect =
+      qr_image_label_ == nullptr
+          ? QRect()
+          : QRect(qr_image_label_->mapToGlobal(QPoint(0, 0)),
+                  qr_image_label_->size());
+  QString scroll_state = QStringLiteral("scroll=none");
+  if (scroll_area_ != nullptr) {
+    scroll_state = QStringLiteral("scroll=%1x%2 bar=%3")
+                       .arg(scroll_area_->viewport()->width())
+                       .arg(scroll_area_->viewport()->height())
+                       .arg(scroll_area_->verticalScrollBar()->value());
+  }
+  return QStringLiteral(
+             "dialog=%1x%2 frame=%3 avail=%4 qr=%5 label=%6x%7 "
+             "qr_visible=%8 controls=%9 within=%10 %11")
+      .arg(width())
+      .arg(height())
+      .arg(rect_text(frameGeometry()), rect_text(avail),
+           rect_text(qr_rect))
+      .arg(qr_image_label_ == nullptr ? 0 : qr_image_label_->width())
+      .arg(qr_image_label_ == nullptr ? 0 : qr_image_label_->height())
+      .arg(QrImageFullyVisibleForTest() ? 1 : 0)
+      .arg(QrControlsVisibleForTest() ? 1 : 0)
+      .arg(DialogWithinScreenForTest() ? 1 : 0)
+      .arg(scroll_state);
 }
 
 qint64 OnlineResolveDialog::CancelQrForTest() {

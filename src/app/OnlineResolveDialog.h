@@ -24,6 +24,7 @@ class QImage;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QScrollArea;
 class QTimer;
 class QVBoxLayout;
 class QWidget;
@@ -133,6 +134,13 @@ class OnlineResolveDialog : public QDialog {
   QString QrStatusTextForTest() const;
   QSize QrImageSizeForTest() const;
   bool QrPanelVisibleForTest() const;
+  // P2：扫码面板显示后对话框要自己长高/夹到屏幕；QR 240×240 与刷新/取消
+  // 必须完整可见（小屏走 QScrollArea）。
+  QSize QrLabelSizeForTest() const;
+  bool QrImageFullyVisibleForTest() const;
+  bool QrControlsVisibleForTest() const;
+  bool DialogWithinScreenForTest() const;
+  QString QrLayoutStateForTest() const;
   qint64 CancelQrForTest();
 
   // 主窗口关窗/析构时调用：取消并 join 工作线程，不留下挂起请求。
@@ -195,6 +203,9 @@ class OnlineResolveDialog : public QDialog {
   bool SaveCredentialText(const QString& text, QString* error);
   bool ClearCredentialNow();
   void EnsureQrController();
+  // P2：扫码面板 show 后重新算尺寸（Qt 不会因隐藏子控件显示而自动长高），
+  // 并把高度夹到当前屏幕可用区；放不下时由 QScrollArea 滚动。
+  void AdjustToContent();
 
   QLineEdit* input_ = nullptr;
   QPushButton* resolve_button_ = nullptr;
@@ -227,6 +238,9 @@ class OnlineResolveDialog : public QDialog {
   QPushButton* qr_refresh_button_ = nullptr;
   QPushButton* qr_cancel_button_ = nullptr;
   std::unique_ptr<lapian::online::QrLoginController> qr_controller_;
+  // P2：小屏/高 DPI 时主体可滚动，保证二维码与按钮不被裁掉。
+  QScrollArea* scroll_area_ = nullptr;
+  QWidget* scroll_content_ = nullptr;
 
   std::unique_ptr<lapian::online::IHttpClient> http_;
   std::shared_ptr<lapian::online::HttpCancelToken> cancel_;

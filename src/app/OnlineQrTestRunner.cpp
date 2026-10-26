@@ -458,6 +458,9 @@ bool RunUiSmoke() {
   dialog.SetHttpClientForTest(std::move(fake));
   dialog.SetQrPollIntervalForTest(30);
   dialog.SetQrExpiryForTest(5000);
+  // P2：必须真的 show() 才能验证“顶层窗口自己长高/夹屏/滚动”而不是只测布局对象。
+  dialog.show();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
   dialog.StartQrLoginForTest();
 
   bool waiting = false;
@@ -471,9 +474,30 @@ bool RunUiSmoke() {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
   const bool panel = dialog.QrPanelVisibleForTest();
   const QSize image_size = dialog.QrImageSizeForTest();
   const bool image = !image_size.isEmpty();
+  // P2：扫码态布局断言（240×240 完整可见、刷新/取消可见、对话框不超屏）。
+  const QSize label_size = dialog.QrLabelSizeForTest();
+  const bool label_240 = label_size == QSize(240, 240);
+  const bool qr_visible = dialog.QrImageFullyVisibleForTest();
+  const bool controls_visible = dialog.QrControlsVisibleForTest();
+  const bool within_screen = dialog.DialogWithinScreenForTest();
+  const QString layout_state = dialog.QrLayoutStateForTest();
+  PrintKV(QStringLiteral("ui_qr_layout").toUtf8().constData(), layout_state);
+  Check(QStringLiteral("UI smoke QR label 240x240"), label_240,
+        QStringLiteral("%1x%2").arg(label_size.width()).arg(label_size.height()));
+  Check(QStringLiteral("UI smoke QR image fully visible"), qr_visible);
+  Check(QStringLiteral("UI smoke QR controls visible"), controls_visible);
+  Check(QStringLiteral("UI smoke dialog within screen"), within_screen);
+  const QString shot_path =
+      QDir::currentPath() +
+      QStringLiteral("/build/hotfix-qr-%1.png")
+          .arg(qRound(dialog.devicePixelRatioF() * 100.0));
+  const bool shot = dialog.grab().save(shot_path);
+  Check(QStringLiteral("UI smoke QR screenshot"), shot, shot_path);
+  PrintKV("ui_shot", shot_path);
 
   bool success = false;
   timer.restart();
