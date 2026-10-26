@@ -25,7 +25,11 @@ stack 三页（既有 MarkPanel 原对象 / 截图网格 / 信息表）→ 页�
 检查器折叠/展开/tab 用例）、M4 仍 **64.17/64.17/64.42/56.64/60.80%**、`--banner-test 74/0`、`--key-test 77/0`、
 `--mark-test`（v2 3 条新 check 全 1）、`--note-test 17/0`、`--snapshot-test 35/0`、`--fullscreen-test`、
 `--loop-test`/`--loop-end-test`、`--drag-test` P4 66.3–67.7fps / P6 p95 15.6–22.3ms、`--drag-strategy-test 7/7`、
-`--startup-test` v2 P1 187ms / P2 414ms；M7 四态 `rel=85,13 32x20` 不变。
+`--startup-test` v2 P1 187ms / P2 414ms（最终二进制复跑 218/482ms）；M7 四态 `rel=85,13 32x20` 不变。
+
+> 旧壳最终复跑有一趟 `--startup-test` 是 P1 1253ms / P2 1340ms（新 exe 首次冷文件缓存；
+> 旧壳代码本阶段未改，且仍在 1.5s / 2.5s 门槛内）。上面表里的旧壳 263/327ms 来自 gate 轮，
+> 两个数都保留，避免用单趟冷启数字下结论。
 
 ---
 
@@ -112,7 +116,7 @@ stack 三页（既有 MarkPanel 原对象 / 截图网格 / 信息表）→ 页�
 | `--loop-test` / `--loop-end-test` | 全过 | 全过 |
 | `--drag-test` | P4 67.7fps / P6 p95 17.5ms | **tl=132** P4 66.5 / P6 22.3 / P9 38.5；**tl=340** P4 66.3 / P6 15.6 / P9 31.2（P6 ≤150ms） |
 | `--drag-strategy-test` | 7/7（release_p95 19.3ms） | **7/7**（release_p95 14.7ms） |
-| `--startup-test` P1 / P2 | 263ms / 327ms | **187ms / 414ms**（`d3d_init_at_startup=0`；空态 190ms） |
+| `--startup-test` P1 / P2 | 263ms / 327ms | **187ms / 414ms**（gate 轮；最终二进制复跑 218ms / 482ms；`d3d_init_at_startup=0`；空态 190ms） |
 
 ### 4.5 在线（Medium 副本 `%LOCALAPPDATA%\Programs\拉片软件`）
 

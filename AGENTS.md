@@ -59,7 +59,7 @@
     **64.17/64.17/64.42/56.64/60.80%**、`--banner-test 74/0`、`--key-test 77/0`、mark/note 0
     （v2 新增 2 条 3C 用例全过、旧壳跳过）、`--snapshot-test 35/0`、fullscreen/loop/loop-end 全过、
     `--drag-test` P4 66.3–67.7fps / P6 p95 15.6–22.3ms、`--drag-strategy-test 7/7`、
-    `--startup-test` 新壳 P1 187ms / P2 414ms、`--readout-edit-test` 通过 + M7 四态 `rel=85,13 32x20`；
+    `--startup-test` 新壳 P1 187ms / P2 414ms（最终复跑 218/482ms）、`--readout-edit-test` 通过 + M7 四态 `rel=85,13 32x20`；
     在线 Medium 副本：longpress **54/0**、parity **61/0**、T8.6.1b **24/0**。
     **坑**：`--snapshot-test` 前要清 `media/snapshots`（既有测试要求目录恰好 3 个 PNG，历史遗留会误报
     `three-files`）；3B gate 脚本把 `--dpi-tag` 写成 `--tag`（截图名永远是 `x`），3C 已改。
