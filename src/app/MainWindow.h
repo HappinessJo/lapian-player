@@ -552,6 +552,11 @@ class MainWindow : public QMainWindow {
   // 耗时毫秒；探针会把它打印出来，不隐藏一次性成本。
   qint64 WarmupVideoStageForTest();
   bool OnlinePreviewActiveForTest() const { return online_preview_ != nullptr; }
+  // C8：本会话的拖动预览是否走增长读层（first-online growing + cache-hit DASH），
+  // 供探针在 cache-hit 分支选择 OnlinePreview* 统计而不是本地 Preview* 统计。
+  bool OnlinePreviewDragEligibleForTest() const {
+    return OnlinePreviewEligibleForDrag();
+  }
   bool OnlinePreviewWaitingForTest() const;
   bool OnlinePreviewThreadRunningForTest() const;
   qint64 OnlinePreviewTargetForTest() const { return online_preview_target_; }
@@ -770,6 +775,10 @@ class MainWindow : public QMainWindow {
     std::vector<std::int64_t> trace;
   };
   bool OnlineStepEligible() const;
+  // C8（2026-10-26）：拖动预览的“增长读层”判定。首次在线与缓存命中 DASH 都是
+  // growing 会话；durl 缓存命中/本地文件不是。与 OnlineStepEligible() 的唯一区别
+  // 是不排除缓存命中——只用于拖动预览，步进/seek 仍按 OnlineStepEligible()。
+  bool OnlinePreviewEligibleForDrag() const;
   std::int64_t OnlineLastFrame() const;
   bool ApplyOnlineStep(int direction);
   void IssueOnlineStepSeek(std::int64_t target, bool cached);

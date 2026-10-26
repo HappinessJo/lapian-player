@@ -4375,6 +4375,17 @@ bool MainWindow::OnlineStepEligible() const {
          session_ != nullptr && session_->IsOpen() && session_->IsGrowing();
 }
 
+bool MainWindow::OnlinePreviewEligibleForDrag() const {
+  // C8（2026-10-26）：拖动预览统一走增长读层。缓存命中 DASH 的会话也是
+  // growing（读缓存里的完整 data.mp4），只有它和首次在线需要/适合用
+  // OnlinePreviewDecoder（72 帧缓存 + 反向预取 + Pause 保留）；durl 缓存命中
+  // 是本地会话、本地文件也不是 growing，仍走 PreviewDecoder。
+  // 注意：这不是步进/seek 判定——缓存命中仍走本地同步 seek（OnlineStepEligible
+  // 保持不变）。
+  return online_mode_ && online_ready_ && session_ != nullptr &&
+         session_->IsOpen() && session_->IsGrowing();
+}
+
 std::int64_t MainWindow::OnlineLastFrame() const {
   if (session_ == nullptr || !session_->IsOpen()) {
     return -1;
@@ -7393,9 +7404,19 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     playback_->Pause();
   }
   ShowScrubTarget(frame);
-  if (preview_ == nullptr && online_mode_ && online_cache_hit_) {
+  // C8：缓存命中 DASH 也走增长读层预览（与首次在线同一 OnlinePreviewDecoder），
+  // durl 缓存命中/本地仍走 PreviewDecoder。
+  const bool online_drag_preview = OnlinePreviewEligibleForDrag();
+  if (online_drag_preview && preview_ != nullptr) {
+    // 理论上打开会话时已 StopPreview；这里兜底，避免缓存命中复用本地预览器。
+    preview_->Close();
+    preview_.reset();
+    preview_configure_path_.clear();
+  }
+  if (!online_drag_preview && preview_ == nullptr && online_mode_ &&
+      online_cache_hit_) {
     // A：索引完成/重新就绪的窗口里预览器可能还没建（或已被 StopPreview 清掉）。
-    // 拖动开始时懒建一次，保证缓存命中与本地/首次在线一样有跟手预览。
+    // 拖动开始时懒建一次，保证 durl 缓存命中与本地一样有跟手预览。
     EnsureCacheHitPreviewDecoder();
   }
   if (preview_ != nullptr) {
@@ -7434,7 +7455,7 @@ void MainWindow::OnScrubStarted(qint64 frame) {
     statusBar()->showMessage(QStringLiteral("拖动预览：松开后精确到帧"), 1000);
     return;
   }
-  if (OnlineStepEligible()) {
+  if (online_drag_preview) {
     // T8.6.1b：增长会话走独立的 GrowingSource 预览读层；未缓存区只提示等待。
     CancelOnlinePreviewWarm();
     // P0：本次拖动度量（只读；即使预览器创建失败也记录拖动起点）。
@@ -7529,7 +7550,7 @@ void MainWindow::OnScrubTargetChanged(qint64 frame) {
     preview_->UpdateTarget(frame);
     return;
   }
-  if (!OnlineStepEligible()) {
+  if (!OnlinePreviewEligibleForDrag()) {
     return;
   }
   if (online_preview_ == nullptr) {
@@ -7650,7 +7671,8 @@ void MainWindow::EndScrubPreview() {
 
 void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame,
                                             bool warm_only) {
-  if (online_preview_ != nullptr || !OnlineStepEligible() || session_ == nullptr) {
+  if (online_preview_ != nullptr || !OnlinePreviewEligibleForDrag() ||
+      session_ == nullptr) {
     return;
   }
   const lapian::media::FrameIndex& index = session_->index();
@@ -7691,7 +7713,8 @@ std::int64_t MainWindow::OnlinePreviewDisplayedFrame() const {
 }
 
 bool MainWindow::OnlinePreviewWarmAllowed() const {
-  if (!OnlineStepEligible() || session_ == nullptr || !session_->IsOpen()) {
+  if (!OnlinePreviewEligibleForDrag() || session_ == nullptr ||
+      !session_->IsOpen()) {
     return false;
   }
   if (online_preview_drag_active_) {
@@ -7918,6 +7941,11 @@ void MainWindow::EnsureCacheHitPreviewDecoder() {
       gfx_ == nullptr) {
     return;
   }
+  if (OnlinePreviewEligibleForDrag()) {
+    // C8：缓存命中 DASH 的拖动预览改走 OnlinePreviewDecoder（与首次在线同一
+    // 读层），不再创建本地 PreviewDecoder；durl 缓存命中仍是本地会话，保持原路径。
+    return;
+  }
   const QString path = CacheHitPreviewPath();
   if (path.isEmpty()) {
     return;
@@ -8007,7 +8035,7 @@ void MainWindow::OnPreviewTick() {
   if (session_ == nullptr || !session_->IsOpen() || gfx_ == nullptr) {
     return;
   }
-  if (online_preview_ != nullptr && OnlineStepEligible()) {
+  if (online_preview_ != nullptr && OnlinePreviewEligibleForDrag()) {
     TickOnlinePreview();
     return;
   }
@@ -9045,7 +9073,7 @@ void MainWindow::OnPlaybackStateChanged(bool playing) {
         !(preview_timer_ != nullptr && preview_timer_->isActive())) {
       online_preview_->Pause();
     }
-  } else if (OnlineStepEligible() && session_ != nullptr &&
+  } else if (OnlinePreviewEligibleForDrag() && session_ != nullptr &&
              session_->IsOpen() && !online_seek_running_ &&
              !online_preview_drag_active_ &&
              !(preview_timer_ != nullptr && preview_timer_->isActive())) {

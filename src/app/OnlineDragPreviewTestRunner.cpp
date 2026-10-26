@@ -422,7 +422,18 @@ OnlineDragPreviewTestRunner::RunDragPass(const QString& label, qint64 start,
             .arg(window_->OnlinePreviewLastSeekKeyframeForTest())
             .arg(window_->OnlinePreviewLastSeekLandingOffsetForTest())
             .arg(p0_primed));
-  if (cache_hit) {
+  // C8：缓存命中 DASH 与首次在线都走 OnlinePreviewDecoder（72 帧缓存/反向
+  // 预取/Pause 保留）；durl 缓存命中与本地仍走 PreviewDecoder。两条路径分开
+  // 打印诊断，方便说明“哪个读层在跑”。
+  if (window_->OnlinePreviewDragEligibleForTest()) {
+    Print(QStringLiteral(
+              "online_drag_preview_pipeline_online label=%1 %2 "
+              "hw_requested=0 hw_active=0 note=online_preview_software "
+              "presented=%3")
+              .arg(label)
+              .arg(window_->OnlinePreviewStateForTest())
+              .arg(window_->PreviewPresentedForTest()));
+  } else if (cache_hit) {
     // A：缓存命中走本地预览器（preview_）。preview_ 存在但 0 帧时，这行给出
     // “配置的是哪条路径/文件是否存在/解码器是否打开成功/取帧是否一直为空”。
     // C4：再加 hw_requested/hw_active 与缓存/seek/预取计数——缓存命中 DASH 预览
@@ -2181,17 +2192,17 @@ void OnlineDragPreviewTestRunner::Run() {
     // 的 start150 反向每次要从 K 重解约 60 帧。这两类实测 0.60–0.63 / 0.23–0.33
     // （硬解基线 0.30 / 0.43 同样 <70%），属长 GOP“可用档”观察值，不当作本次
     // 传参改动的硬门，也不把低值写成通过。
-    const int backward_samples = std::max(1, backward.samples);
+    const int backward_gate_samples = std::max(1, backward.samples);
     const double backward_present_ratio =
         static_cast<double>(backward.presented) /
-        static_cast<double>(backward_samples);
+        static_cast<double>(backward_gate_samples);
     const PreviewTestDiagnostics backward_preview =
         window_->PreviewDiagnosticsForTest();
     const QString ratio_numbers =
         QStringLiteral("presented=%1 samples=%2 ratio=%3 fps_total=%4 "
                        "hw_requested=%5 hw_active=%6")
             .arg(backward.presented)
-            .arg(backward_samples)
+            .arg(backward_gate_samples)
             .arg(QString::number(backward_present_ratio, 'f', 3))
             .arg(QString::number(backward.fps_total, 'f', 2))
             .arg(backward_preview.hw_requested ? 1 : 0)
