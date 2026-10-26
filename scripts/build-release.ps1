@@ -21,6 +21,14 @@ if (-not $FfmpegRoot) { $FfmpegRoot = Find-FfmpegRoot }
 $cmake = Find-CMake
 $ctest = Join-Path (Split-Path $cmake -Parent) 'ctest.exe'
 
+# SoundTouch is a local, gitignored dependency (LGPL-2.1, shared DLL).
+$soundTouchDll = Join-Path $repo 'third_party\soundtouch\build-msvc\Release\SoundTouch.dll'
+if (-not (Test-Path $soundTouchDll)) {
+  Write-Host '=== 0/7 SoundTouch build ==='
+  & (Join-Path $PSScriptRoot 'build-soundtouch.ps1')
+  if ($LASTEXITCODE -ne 0) { throw 'SoundTouch build failed' }
+}
+
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
 Write-Host '=== 1/7 配置 ==='
@@ -95,6 +103,13 @@ if (Test-Path $redistRoot) {
 
 Write-Host '=== 6/7 复制 FFmpeg 运行时 ==='
 $ffmpegBin = Join-Path $FfmpegRoot 'bin'
+
+# SoundTouch runtime DLL (built by scripts\build-soundtouch.ps1).
+$soundTouchDll = Join-Path $BuildDir 'bin\SoundTouch.dll'
+if (-not (Test-Path $soundTouchDll)) {
+  throw 'Missing SoundTouch runtime; run scripts\build-soundtouch.ps1 first.'
+}
+Copy-Item -LiteralPath $soundTouchDll -Destination $DistDir -Force
 foreach ($pattern in @('avformat*.dll', 'avcodec*.dll', 'avutil*.dll', 'swscale*.dll', 'swresample*.dll')) {
   $dlls = @(Get-ChildItem -LiteralPath $ffmpegBin -Filter $pattern -ErrorAction SilentlyContinue)
   if ($dlls.Count -eq 0) { throw "缺少 FFmpeg 运行时：$ffmpegBin\$pattern" }

@@ -20,6 +20,16 @@
   相同源码复现二进制。
 - 许可文本：见 `licenses/LGPL-2.1.txt`。
 
+## SoundTouch 2.3.3（LGPL-2.1）
+
+- 二进制来源：本项目 `scripts/build-soundtouch.ps1` 从官方源码构建为共享 DLL
+  （`SoundTouch.dll`），未修改其源码。
+- 源码：`https://www.surina.net/soundtouch/soundtouch-2.3.3.tar.gz`
+  （SHA256 `43B23DFAC2F64A3AFF55D64BE096FFC7B73842C3F5665CAFF44975633A975A99`）。
+- 构建方式：CMake `-DBUILD_SHARED_LIBS=ON`，MSVC x64 Release；应用只通过
+  `SoundTouch.dll` 动态链接，可用同名 DLL 替换。
+- 许可文本：见 `licenses/SoundTouch-COPYING.txt`。
+
 ## 获取承诺
 
 自本版本发布起三年内，任何收到本软件二进制分发的个人或组织，均可通过上述公开

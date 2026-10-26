@@ -182,6 +182,31 @@ target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # 不调用这些类型，但静态库需要一个链接边。
 target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath lapian_online)
 
+# T3.3b: SoundTouch 2.3.3 (LGPL-2.1, shared DLL) for tempo change without pitch.
+# Build it first with scripts\build-soundtouch.ps1; third_party/ is gitignored.
+set(LAPIAN_SOUNDTOUCH_ROOT "${CMAKE_SOURCE_DIR}/third_party/soundtouch")
+set(LAPIAN_SOUNDTOUCH_DLL "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.dll")
+set(LAPIAN_SOUNDTOUCH_LIB "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.lib")
+if(NOT EXISTS "${LAPIAN_SOUNDTOUCH_DLL}" OR NOT EXISTS "${LAPIAN_SOUNDTOUCH_LIB}")
+  message(FATAL_ERROR "SoundTouch is not built. Run scripts\\build-soundtouch.ps1 first.")
+endif()
+add_library(soundtouch SHARED IMPORTED)
+set_target_properties(soundtouch PROPERTIES
+  IMPORTED_LOCATION "${LAPIAN_SOUNDTOUCH_DLL}"
+  IMPORTED_IMPLIB "${LAPIAN_SOUNDTOUCH_LIB}"
+  INTERFACE_INCLUDE_DIRECTORIES "${LAPIAN_SOUNDTOUCH_ROOT}/soundtouch/include")
+function(lapian_copy_soundtouch_dll target)
+  # Resolve inside the function: tests are configured in a separate directory
+  # scope, so src/ variables are not visible there.
+  set(_lapian_soundtouch_dll
+      "${CMAKE_SOURCE_DIR}/third_party/soundtouch/build-msvc/Release/SoundTouch.dll")
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_lapian_soundtouch_dll}"
+            "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copy SoundTouch DLL")
+endfunction()
+
 # T3.1 音频：FFmpeg 解码 + WASAPI shared mode，不依赖 Qt，便于单测。
 add_library(lapian_audio STATIC
   audio/AudioDecoder.cpp
@@ -194,12 +219,14 @@ add_library(lapian_audio STATIC
   audio/WaveformData.h
   audio/WaveformGenerator.cpp
   audio/WaveformGenerator.h
+  audio/TimeStretch.cpp
+  audio/TimeStretch.h
   audio/WasapiRenderer.cpp
   audio/WasapiRenderer.h)
 lapian_apply_common_options(lapian_audio)
 target_include_directories(lapian_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # T8.6：AudioEngine/WaveformGenerator 增加可增长读层入口（GrowingFormat）。
-target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt)
+target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt soundtouch)
 
 # UI v2 壳层（2026-10-26，3A；3D 起是唯一布局）：Tokens/Theme/PlayerShell/
 # PlayerSplitter/TopBar/BannerSlot/StageStack/TransportBar。
@@ -306,6 +333,7 @@ if(MSVC)
 endif()
 
 lapian_copy_ffmpeg_dlls(lapian)
+lapian_copy_soundtouch_dll(lapian)
 lapian_set_output_dir(lapian)
 
 # 环境自检（控制台）：Qt/FFmpeg/D3D11 版本与可用性，构建脚本据此判定
@@ -348,6 +376,7 @@ add_executable(lapian_audio_probe
 lapian_apply_common_options(lapian_audio_probe)
 target_link_libraries(lapian_audio_probe PRIVATE lapian_audio)
 lapian_copy_ffmpeg_dlls(lapian_audio_probe)
+lapian_copy_soundtouch_dll(lapian_audio_probe)
 lapian_set_output_dir(lapian_audio_probe)
 
 # T3.5 波形生成探针（控制台；打印生成耗时/bucket 数，不入分发）
@@ -356,6 +385,7 @@ add_executable(lapian_waveform_probe
 lapian_apply_common_options(lapian_waveform_probe)
 target_link_libraries(lapian_waveform_probe PRIVATE lapian_audio)
 lapian_copy_ffmpeg_dlls(lapian_waveform_probe)
+lapian_copy_soundtouch_dll(lapian_waveform_probe)
 lapian_set_output_dir(lapian_waveform_probe)
 
 # T8.10 DASH 双输入 spike（开发工具；不入分发）：总字节/init-index/双容器/
@@ -365,4 +395,5 @@ add_executable(lapian_dash_spike
 lapian_apply_common_options(lapian_dash_spike)
 target_link_libraries(lapian_dash_spike PRIVATE lapian_media lapian_audio)
 lapian_copy_ffmpeg_dlls(lapian_dash_spike)
+lapian_copy_soundtouch_dll(lapian_dash_spike)
 lapian_set_output_dir(lapian_dash_spike)

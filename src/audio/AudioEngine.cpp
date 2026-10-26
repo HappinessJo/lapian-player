@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <string>
@@ -25,6 +26,7 @@
 
 #include "audio/AudioDecoder.h"
 #include "audio/AudioFormat.h"
+#include "audio/TimeStretch.h"
 #include "audio/WasapiRenderer.h"
 #include "online/GrowingSource.h"
 
@@ -52,6 +54,13 @@ void AudioLog(const char* format, ...) {
   va_end(args);
   std::fputc('\n', stderr);
   std::fflush(stderr);
+}
+
+// Hidden diagnostic/rollback switch: LAPIAN_PITCH_PRESERVE=0 forces the
+// legacy resampling path (pitch changes with speed).
+bool PitchPreserveFromEnv() {
+  const char* value = std::getenv("LAPIAN_PITCH_PRESERVE");
+  return value == nullptr || std::strcmp(value, "0") != 0;
 }
 
 }  // namespace
@@ -88,6 +97,11 @@ struct AudioEngine::Impl {
   AudioDecoder decoder;
   WasapiRenderer renderer;
   AudioRingBuffer ring;
+  TimeStretch stretch;
+  bool stretch_active = false;
+  bool stretch_flushed = false;
+  bool pitch_preserve = PitchPreserveFromEnv();
+  std::vector<float> stretch_scratch;
   std::vector<float> scratch;
   std::vector<float> last_frame;
   std::size_t fade_in_remaining = 0;
@@ -113,12 +127,22 @@ struct AudioEngine::Impl {
   int sample_rate() const { return renderer.device_info().format.sample_rate; }
   int channels() const { return renderer.device_info().format.channels; }
 
-  // 为了“音高随速度变化”，把源重采样到 device_rate / rate：
-  // 2x -> 24k 输出、设备 48k 播放 -> 时长减半、音高升高；0.25x 反之。
+  // 0.5-2x: keep the device rate and time-stretch (pitch preserved).
+  // 1x / 0.25x / fallback: legacy resampling device_rate / rate (pitch follows
+  // speed). 0.25x intentionally keeps the old behavior.
+  bool UseStretch() const {
+    // 1x is a pure bypass: no SoundTouch work, no extra CPU.
+    return pitch_preserve && rate >= 0.5 - 1e-9 &&
+           std::abs(rate - 1.0) > 1e-6;
+  }
+
   int OutputSampleRate() const {
     const int device_rate = sample_rate();
     if (device_rate <= 0) {
       return 0;
+    }
+    if (UseStretch()) {
+      return device_rate;
     }
     const double divisor = rate > 0.0 ? rate : 1.0;
     return std::max(1, static_cast<int>(std::lround(
@@ -166,13 +190,31 @@ struct AudioEngine::Impl {
       return false;
     }
     rate = requested_rate.load();
+    stretch_active = UseStretch();
     AudioFormat output = format;
     output.sample_rate = OutputSampleRate();
-    AudioLog("audio device: %d Hz %d ch %s buffer=%u clock_freq=%llu", format.sample_rate,
+    if (stretch_active) {
+      std::string stretch_error;
+      if (!stretch.Reset(format.sample_rate, format.channels, rate,
+                         &stretch_error)) {
+        AudioLog("audio pitch-preserve unavailable: %s; using legacy resampling",
+                 stretch_error.c_str());
+        pitch_preserve = false;
+        stretch_active = false;
+        output.sample_rate = OutputSampleRate();
+      }
+    }
+    if (!stretch_active) {
+      stretch.Clear();
+    }
+    stretch_scratch.resize(kDecodeChunkFrames * 4 *
+                           static_cast<std::size_t>(format.channels));
+    AudioLog("audio device: %d Hz %d ch %s buffer=%u clock_freq=%llu pitch_preserve=%d stretch=%d", format.sample_rate,
              format.channels,
              format.encoding == SampleEncoding::kFloat32 ? "float32" : "pcm16",
              renderer.device_info().buffer_frames,
-             static_cast<unsigned long long>(renderer.device_info().clock_frequency));
+             static_cast<unsigned long long>(renderer.device_info().clock_frequency),
+             pitch_preserve ? 1 : 0, stretch_active ? 1 : 0);
 
     ring.Reset(static_cast<std::size_t>(format.sample_rate) *
                    static_cast<std::size_t>(kMaxBufferMs) / 1000,
@@ -209,10 +251,58 @@ struct AudioEngine::Impl {
     return true;
   }
 
+  void DrainStretchToRing() {
+    if (!stretch_active) {
+      return;
+    }
+    while (ring.free_frames() > 0) {
+      const std::size_t want =
+          std::min<std::size_t>(ring.free_frames(), kDecodeChunkFrames * 4);
+      const std::size_t got = stretch.Receive(stretch_scratch.data(), want);
+      if (got == 0) {
+        break;
+      }
+      ring.Push(stretch_scratch.data(), got);
+    }
+  }
+
   bool FillTo(std::size_t target_frames, std::string* error) {
     if (!decoder.IsOpen()) {
       *error = "音频解码器未打开";
       return false;
+    }
+    if (stretch_active) {
+      DrainStretchToRing();
+      while (ring.size_frames() < target_frames &&
+             ring.free_frames() >= kDecodeChunkFrames) {
+        if (decoder_eof) {
+          if (!stretch_flushed) {
+            stretch.Flush();
+            stretch_flushed = true;
+          }
+          const std::size_t before = ring.size_frames();
+          DrainStretchToRing();
+          if (ring.size_frames() == before) {
+            break;
+          }
+          continue;
+        }
+        AudioChunk chunk;
+        const AudioDecodeResult result =
+            decoder.DecodeChunk(kDecodeChunkFrames, &chunk, error);
+        if (result == AudioDecodeResult::kEnd) {
+          decoder_eof = true;
+          continue;
+        }
+        if (result == AudioDecodeResult::kError) {
+          return false;
+        }
+        if (chunk.frames > 0) {
+          stretch.Feed(chunk.samples.data(), chunk.frames);
+        }
+        DrainStretchToRing();
+      }
+      return true;
     }
     while (!decoder_eof && ring.size_frames() < target_frames &&
            ring.free_frames() >= kDecodeChunkFrames) {
@@ -389,6 +479,9 @@ struct AudioEngine::Impl {
       renderer.Reset();
     }
     ring.Clear();
+    stretch.Clear();
+    stretch_active = false;
+    stretch_flushed = false;
     decoder_eof = false;
     playing = false;
     fade_in_remaining = 0;
@@ -425,8 +518,23 @@ struct AudioEngine::Impl {
     }
 
     std::string error;
+    stretch_active = UseStretch();
     AudioFormat output = renderer.device_info().format;
     output.sample_rate = OutputSampleRate();
+    if (stretch_active) {
+      std::string stretch_error;
+      if (!stretch.Reset(sample_rate(), channels(), rate, &stretch_error)) {
+        AudioLog("audio pitch-preserve unavailable: %s; using legacy resampling",
+                 stretch_error.c_str());
+        pitch_preserve = false;
+        stretch_active = false;
+        output.sample_rate = OutputSampleRate();
+      }
+    }
+    if (!stretch_active) {
+      stretch.Clear();
+    }
+    stretch_flushed = false;
     if (!decoder.SetOutputFormat(output, &error)) {
       want_play.store(false);
       Publish(AudioState::kError, error);
@@ -439,6 +547,7 @@ struct AudioEngine::Impl {
     }
 
     decoder_eof = false;
+    stretch_flushed = false;
     const std::size_t prefill =
         static_cast<std::size_t>(sample_rate()) * kStartPrefillMs / 1000;
     if (!FillTo(prefill, &error)) {
@@ -470,7 +579,7 @@ struct AudioEngine::Impl {
     handled_serial = serial;
     fade_in_remaining = static_cast<std::size_t>(sample_rate()) * 5 / 1000;
     last_frame.assign(static_cast<std::size_t>(channels()), 0.0f);
-    AudioLog("audio start: target=%.3fs rate=%.2fx clock=wait", target, rate);
+    AudioLog("audio start: target=%.3fs rate=%.2fx pitch_preserve=%d stretch=%d clock=wait", target, rate, pitch_preserve ? 1 : 0, stretch_active ? 1 : 0);
     Publish(AudioState::kPlaying, "播放中");
     return true;
   }
@@ -572,7 +681,7 @@ struct AudioEngine::Impl {
     const std::size_t frames = std::min(ring.size_frames(),
                                        static_cast<std::size_t>(space));
     if (frames == 0) {
-      if (decoder_eof) {
+      if (decoder_eof && (!stretch_active || stretch.Available() == 0)) {
         want_play.store(false);
         StopPlayback(false);
         Publish(AudioState::kPaused, "音频结束");

@@ -13,6 +13,7 @@
 |---|---|---|---|---|
 | Qt（Core/Gui/Widgets） | 6.8.3 | LGPL-3.0 / GPL-3.0 双许可，本项目按 LGPL-3.0 使用 | 动态链接（DLL） | `licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt` |
 | FFmpeg（avformat/avcodec/avutil/swscale/swresample） | 7.1.x（最小构建，LGPL，`--disable-gpl`） | LGPL-2.1-or-later | 动态链接（DLL） | `licenses/LGPL-2.1.txt` |
+| SoundTouch（变速音高保持） | 2.3.3 | LGPL-2.1 | 动态链接（`SoundTouch.dll`） | `licenses/SoundTouch-COPYING.txt` |
 | Visual C++ 运行库（vcruntime140、msvcp140 等） | VS 2022 17.14 | Microsoft 可再发行组件条款 | 动态链接 | 随安装包附微软再发行许可 |
 | qrcodegen（Project Nayuki QR-Code-generator，vendored 源码） | commit `3c6d0b3`（2026-08-31） | MIT | 静态编译进主程序（无新增 DLL） | `licenses/qrcodegen.txt` |
 
@@ -38,7 +39,7 @@ Inno 生成的卸载器位于 `{app}` 外的独立目录，其二进制静态导
 
 ## 合规要点
 
-1. **动态链接**：Qt 与 FFmpeg 均以 DLL 形式随包分发，用户可用自己的同名 DLL 替换；
+1. **动态链接**：Qt、FFmpeg 与 SoundTouch 均以 DLL 形式随包分发，用户可用自己的同名 DLL 替换；
    安装包不包含静态库。
 2. **无 GPL 污染**：FFmpeg 最小构建不启用 `--enable-gpl`、`--enable-nonfree`；
    不链接 libx264 等 GPL 组件。打开文件只用 file 协议。qrcodegen 为 MIT，

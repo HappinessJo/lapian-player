@@ -106,6 +106,7 @@ $versionQuad = Get-VersionQuad $Version
 Write-Host '=== 2/5 校验 dist 与许可文本 ==='
 $requiredFiles = @(
   'lapian.exe', 'lapian_env_check.exe',
+  'SoundTouch.dll',
   'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll',
   'platforms\qwindows.dll',
   'avcodec-61.dll', 'avformat-61.dll', 'avutil-59.dll',
@@ -129,6 +130,7 @@ foreach ($dir in @('tls', 'networkinformation')) {
 
 $licenseNames = @(
   'LGPL-2.1.txt', 'LGPL-3.0.txt', 'GPL-3.0.txt',
+  'SoundTouch-COPYING.txt',
   'THIRD-PARTY-NOTICES.md', 'SOURCE-OFFER.md'
 )
 foreach ($name in $licenseNames) {

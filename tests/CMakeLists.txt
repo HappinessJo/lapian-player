@@ -358,3 +358,11 @@ add_test(NAME lapian_online_preview_test COMMAND lapian_online_preview_test)
 set_tests_properties(lapian_online_preview_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77)
+
+# T3.3b tempo change without pitch change (SoundTouch).
+add_executable(lapian_time_stretch_test time_stretch_test.cpp)
+lapian_apply_common_options(lapian_time_stretch_test)
+target_link_libraries(lapian_time_stretch_test PRIVATE lapian_audio)
+lapian_copy_ffmpeg_dlls(lapian_time_stretch_test)
+lapian_copy_soundtouch_dll(lapian_time_stretch_test)
+add_test(NAME lapian_time_stretch_test COMMAND lapian_time_stretch_test)
