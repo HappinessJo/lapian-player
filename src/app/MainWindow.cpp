@@ -2610,6 +2610,9 @@ void MainWindow::ShowOnlineDialog() {
                 request.sessdata = loaded.sessdata;
               }
               if (online_dialog_ != nullptr) {
+                // C4：用户点确认后、关对话框前先预热画面页——这一步就是原来
+                // 压在 “online_ready” 之后的 145–200ms D3D11 惰性初始化。
+                PrewarmOnlineVideoStage();
                 online_dialog_->hide();
               }
               BeginOnlineRequest(request);
@@ -3239,6 +3242,39 @@ void MainWindow::SetCacheMaintenanceEnabledForTest(bool enabled) {
   }
 }
 
+qint64 MainWindow::PrewarmOnlineVideoStage() {
+  // C4：把“首次显示画面页”的 D3D11 惰性初始化提前付掉。顺序与
+  // ApplyOnlineReady/OpenLocalMedia 一致：先 ShowVideo()（GfxWidget showEvent →
+  // EnsureReady 建设备），再 d3d_device() 兜底；不打开媒体、不读缓存。
+  QElapsedTimer timer;
+  timer.start();
+  const bool stage_was_video =
+      stage_stack_ != nullptr &&
+      stage_stack_->page() == StageStack::Page::kVideo;
+  media_open_requested_ = true;
+  if (stage_stack_ != nullptr) {
+    stage_stack_->ShowVideo();
+  }
+  if (gfx_ != nullptr) {
+    gfx_->d3d_device();
+  }
+  if (!stage_was_video) {
+    // 预热替用户把画面页从空态切走了；Start 同步失败时要还回去。
+    online_prewarm_switched_stage_ = true;
+  }
+  online_prewarm_stage_ms_ = timer.elapsed();
+  if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
+    std::fprintf(stderr, "online_prewarm_stage_ms=%lld first=%d stage=%s\n",
+                 static_cast<long long>(online_prewarm_stage_ms_),
+                 stage_was_video ? 0 : 1,
+                 stage_stack_ != nullptr
+                     ? stage_stack_->PageName().toUtf8().constData()
+                     : "none");
+    std::fflush(stderr);
+  }
+  return online_prewarm_stage_ms_;
+}
+
 void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   QElapsedTimer begin_timer;
   begin_timer.start();
@@ -3247,6 +3283,9 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     statusBar()->showMessage(online_last_error_, 8000);
     return;
   }
+  // C4：覆盖 CLI/测试/程序化入口（ShowOnlineDialog 的确认 lambda 已预热一次，
+  // 这里重复调用在设备已存在时只返回几条指令）。必须在 online_->Start() 之前。
+  PrewarmOnlineVideoStage();
   // P0：新会话/切档不继承上一会话的待播意图。
   online_pending_play_ = false;
   ClearOnlineQualitySwitch();
@@ -3332,6 +3371,13 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     lapian::online::ClearSecret(&online_request_.sessdata);
     online_request_ = lapian::app::OnlineRequest{};
     online_actual_fps_ = 0.0;
+    if (online_prewarm_switched_stage_ && !online_ready_ &&
+        stage_stack_ != nullptr) {
+      // C4：预热已经把画面页从空态切到视频页（黑）；Start 同步失败时恢复空态
+      // 卡片，错误仍由下方横幅/状态栏给出（与预热前观感一致）。
+      stage_stack_->ShowEmpty();
+      online_prewarm_switched_stage_ = false;
+    }
     if (shell_ != nullptr && shell_->banner() != nullptr) {
       shell_->banner()->SetError(online_last_error_);
     }
@@ -3354,14 +3400,18 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   QElapsedTimer stage_timer;
   stage_timer.start();
   media_open_requested_ = true;
+  // C4：真正有画面了，预热时“替用户切走空态”的记账作废。
+  online_prewarm_switched_stage_ = false;
   if (stage_stack_ != nullptr) {
     stage_stack_->ShowVideo();
   }
   if (qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG")) {
     // 首次真正显示画面页会触发 GfxWidget 的 D3D11 惰性初始化（d3d_init_at_startup=0）；
-    // 这里只记录耗时，用于区分“打开成本”和“拖动预览成本”。
-    std::fprintf(stderr, "T8.9 online_ready stage_show_ms=%lld\n",
-                 static_cast<long long>(stage_timer.elapsed()));
+    // 这里只记录耗时，用于区分“打开成本”和“拖动预览成本”。C4 预热后应接近 0。
+    std::fprintf(stderr,
+                 "T8.9 online_ready stage_show_ms=%lld prewarm_stage_ms=%lld\n",
+                 static_cast<long long>(stage_timer.elapsed()),
+                 static_cast<long long>(online_prewarm_stage_ms_));
     std::fflush(stderr);
   }
   // T8.9 诊断：记录首帧就绪路径的分段耗时（只在 LAPIAN_ONLINE_LOG 下打印）。

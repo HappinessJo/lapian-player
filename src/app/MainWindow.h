@@ -715,6 +715,11 @@ class MainWindow : public QMainWindow {
   bool CurrentOnlineCacheKey(lapian::online::CacheKey* key) const;
   QString OnlineRecordsRoot() const;
   void BeginOnlineRequest(const lapian::app::OnlineRequest& request);
+  // C4 打开预热：`d3d_init_at_startup=0` 时第一次真正显示画面页会触发 GfxWidget
+  // 的 D3D11 惰性初始化（本机 145–200ms）。在线打开前先把这笔一次性成本付在
+  // “用户刚点确认/正在解析”的等待窗口里：只切画面页 + 取设备，不打开媒体、
+  // 不读缓存。重复调用在设备已存在时只返回；空态/本地打开绝不调用。
+  qint64 PrewarmOnlineVideoStage();
   bool ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info);
   bool ApplyOnlineCacheHit(const lapian::app::OnlineReadyInfo& info);
   // T8.9：档位目录回调 → 档位按钮/菜单；失败不影响播放。
@@ -1063,6 +1068,10 @@ class MainWindow : public QMainWindow {
   bool online_ready_ = false;
   bool online_finalized_ = false;
   bool online_cache_hit_ = false;
+  // C4 打开预热：最近一次预热耗时（-1 = 未预热）；以及“预热是否替用户把画面页
+  // 从空态切走”，Start 同步失败时用它恢复空态卡片（错误横幅/状态照旧）。
+  qint64 online_prewarm_stage_ms_ = -1;
+  bool online_prewarm_switched_stage_ = false;
   bool online_dash_enabled_ = true;
   QString online_cache_path_;
   QString online_owner_;
