@@ -111,6 +111,20 @@ int main(int argc, char** argv) {
   source->Publish(static_cast<std::int64_t>(file_size));
 
   lapian::media::OnlinePreviewDecoder preview;
+  // D2：默认配置必须与旧编译期常量一致（1024 / 64MiB）；旧调用方不 Configure
+  // 也保持原行为。这里显式 Configure 同一份配置，作为旧档兼容用例。
+  Check(preview.config().max_side == 1024, "默认预览长边 1024");
+  Check(preview.config().cache_budget_bytes == 64u * 1024u * 1024u,
+        "默认缓存预算 64MiB");
+  const int default_frame_limit = preview.cached_frame_limit();
+  std::printf("[perf] online_preview_default_frames=%d\n", default_frame_limit);
+  Check(default_frame_limit >= 72 && default_frame_limit <= 76,
+        "默认缓存帧上限约 72–76（64MiB/1024x576）");
+  lapian::media::OnlinePreviewDecoder::Config legacy_config;
+  legacy_config.max_side = 1024;
+  legacy_config.cache_budget_bytes = 64u * 1024u * 1024u;
+  Check(preview.Configure(legacy_config), "Begin 前 Configure 旧 64MiB 档返回 true");
+  Check(preview.config() == legacy_config, "config() 等于显式配置");
   // baseline=599：起点目标 600 比显示帧新一帧，可正常取到。
   preview.Begin(source, path, stream_index, index, 600, true, 599);
   const auto open_start = std::chrono::steady_clock::now();
@@ -135,6 +149,15 @@ int main(int argc, char** argv) {
     preview.Close();
     return 1;
   }
+  // D2：Begin 之后 Configure 必须被拒绝，且已生效配置不变（不热切换）。
+  {
+    lapian::media::OnlinePreviewDecoder::Config too_late;
+    too_late.max_side = 1920;
+    too_late.cache_budget_bytes = 512u * 1024u * 1024u;
+    Check(!preview.Configure(too_late), "Begin 后 Configure 返回 false");
+    Check(preview.config() == legacy_config,
+          "Begin 后 Configure 不改变已生效配置");
+  }
 
   preview.UpdateTarget(600, true);
   lapian::media::PreviewFrame first = PollTarget(&preview, 600, 3000);  Check(first.frame != nullptr, "起点目标帧 600 能取到预览帧");
@@ -142,10 +165,12 @@ int main(int argc, char** argv) {
     const int longest = std::max(first.frame->width, first.frame->height);
     Check(first.frame->width > 0 && first.frame->height > 0 &&
               longest <= 1024,
-          "预览帧降采样到最长边 ≤1024（64MiB 预算内可缓存 72 帧）");
+          "预览帧降采样到最长边 ≤1024（默认 64MiB 档）");
     Check(first.frame_index == 600, "起点预览帧号 == 目标帧");
     av_frame_free(&first.frame);
   }
+  Check(preview.preview_width() == 1024 && preview.preview_height() == 576,
+        "默认配置缓存的预览帧为 1024x576（1080P 源降采样）");
   Check(preview.drag_stats().baseline_frame == 599,
         "Begin 记录 displayed baseline");
   Check(preview.drag_stats().last_delivered_before_resume == -1,
@@ -202,7 +227,8 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(preview.frames_published()),
               static_cast<unsigned long long>(preview.stale_dropped()));  Check(presented > 0, "正向拖动期间有预览帧发布");
   Check(fps >= 30.0, "正向拖动预览发布/取走 ≥30fps（开发机）");
-  Check(preview.cached_frames() <= 72, "缓存帧数有界（≤72）");
+  Check(preview.cached_frames() <= preview.cached_frame_limit(),
+        "缓存帧数有界（≤配置上限）");
   Check(preview.cache_bytes() <= 64u * 1024u * 1024u,
         "缓存字节数 ≤64MiB");
   Check(preview.cache_peak_bytes() <= 64u * 1024u * 1024u,
@@ -496,6 +522,128 @@ int main(int argc, char** argv) {
     broken.End();
     Check(!broken.IsThreadRunning(),
           "open 失败后 Resume/Warm/End 不崩溃且线程退出");
+  }
+
+  // D2：运行时配置矩阵（默认/1920+512MiB/1280+128MiB/非法夹取/失败回退）。
+  const auto wait_preview_ready =
+      [](lapian::media::OnlinePreviewDecoder* decoder) {
+        for (int i = 0; i < 500; ++i) {
+          if (decoder->IsReady()) {
+            return true;
+          }
+          if (!decoder->last_error().empty()) {
+            return false;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return decoder->IsReady();
+      };
+
+  // 1920 / 512MiB：1080P 源应产出 1920x1080（清晰度配置真的生效）。
+  {
+    lapian::media::OnlinePreviewDecoder large;
+    lapian::media::OnlinePreviewDecoder::Config config;
+    config.max_side = 1920;
+    config.cache_budget_bytes = 512u * 1024u * 1024u;
+    Check(large.Configure(config), "Configure(1920,512MiB) 在 Begin 前返回 true");
+    const int limit = large.cached_frame_limit();
+    std::printf("[perf] online_preview_1920_512_frames=%d\n", limit);
+    Check(limit >= 170 && limit <= 176,
+          "1920/512MiB 缓存帧上限约 170–176");
+    large.Begin(source, path, stream_index, index, 600, true, 599);
+    Check(wait_preview_ready(&large), "1920/512MiB 解码器可打开");
+    large.UpdateTarget(600, true);
+    lapian::media::PreviewFrame frame = PollTarget(&large, 600, 3000);
+    Check(frame.frame != nullptr, "1920/512MiB 目标帧可发布");
+    if (frame.frame != nullptr) {
+      Check(frame.frame->width == 1920 && frame.frame->height == 1080,
+            "1080P 源预览帧为 1920x1080");
+      av_frame_free(&frame.frame);
+    }
+    Check(large.preview_width() == 1920 && large.preview_height() == 1080,
+          "preview_width/height 报告 1920x1080");
+    Check(large.cache_bytes() <= config.cache_budget_bytes,
+          "1920/512MiB 当前缓存字节 ≤ 预算");
+    Check(large.cache_peak_bytes() <=
+              config.cache_budget_bytes + 1920u * 1080u * 3u / 2u,
+          "1920/512MiB 缓存峰值 ≤ 预算 + 一帧");
+    large.End();
+  }
+
+  // 1280 / 128MiB：帧数上限随预算/分辨率变化（约 96–100 帧）。
+  {
+    lapian::media::OnlinePreviewDecoder medium;
+    lapian::media::OnlinePreviewDecoder::Config config;
+    config.max_side = 1280;
+    config.cache_budget_bytes = 128u * 1024u * 1024u;
+    Check(medium.Configure(config), "Configure(1280,128MiB) 在 Begin 前返回 true");
+    const int limit = medium.cached_frame_limit();
+    std::printf("[perf] online_preview_1280_128_frames=%d\n", limit);
+    Check(limit >= 96 && limit <= 100,
+          "1280/128MiB 缓存帧上限约 96–100");
+    medium.Begin(source, path, stream_index, index, 600, true, 599);
+    Check(wait_preview_ready(&medium), "1280/128MiB 解码器可打开");
+    medium.UpdateTarget(600, true);
+    lapian::media::PreviewFrame frame = PollTarget(&medium, 600, 3000);
+    Check(frame.frame != nullptr, "1280/128MiB 目标帧可发布");
+    if (frame.frame != nullptr) {
+      Check(frame.frame->width == 1280 && frame.frame->height == 720,
+            "1080P 源降到 1280x720");
+      av_frame_free(&frame.frame);
+    }
+    medium.End();
+  }
+
+  // 非法配置：夹到安全下限/上限，不崩溃。
+  {
+    lapian::media::OnlinePreviewDecoder clamped;
+    lapian::media::OnlinePreviewDecoder::Config zero;
+    zero.max_side = 0;
+    zero.cache_budget_bytes = 0;
+    Check(clamped.Configure(zero), "非法 {0,0} Configure 仍返回 true（夹取）");
+    Check(clamped.config().max_side == 256, "{0,0} 长边夹到下限 256");
+    Check(clamped.config().cache_budget_bytes == 8u * 1024u * 1024u,
+          "{0,0} 缓存夹到下限 8MiB");
+
+    lapian::media::OnlinePreviewDecoder::Config huge;
+    huge.max_side = 99999;
+    huge.cache_budget_bytes = 8ull * 1024ull * 1024ull * 1024ull;
+    Check(clamped.Configure(huge), "非法 {99999,8GiB} Configure 仍返回 true");
+    Check(clamped.config().max_side == 1920, "{99999,8GiB} 长边夹到上限 1920");
+    Check(clamped.config().cache_budget_bytes == 2048u * 1024u * 1024u,
+          "{99999,8GiB} 缓存夹到上限 2048MiB");
+  }
+
+  // 分配失败回退：强制 3 次预览帧分配失败 → 先降预算 75% 重试，仍失败回退
+  // 1024/64MiB；不崩溃、不无限重试，之后仍能继续发布帧。
+  {
+    lapian::media::OnlinePreviewDecoder fallback;
+    lapian::media::OnlinePreviewDecoder::Config config;
+    config.max_side = 1920;
+    config.cache_budget_bytes = 512u * 1024u * 1024u;
+    Check(fallback.Configure(config), "回退用例 Configure(1920,512MiB)");
+    fallback.ForceAllocationFailureForTest(3);
+    fallback.Begin(source, path, stream_index, index, 600, true, 599);
+    Check(wait_preview_ready(&fallback), "回退用例解码器可打开");
+    fallback.UpdateTarget(600, true);
+    lapian::media::PreviewFrame frame = PollLatest(&fallback, 5000);
+    Check(frame.frame != nullptr, "强制分配失败后仍能发布预览帧");
+    if (frame.frame != nullptr) {
+      av_frame_free(&frame.frame);
+    }
+    Check(fallback.alloc_fallback_used(), "分配失败后 alloc_fallback_used=true");
+    Check(fallback.config().max_side == 1024 &&
+              fallback.config().cache_budget_bytes == 64u * 1024u * 1024u,
+          "分配失败回退到 1024/64MiB");
+    fallback.UpdateTarget(601, true);
+    lapian::media::PreviewFrame after = PollTarget(&fallback, 601, 3000);
+    Check(after.frame != nullptr, "回退后继续解码/发布不崩");
+    if (after.frame != nullptr) {
+      Check(after.frame->width <= 1024 && after.frame->height <= 576,
+            "回退后缓存帧回到 1024 档");
+      av_frame_free(&after.frame);
+    }
+    fallback.End();
   }
 
   if (g_failures > 0) {

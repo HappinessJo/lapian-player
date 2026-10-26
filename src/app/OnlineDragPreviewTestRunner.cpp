@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QHash>
 #include <QTimer>
 
 #include <algorithm>
@@ -51,6 +52,45 @@ double Percentile(std::vector<double> values, double fraction) {
     index = values.size() - 1;
   }
   return values[index];
+}
+
+// D2：把 MainWindow 的 `preview_config ...` 诊断行拆成 key/value；探针据此
+// 打“会话开始简表”和“拖动结束追加字段”，不另加测试专用 getter。
+QHash<QString, QString> ParsePreviewConfigTokens(const QString& line) {
+  QHash<QString, QString> tokens;
+  const QStringList parts = line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+  for (const QString& part : parts) {
+    const int equals = part.indexOf(QLatin1Char('='));
+    if (equals > 0) {
+      tokens.insert(part.left(equals), part.mid(equals + 1));
+    }
+  }
+  return tokens;
+}
+
+QString PreviewConfigStartLine(const QString& config_line) {
+  const QHash<QString, QString> tokens = ParsePreviewConfigTokens(config_line);
+  return QStringLiteral(
+             "preview_config max_side=%1 cache_mb=%2 frames=%3 "
+             "effective_cache_bytes=%4")
+      .arg(tokens.value(QStringLiteral("max_side"), QStringLiteral("0")),
+           tokens.value(QStringLiteral("cache_mb"), QStringLiteral("0")),
+           tokens.value(QStringLiteral("frames"), QStringLiteral("0")),
+           tokens.value(QStringLiteral("cache_bytes"), QStringLiteral("0")));
+}
+
+// D2：拖动结束汇总行追加的配置/峰值字段（取自动作结束时的实际解码器）。
+QString PreviewDragConfigStats(MainWindow* window) {
+  const QHash<QString, QString> tokens =
+      ParsePreviewConfigTokens(window->OnlinePreviewConfigForTest());
+  return QStringLiteral(
+             "preview_peak=%1 preview_frames=%2 preview_fallback=%3 "
+             "preview_w=%4 preview_h=%5")
+      .arg(static_cast<qulonglong>(window->OnlinePreviewCachePeakBytesForTest()))
+      .arg(window->OnlinePreviewCachedFramesForTest())
+      .arg(tokens.value(QStringLiteral("fallback"), QStringLiteral("0")),
+           tokens.value(QStringLiteral("width"), QStringLiteral("0")),
+           tokens.value(QStringLiteral("height"), QStringLiteral("0")));
 }
 
 }  // namespace
@@ -1367,6 +1407,8 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
     QCoreApplication::exit(2);
     return;
   }
+  // D2：会话就绪后的预览配置简表（拖动中不热切换）。
+  Print(PreviewConfigStartLine(window_->OnlinePreviewConfigForTest()));
   Check("online_drag_parity_growing_session",
         !window_->OnlineCacheHitForTest(),
         QStringLiteral("cache_hit=%1")
@@ -1725,7 +1767,7 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
             "forward_gap=%6 backward_gap=%7 presented_diff=%8 verdict=%9 "
             "post_b_first=%10 post_b_delivered=%11 post_b_missing=%12 "
             "post_f_first=%13 post_f_delivered=%14 post_f_missing=%15 "
-            "warm_ms=%16 seek_offset=%17")
+            "warm_ms=%16 seek_offset=%17 %18")
             .arg(checks_)
             .arg(failures_)
             .arg(QString::number(cold.first_response_ms, 'f', 2))
@@ -1743,7 +1785,8 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
             .arg(post_seek_forward.first_delivered_ms)
             .arg(post_seek_forward.max_consecutive_missing)
             .arg(post_seek_backward.warm_ms)
-            .arg(post_seek_backward.seek_offset));
+            .arg(post_seek_backward.seek_offset)
+            .arg(PreviewDragConfigStats(window_)));
   QCoreApplication::exit(failures_ == 0 ? 0 : 1);
 }
 
@@ -2040,6 +2083,8 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(window_->OnlineCacheHitForTest() ? 1 : 0)
             .arg(options_.cache_hit_only ? 1 : 0));
   Check("default_paused", !window_->IsPlayingForTest());
+  // D2：在线会话已就绪 → 打一行本次会话解析出的预览配置（拖动中不再变）。
+  Print(PreviewConfigStartLine(window_->OnlinePreviewConfigForTest()));
   if (options_.drag_wait_ms > 0) {
     // C4 诊断：打开后先空等 N 毫秒再拖（只读；不改产品行为）。波形/索引/音频
     // 线程都是打开后才启动，这里给出“等待 vs 立即拖”的同机对照数据。
@@ -2263,7 +2308,7 @@ void OnlineDragPreviewTestRunner::Run() {
                        "forward_samples=%4 backward_samples=%5 "
                        "presented_ratio=%6 forward_fps_active=%7 "
                        "backward_fps_active=%8 fps_ratio=%9 fps_floor_30=%10 "
-                       "forward_span=%11 backward_span=%12 duration_ms=%13")
+                       "forward_span=%11 backward_span=%12 duration_ms=%13 %14")
             .arg(options_.cache_hit_only ? QStringLiteral("cache_hit")
                                          : QStringLiteral("growing"))
             .arg(forward.presented)
@@ -2277,7 +2322,8 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(floor_ok ? 1 : 0)
             .arg(forward.span_frames)
             .arg(backward.span_frames)
-            .arg(options_.drag_seconds * 1000);
+            .arg(options_.drag_seconds * 1000)
+            .arg(PreviewDragConfigStats(window_));
     Check("online_drag_forward_backward_parity",
           parity_gate_window ? parity_ok : true,
           parity_gate_window
@@ -2295,6 +2341,10 @@ void OnlineDragPreviewTestRunner::Run() {
                 .arg(parity_numbers));
     }
   }
+
+  // D2：拖动结束（解码器仍在、只是 Pause）时的实际配置/峰值快照；后面的
+  // 短拖/关窗会释放解码器，不能留到最后再读。
+  const QString drag_config_stats = PreviewDragConfigStats(window_);
 
   if (!options_.cache_hit_only) {
     RunUncachedPass();
@@ -2316,11 +2366,12 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(heartbeat_max_ms_)
             .arg(heartbeat_over_200_));
   Print(QStringLiteral(
-            "online_drag_preview_result checks=%1 failures=%2 verdict=%3")
+            "online_drag_preview_result checks=%1 failures=%2 verdict=%3 %4")
             .arg(checks_)
             .arg(failures_)
             .arg(failures_ == 0 ? QStringLiteral("pass")
-                                : QStringLiteral("fail")));
+                                : QStringLiteral("fail"))
+            .arg(drag_config_stats));
   QCoreApplication::exit(failures_ == 0 ? 0 : 1);
 }
 

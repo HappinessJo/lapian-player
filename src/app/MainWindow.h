@@ -608,6 +608,9 @@ class MainWindow : public QMainWindow {
   qint64 OnlinePreviewLastSeekLandingOffsetForTest() const;
   std::uint64_t OnlinePreviewPrimedFramesForTest() const;
   bool OnlinePreviewWarmIdleForTest() const;
+  // D2：本会话实际生效的在线预览配置（max_side/cache_mb/cache_bytes/frames/
+  // fallback/最近缓存帧宽高），一行诊断字符串供探针/单测断言清晰度是否生效。
+  QString OnlinePreviewConfigForTest() const;
   void StopPreviewForTest() { StopPreview(); }
   void ResetPreviewStatsForTest();
   // 自动化模拟“物理键仍按住时收到伪 KeyRelease”；-1 走真实 GetAsyncKeyState。
@@ -790,6 +793,9 @@ class MainWindow : public QMainWindow {
   // 只显示等待，不在 UI 线程解码/等待。松手先 End 预览，再走精确 seek。
   void EnsureOnlinePreviewStarted(std::int64_t frame,
                                   bool warm_only = false);
+  // D2：在线会话就绪时解析一次预览配置（源分辨率 + 可用内存 + 设置/测试覆盖）。
+  // 只在会话就绪时调用；拖动中绝不热切换，下一次会话才重新解析。
+  void ResolveOnlinePreviewConfig();
   void MaybeRefreshOnlinePreviewIndex();
   void ApplyOnlinePreviewWaitPrompt(std::int64_t target, bool force);
   void ClearOnlinePreviewWaitPrompt();
@@ -994,6 +1000,9 @@ class MainWindow : public QMainWindow {
   QTimer* cache_fill_timer_ = nullptr;
   // T8.6.1b 在线拖动预览状态/统计（只 GUI 线程写）。
   std::int64_t online_preview_target_ = -1;
+  // D2：本会话解析出的预览配置；valid=false 时解码器用旧默认 1024/64MiB。
+  lapian::core::ResolvedPreviewConfig online_preview_config_;
+  bool online_preview_config_valid_ = false;
   std::int64_t online_preview_last_frame_ = -1;
   std::int64_t online_preview_last_pts_ = 0;
   std::size_t online_preview_index_frames_ = 0;

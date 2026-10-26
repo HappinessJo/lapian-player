@@ -22,8 +22,14 @@
 // - 工作线程不再“每个目标更新就中断 seek”：一次处理把目标 GOP 解完并写入
 //   有界缓存，目标更新只影响发布判定；下一次目标可直接命中缓存；
 // - 独立低优先级预取线程沿拖动方向预解上一 GOP，覆盖反向连续拖动；
-// - 有界缓存 ≤64MiB / ≤48 帧（1280 宽 NV12 约 1.32MiB/帧），两端都存，
-//   按距当前目标最远淘汰；End/Close 释放。
+// - 有界缓存按运行时预算（默认 64MiB / 1024 长边；D2 起可 Configure），
+//   两端都存，按距当前目标最远淘汰；End/Close 释放。
+//
+// D2（2026-10-27）运行时配置：
+// - 预览长边与缓存预算从编译期常量改为实例配置，默认仍是 1024 / 64MiB，
+//   未调用 Configure 的旧调用方行为不变；
+// - 帧数上限由预算 / 16:9 估计帧字节算出（不预分配，峰值只随实际缓存帧增长）；
+// - 分配失败先降预算到 75% 重试一次，仍失败回退 1024 / 64MiB，不崩溃、不无限重试。
 //
 // 线程/取消：
 // - 每个实例一个预览线程 + 一个预取线程；Begin 启动，End/Close 取消并 join
@@ -56,6 +62,28 @@ class OnlinePreviewDecoder {
   OnlinePreviewDecoder(const OnlinePreviewDecoder&) = delete;
   OnlinePreviewDecoder& operator=(const OnlinePreviewDecoder&) = delete;
 
+  // D2：运行时预览配置。默认值与旧编译期常量一致（1024 / 64MiB），保证
+  // 未配置的旧调用方（本地/旧测试/预热）行为不变；D3 从设置页取值。
+  struct Config {
+    int max_side = 1024;                        // 预览帧长边上限（256..1920）
+    std::size_t cache_budget_bytes = 64u << 20;  // 缓存预算（8MiB..2048MiB）
+    bool operator==(const Config&) const = default;
+  };
+  // 必须在 Begin 前调用；Begin 之后返回 false 且不改变已生效配置。
+  // 越界值被夹到 256..1920 / 8MiB..2048MiB（不崩、不拒绝）。
+  bool Configure(const Config& config);
+  Config config() const;  // 实际生效（可能已被分配失败回退改写）
+  // 由 cache_budget_bytes / 16:9 估计帧字节算出的帧数上限（至少 8）。
+  // 只是上限，不做预分配；缓存峰值只随实际缓存帧增长。
+  int cached_frame_limit() const;
+  // 最近发布或缓存帧的实际宽高（NV12，无则 0）。
+  int preview_width() const;
+  int preview_height() const;
+  // 是否触发过降预算/降分辨率回退（分配失败路径）。
+  bool alloc_fallback_used() const;
+  // 仅测试：让接下来 n 次预览帧分配强制失败，用来验证回退路径。
+  void ForceAllocationFailureForTest(int n);
+
   // source/part_path 必须对应同一个 `.part`；index 是稳定的只读快照。
   // 调用后立即返回；打开/首帧在后台线程。
   // displayed_frame 是拖动开始时屏幕上真正显示的帧，用作发布基准；-1 时
@@ -82,8 +110,9 @@ class OnlinePreviewDecoder {
   void Resume(std::int64_t frame, bool cached,
               std::int64_t displayed_frame = -1);
   // 静默预热：从 frame 之前最近关键帧解到 min(last, frame+10)，只缓存
-  // [target-71, target] 区间；不发布、不改 waiting。完成后线程/decoder/reader
-  // 保持 idle，下一次 Resume 复用；Resume/End 会取消在途预热。
+  // [target-(cached_frame_limit()-1), target] 区间；不发布、不改 waiting。
+  // 完成后线程/decoder/reader 保持 idle，下一次 Resume 复用；Resume/End 会
+  // 取消在途预热。
   void Warm(std::int64_t frame);
   // 把当前显示帧（clone 后异步降采样）放进预览缓存；不发布。硬解帧跳过。
   // 线程未启动时暂存，下一次 Run 处理。

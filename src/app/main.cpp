@@ -1015,6 +1015,23 @@ int main(int argc, char* argv[]) {
     } else if (arguments[i] == QStringLiteral("--drag-backward-full")) {
       online_drag_backward_samples = -1;
       arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--preview-max-side") &&
+               i + 1 < arguments.size()) {
+      // D2（test-only）：在线预览配置覆盖，由 MainWindow 在会话就绪时读取；
+      // 不走产品设置页，也不影响本地 PreviewDecoder。
+      qputenv("LAPIAN_PREVIEW_MAX_SIDE", arguments[i + 1].toUtf8());
+      arguments.removeAt(i + 1);
+      arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--preview-cache-mb") &&
+               i + 1 < arguments.size()) {
+      qputenv("LAPIAN_PREVIEW_CACHE_MB", arguments[i + 1].toUtf8());
+      arguments.removeAt(i + 1);
+      arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--preview-resolution") &&
+               i + 1 < arguments.size()) {
+      qputenv("LAPIAN_PREVIEW_RESOLUTION", arguments[i + 1].toUtf8());
+      arguments.removeAt(i + 1);
+      arguments.removeAt(i);
     } else {
       ++i;
     }

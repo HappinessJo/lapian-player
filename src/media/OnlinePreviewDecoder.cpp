@@ -45,15 +45,49 @@ namespace {
 
 // 预览解码主动让出 CPU 的切片；与本地 PreviewDecoder 相同。
 constexpr auto kDecodeSlice = std::chrono::milliseconds(15);
-// 预览最长边 1024：比本地 1280 略低，但 16:9 一帧 1024x576 NV12 约 0.84MiB，
-// 72 帧约 60.7MiB；一次 60 帧来回拖动（15→75→15）可以整段留在缓存里，
-// 反向跨过缓存边界时不会重新解 27 帧造成空档。
-constexpr int kPreviewMaxSide = 1024;
+// D2：默认预览最长边 1024 / 缓存预算 64MiB（与旧编译期常量一致；未调用
+// Configure 的旧调用方行为不变）。16:9 一帧 1024x576 NV12 约 0.84MiB，
+// 默认预算按公式约 75 帧；峰值只随实际缓存帧增长，不预分配。
+constexpr int kDefaultPreviewMaxSide = 1024;
+constexpr std::size_t kDefaultCacheBudgetBytes = 64u * 1024u * 1024u;
+// D2：Configure 的硬边界（设置下限/内存 25% 夹取在 MainWindow/设置层完成，
+// 解码器只保证自身不越界）。
+constexpr int kMinPreviewMaxSide = 256;
+constexpr int kMaxPreviewMaxSide = 1920;
+constexpr std::size_t kMinCacheBudgetBytes = 8u * 1024u * 1024u;
+constexpr std::size_t kMaxCacheBudgetBytes = 2048u * 1024u * 1024u;
 // 远跳粗帧最长边 320；只用于“先出一张画面”，随后必须精确目标或更近缓存。
 constexpr int kCoarseMaxSide = 320;
-// 有界缓存：72 帧 x 1024x576 NV12 约 60.7MiB，低于 64MiB 预算。
-constexpr std::size_t kMaxCachedFrames = 72;
-constexpr std::size_t kCacheBudgetBytes = 64u * 1024u * 1024u;
+
+// D2：16:9 估计帧高（偶数）与 NV12 帧字节；只用于算帧数上限，不参与分配。
+int EstimatedFrameHeight(int max_side) {
+  int height = max_side * 9 / 16;
+  if (height < 2) {
+    height = 2;
+  }
+  if ((height & 1) != 0) {
+    ++height;
+  }
+  return height;
+}
+
+std::size_t EstimatedFrameBytes(int max_side) {
+  if (max_side <= 0) {
+    return 0;
+  }
+  return static_cast<std::size_t>(max_side) *
+         static_cast<std::size_t>(EstimatedFrameHeight(max_side)) * 3u / 2u;
+}
+
+int FrameLimitFor(int max_side, std::size_t cache_budget_bytes) {
+  const std::size_t frame_bytes = EstimatedFrameBytes(max_side);
+  if (frame_bytes == 0) {
+    return 8;
+  }
+  const std::size_t frames = cache_budget_bytes / frame_bytes;
+  return static_cast<int>(std::max<std::size_t>(8, frames));
+}
+
 // 正向连续解码窗口；目标在该窗口内直接续解，不重新 seek。
 constexpr std::int64_t kContinueWindowUs = 2'000'000;
 // 目标在解码期间回退、当前目标先命中缓存时，把当前目标之后最多 10 帧
@@ -157,6 +191,18 @@ struct OnlinePreviewDecoder::Impl {
   std::deque<CachedPreview> cache;
   std::size_t cache_bytes = 0;
   std::size_t cache_peak_bytes = 0;
+  // D2：运行时预览配置（Begin 前 Configure 生效；默认 1024/64MiB）。
+  int max_side = kDefaultPreviewMaxSide;
+  std::size_t cache_budget_bytes = kDefaultCacheBudgetBytes;
+  bool begin_called = false;
+  // 最近发布/缓存帧的实际尺寸（NV12），供探针证明清晰度配置真的生效。
+  int preview_width = 0;
+  int preview_height = 0;
+  // 分配失败回退：先降预算 75% 重试一次，仍失败回退 1024/64MiB。
+  bool alloc_fallback_used = false;
+  bool alloc_budget_shrunk = false;
+  std::uint64_t alloc_failures = 0;
+  int forced_alloc_failures = 0;
   SwsContext* sws = nullptr;
   SwsContext* coarse_sws = nullptr;
 
@@ -356,7 +402,7 @@ struct OnlinePreviewDecoder::Impl {
         av_frame_free(&frame);
         continue;
       }
-      AVFrame* preview = ScaleToNv12(frame, kPreviewMaxSide, &sws);
+      AVFrame* preview = ScalePreviewFrame(frame, &sws);
       av_frame_free(&frame);
       if (preview == nullptr) {
         continue;
@@ -376,6 +422,7 @@ struct OnlinePreviewDecoder::Impl {
   void ProcessWarm(VideoDecoder& decoder) {
     std::int64_t origin = 0;
     std::int64_t target = 0;
+    std::int64_t window = 1;
     std::uint64_t epoch = 0;
     std::shared_ptr<const FrameIndex> current_index;
     {
@@ -385,6 +432,7 @@ struct OnlinePreviewDecoder::Impl {
       }
       origin = warm_origin;
       target = warm_target;
+      window = CacheWindowLocked();
       epoch = warm_epoch;
       current_index = index;
       warming = true;
@@ -406,13 +454,13 @@ struct OnlinePreviewDecoder::Impl {
       std::lock_guard<std::mutex> lock(mutex);
       if (warm_epoch == epoch && warm_requested && position_valid &&
           last_decoded_frame >= target &&
-          RangeCachedLocked(target - 71, target)) {
+          RangeCachedLocked(target - window, target)) {
         ++warm_skipped;
         FinishWarmLocked(true);
         return;
       }
-      // 预热窗口 [target-71,target] 要完整；旧缓存若在窗口外会挤掉新帧。
-      PruneCacheOutsideLocked(target - 71, target);
+      // 预热窗口 [target-window,target] 要完整；旧缓存若在窗口外会挤掉新帧。
+      PruneCacheOutsideLocked(target - window, target);
     }
     std::string error_text;
     if (!SeekToPreviewKeyframe(decoder, *current_index, origin, &error_text,
@@ -470,9 +518,9 @@ struct OnlinePreviewDecoder::Impl {
         RecordSeekLanding(decoded_frame);
         landing_recorded = true;
       }
-      // 只对 [target-71, target] 做缩放/入缓存；更早的帧只解码不缓存。
-      if (decoded_frame >= target - 71) {
-        AVFrame* preview = ScaleToNv12(info.av_frame, kPreviewMaxSide, &sws);
+      // 只对 [target-window, target] 做缩放/入缓存；更早的帧只解码不缓存。
+      if (decoded_frame >= target - window) {
+        AVFrame* preview = ScalePreviewFrame(info.av_frame, &sws);
         if (preview != nullptr) {
           std::lock_guard<std::mutex> lock(mutex);
           if (stop || !warm_requested || warm_epoch != epoch) {
@@ -523,7 +571,7 @@ struct OnlinePreviewDecoder::Impl {
     cache_bytes = 0;
   }
 
-  // 预热前清掉窗口外的旧帧，保证 72 帧预算全部留给 [from,to]。
+  // 预热前清掉窗口外的旧帧，保证整个缓存窗口预算全部留给 [from,to]。
   void PruneCacheOutsideLocked(std::int64_t from, std::int64_t to) {
     for (auto it = cache.begin(); it != cache.end();) {
       const bool outside = it->frame_index >= 0 &&
@@ -553,10 +601,68 @@ struct OnlinePreviewDecoder::Impl {
     cache_peak_bytes = std::max(cache_peak_bytes, cache_bytes);
   }
 
+  int CachedFrameLimitLocked() const {
+    return FrameLimitFor(max_side, cache_budget_bytes);
+  }
+
+  // 预热窗口宽度：缓存上限 - 1（旧实现写死 71）。
+  std::int64_t CacheWindowLocked() const {
+    return static_cast<std::int64_t>(
+               std::max(1, CachedFrameLimitLocked() - 1));
+  }
+
+  // D2：分配失败回退（调用方持锁）。首次失败把预算降到 75% 并允许重试一次；
+  // 再次失败回退到 1024 / 64MiB（旧默认）。已处于回退值时不重复降级，只计数，
+  // 避免无限重试/反复抖动。降低预算后立即按当前目标淘汰超限帧。
+  void NoteAllocationFailureLocked() {
+    ++alloc_failures;
+    const bool at_fallback = max_side <= kDefaultPreviewMaxSide &&
+                             cache_budget_bytes <= kDefaultCacheBudgetBytes;
+    if (!at_fallback && !alloc_budget_shrunk) {
+      alloc_budget_shrunk = true;
+      alloc_fallback_used = true;
+      const std::size_t shrunk = cache_budget_bytes * 3u / 4u;
+      cache_budget_bytes = std::max(kMinCacheBudgetBytes, shrunk);
+    } else if (!at_fallback) {
+      alloc_fallback_used = true;
+      max_side = kDefaultPreviewMaxSide;
+      cache_budget_bytes = kDefaultCacheBudgetBytes;
+    }
+    EvictCacheLocked(target_frame);
+  }
+
+  // D2：预览帧降采样 + 失败回退。每次分配最多两次尝试（失败后配置已降级再试），
+  // 返回 nullptr 表示本次帧放弃；调用方按“跳过该帧”处理，不升级成预览不可用。
+  AVFrame* ScalePreviewFrame(const AVFrame* source_frame, SwsContext** context) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      int side = kDefaultPreviewMaxSide;
+      bool forced = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        side = max_side;
+        if (forced_alloc_failures > 0) {
+          --forced_alloc_failures;
+          forced = true;
+        }
+      }
+      AVFrame* frame =
+          forced ? nullptr : ScaleToNv12(source_frame, side, context);
+      if (frame != nullptr) {
+        return frame;
+      }
+      std::lock_guard<std::mutex> lock(mutex);
+      NoteAllocationFailureLocked();
+    }
+    return nullptr;
+  }
+
   // 按“距当前目标最远”淘汰，保证目标两侧都留帧（+-1 振荡/反向都靠缓存）。
+  // D2：两个上限都来自运行时配置（帧数由预算/估计帧字节算出）。
   void EvictCacheLocked(std::int64_t anchor) {
+    const std::size_t frame_limit =
+        static_cast<std::size_t>(CachedFrameLimitLocked());
     while (!cache.empty() &&
-           (cache.size() > kMaxCachedFrames || cache_bytes > kCacheBudgetBytes)) {
+           (cache.size() > frame_limit || cache_bytes > cache_budget_bytes)) {
       std::size_t victim = cache.size();
       std::int64_t victim_distance = -1;
       for (std::size_t i = 0; i < cache.size(); ++i) {
@@ -589,6 +695,11 @@ struct OnlinePreviewDecoder::Impl {
         av_frame_free(&frame);
       }
       return;
+    }
+    // D2：记录实际缓存帧尺寸（配置真的落到 NV12 帧上的证据）。
+    if (frame->width > 0 && frame->height > 0) {
+      preview_width = frame->width;
+      preview_height = frame->height;
     }
     for (CachedPreview& cached : cache) {
       if (cached.frame_index == frame_index) {
@@ -918,6 +1029,10 @@ struct OnlinePreviewDecoder::Impl {
         av_frame_free(&copy);
         return;
       }
+      if (publish && copy == nullptr) {
+        // D2：发布用 clone 失败也计入分配失败回退（缓存帧本身不丢）。
+        NoteAllocationFailureLocked();
+      }
       CacheFrameLocked(preview, pts_us, frame_index, target_frame);
     }
     if (copy != nullptr) {
@@ -1083,12 +1198,25 @@ struct OnlinePreviewDecoder::Impl {
         // P0：首个解码帧相对请求关键帧的偏差（负=落到更早 GOP）。
         RecordSeekLanding(decoded_frame);
       }
-      AVFrame* preview = ScaleToNv12(info.av_frame, kPreviewMaxSide, &sws);
+      AVFrame* preview = ScalePreviewFrame(info.av_frame, &sws);
       if (preview == nullptr) {
-        if (error_text != nullptr) {
-          *error_text = "在线预览帧降采样失败";
+        // D2：分配失败已在 ScalePreviewFrame 里降预算/回退（有界、最多两次
+        // 尝试）；不把一次分配失败升级成“预览不可用”，跳过该帧继续。若已解到
+        // 进入时的目标则交回 worker，避免在同一目标上空转。
+        if (pursue_pts <= info.pts_us) {
+          return true;
         }
-        return false;
+        if (++guard > 100000) {
+          if (error_text != nullptr) {
+            *error_text = "在线预览帧分配持续失败";
+          }
+          return false;
+        }
+        if (std::chrono::steady_clock::now() - slice_start > kDecodeSlice) {
+          slice_start = std::chrono::steady_clock::now();
+          std::this_thread::yield();
+        }
+        continue;
       }
       // 远跳：seek 后第一帧先出粗帧，保证“先有画面”；精确目标随后继续。
       if (seeked && !coarse_sent && far_jump) {
@@ -1444,8 +1572,7 @@ struct OnlinePreviewDecoder::Impl {
         if (decoded_frame > request_to) {
           break;
         }
-        AVFrame* preview =
-            ScaleToNv12(info.av_frame, kPreviewMaxSide, &prefetch_sws);
+        AVFrame* preview = ScalePreviewFrame(info.av_frame, &prefetch_sws);
         if (preview == nullptr) {
           continue;
         }
@@ -1708,6 +1835,54 @@ OnlinePreviewDecoder::OnlinePreviewDecoder() : impl_(std::make_unique<Impl>()) {
 
 OnlinePreviewDecoder::~OnlinePreviewDecoder() = default;
 
+bool OnlinePreviewDecoder::Configure(const Config& config) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  // Begin 之后配置已随缓存/线程生效，热切换会让已有缓存帧尺寸与预算/窗口
+  // 语义不一致；按要求拒绝且不改动已生效配置。
+  if (impl_->begin_called) {
+    return false;
+  }
+  impl_->max_side = std::clamp(config.max_side, kMinPreviewMaxSide,
+                               kMaxPreviewMaxSide);
+  impl_->cache_budget_bytes =
+      std::clamp<std::size_t>(config.cache_budget_bytes, kMinCacheBudgetBytes,
+                              kMaxCacheBudgetBytes);
+  return true;
+}
+
+OnlinePreviewDecoder::Config OnlinePreviewDecoder::config() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Config config;
+  config.max_side = impl_->max_side;
+  config.cache_budget_bytes = impl_->cache_budget_bytes;
+  return config;
+}
+
+int OnlinePreviewDecoder::cached_frame_limit() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->CachedFrameLimitLocked();
+}
+
+int OnlinePreviewDecoder::preview_width() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->preview_width;
+}
+
+int OnlinePreviewDecoder::preview_height() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->preview_height;
+}
+
+bool OnlinePreviewDecoder::alloc_fallback_used() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->alloc_fallback_used;
+}
+
+void OnlinePreviewDecoder::ForceAllocationFailureForTest(int n) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->forced_alloc_failures = std::max(0, n);
+}
+
 void OnlinePreviewDecoder::Begin(
     std::shared_ptr<lapian::online::GrowingSource> source,
     const std::string& part_path_utf8, int video_stream_index,
@@ -1733,6 +1908,7 @@ void OnlinePreviewDecoder::Begin(
           : (initial_frame >= 0 ? initial_frame : 0);
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->begin_called = true;
     impl_->source = std::move(source);
     impl_->path = part_path_utf8;
     impl_->stream_index = video_stream_index;
@@ -1764,6 +1940,9 @@ void OnlinePreviewDecoder::Begin(
     impl_->decoded_frames = 0;
     impl_->cache_bytes = 0;
     impl_->cache_peak_bytes = 0;
+    // 新会话：帧尺寸证据从 0 开始（配置/预算保留，不清回退记录）。
+    impl_->preview_width = 0;
+    impl_->preview_height = 0;
     impl_->last_published_frame = -1;
     // P0 度量：Begin 记录覆盖前旧值与本拖动 baseline（只读统计）。
     impl_->ResetDragStatsLocked();
@@ -1972,9 +2151,10 @@ void OnlinePreviewDecoder::Warm(std::int64_t frame) {
     impl_->warm_started = true;
     impl_->warm_ms = -1;
     impl_->warm_frames = 0;
+    const std::int64_t window = impl_->CacheWindowLocked();
     // 已有缓存窗口且解码位置已到 target：直接 idle，不重复解码。
     if (impl_->position_valid && impl_->last_decoded_frame >= target &&
-        impl_->RangeCachedLocked(target - 71, target)) {
+        impl_->RangeCachedLocked(target - window, target)) {
       ++impl_->warm_skipped;
       impl_->warm_requested = false;
       impl_->warming = false;

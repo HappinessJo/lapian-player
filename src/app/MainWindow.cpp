@@ -2434,6 +2434,7 @@ void MainWindow::ShowEmptyState() {
   }
   online_mode_ = false;
   online_ready_ = false;
+  online_preview_config_valid_ = false;
   online_cache_hit_ = false;
   online_cache_path_.clear();
   // T7.1：空态/切文件前停止后台索引，避免旧结果装到空会话上。
@@ -3305,6 +3306,8 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
   }
   online_mode_ = true;
   online_ready_ = false;
+  // D2：新会话重新解析预览配置；旧会话的 1920/512 等值不能泄漏到本次。
+  online_preview_config_valid_ = false;
   online_finalized_ = false;
   online_cache_hit_ = false;
   online_cache_path_.clear();
@@ -3567,6 +3570,8 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   }
   current_frame_ = 0;
   online_ready_ = true;
+  // D2：会话就绪时解析一次预览配置（源分辨率/可用内存）；拖动只用这次结果。
+  ResolveOnlinePreviewConfig();
   online_cache_hit_ = info.cache_hit;
   if (info.cache_hit) {
     online_cache_path_ = info.cache_mp4_path;
@@ -3859,6 +3864,9 @@ bool MainWindow::ApplyOnlineCacheHit(
     }
   }
   TryApplyPendingOnlineQualitySwitch();
+  // D2：durl 缓存命中是本地会话（不走 OnlinePreviewDecoder），仍解析一次预览
+  // 配置供诊断；不改变本地 PreviewDecoder 路径。
+  ResolveOnlinePreviewConfig();
   return true;
 }
 
@@ -7669,6 +7677,118 @@ void MainWindow::EndScrubPreview() {
   ClearOnlinePreviewWaitPrompt();
 }
 
+void MainWindow::ResolveOnlinePreviewConfig() {
+  // D2：一次在线会话只解析一次（会话就绪时）。拖动开始/结束都不重算，
+  // 设置改动也只影响下一次在线会话（D3 负责设置 UI）。
+  online_preview_config_valid_ = false;
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return;
+  }
+  const lapian::media::MediaInfo& media = session_->info();
+  const int source_max_side = std::max(media.video.width, media.video.height);
+  int available_memory_mb = 0;
+#if defined(_WIN32)
+  MEMORYSTATUSEX memory{};
+  memory.dwLength = sizeof(memory);
+  if (GlobalMemoryStatusEx(&memory) != FALSE) {
+    const unsigned long long megabytes =
+        memory.ullAvailPhys / (1024ull * 1024ull);
+    available_memory_mb = static_cast<int>(
+        std::min<unsigned long long>(megabytes, 2147483647ull));
+  }
+#endif
+
+  lapian::core::AppSettings settings = loaded_settings_;
+  // 测试覆盖（只 test-only；产品用设置页）：非法值忽略，回退设置解析。
+  const QByteArray resolution_env =
+      qgetenv("LAPIAN_PREVIEW_RESOLUTION").trimmed().toLower();
+  if (resolution_env == QByteArrayLiteral("auto")) {
+    settings.preview_resolution = lapian::core::PreviewResolution::kAuto;
+  } else if (resolution_env == QByteArrayLiteral("1080p")) {
+    settings.preview_resolution = lapian::core::PreviewResolution::k1080p;
+  } else if (resolution_env == QByteArrayLiteral("720p")) {
+    settings.preview_resolution = lapian::core::PreviewResolution::k720p;
+  }
+
+  // --preview-max-side / --preview-cache-mb：显式覆盖绕过设置下限与可用内存
+  // 25% 夹取（否则旧 64MiB 兼容档无法复现），但仍夹到解码器硬边界。
+  bool max_side_override = false;
+  bool cache_override = false;
+  bool parse_ok = false;
+  const int env_max_side =
+      qEnvironmentVariableIntValue("LAPIAN_PREVIEW_MAX_SIDE", &parse_ok);
+  if (parse_ok && env_max_side >= 256 && env_max_side <= 1920) {
+    max_side_override = true;
+  }
+  parse_ok = false;
+  const int env_cache_mb =
+      qEnvironmentVariableIntValue("LAPIAN_PREVIEW_CACHE_MB", &parse_ok);
+  if (parse_ok && env_cache_mb >= 8 && env_cache_mb <= 2048) {
+    cache_override = true;
+    settings.preview_cache_mb = env_cache_mb;
+  }
+
+  online_preview_config_ = lapian::core::ResolvePreviewConfig(
+      settings, source_max_side, available_memory_mb);
+  if (cache_override) {
+    online_preview_config_.cache_mb = env_cache_mb;
+    online_preview_config_.cache_bytes =
+        static_cast<std::size_t>(env_cache_mb) * 1024u * 1024u;
+    online_preview_config_.cache_lifted_to_min = false;
+    online_preview_config_.cache_limited_by_memory = false;
+  }
+  if (max_side_override) {
+    online_preview_config_.max_side =
+        std::clamp(env_max_side, 256, 1920);
+  }
+  online_preview_config_.cache_bytes =
+      std::max<std::size_t>(online_preview_config_.cache_bytes,
+                            8u * 1024u * 1024u);
+  online_preview_config_valid_ = true;
+}
+
+QString MainWindow::OnlinePreviewConfigForTest() const {
+  lapian::media::OnlinePreviewDecoder::Config config;
+  if (online_preview_ != nullptr) {
+    config = online_preview_->config();
+  } else if (online_preview_config_valid_) {
+    config.max_side = online_preview_config_.max_side;
+    config.cache_budget_bytes = online_preview_config_.cache_bytes;
+  }
+  int frame_limit = 0;
+  int fallback = 0;
+  int width = 0;
+  int height = 0;
+  if (online_preview_ != nullptr) {
+    frame_limit = online_preview_->cached_frame_limit();
+    fallback = online_preview_->alloc_fallback_used() ? 1 : 0;
+    width = online_preview_->preview_width();
+    height = online_preview_->preview_height();
+  } else {
+    // 尚未创建解码器：按与 cached_frame_limit() 相同的公式给计划值（不预分配）。
+    const int frame_height = std::max(2, (config.max_side * 9 / 16 + 1) & ~1);
+    const std::size_t frame_bytes =
+        static_cast<std::size_t>(config.max_side) *
+        static_cast<std::size_t>(frame_height) * 3u / 2u;
+    frame_limit = frame_bytes == 0
+                      ? 8
+                      : static_cast<int>(std::max<std::size_t>(
+                            8, config.cache_budget_bytes / frame_bytes));
+  }
+  const qint64 cache_mb =
+      static_cast<qint64>(config.cache_budget_bytes / (1024u * 1024u));
+  return QStringLiteral(
+             "preview_config max_side=%1 cache_mb=%2 cache_bytes=%3 frames=%4 "
+             "fallback=%5 width=%6 height=%7")
+      .arg(config.max_side)
+      .arg(cache_mb)
+      .arg(static_cast<qulonglong>(config.cache_budget_bytes))
+      .arg(frame_limit)
+      .arg(fallback)
+      .arg(width)
+      .arg(height);
+}
+
 void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame,
                                             bool warm_only) {
   if (online_preview_ != nullptr || !OnlinePreviewEligibleForDrag() ||
@@ -7689,6 +7809,14 @@ void MainWindow::EnsureOnlinePreviewStarted(std::int64_t frame,
   const std::string part_path(part_utf8.constData(),
                               static_cast<std::size_t>(part_utf8.size()));
   online_preview_ = std::make_unique<lapian::media::OnlinePreviewDecoder>();
+  // D2：创建后立即按本次会话解析出的配置（分辨率/缓存）Configure，再 Begin；
+  // Begin 之后 Configure 会被拒绝，保证一次会话内不热切换。
+  if (online_preview_config_valid_) {
+    lapian::media::OnlinePreviewDecoder::Config config;
+    config.max_side = online_preview_config_.max_side;
+    config.cache_budget_bytes = online_preview_config_.cache_bytes;
+    online_preview_->Configure(config);
+  }
   online_preview_index_frames_ = snapshot->size();
   online_preview_target_ = frame;
   online_preview_error_shown_ = false;
