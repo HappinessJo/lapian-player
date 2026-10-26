@@ -30,6 +30,11 @@ struct OnlineDragPreviewTestOptions {
   // 本地 1080p 同目标序列基线（--local-drag-parity-test）。
   bool local_only = false;
   QString local_file;
+  // P0 热修探针（--scrub-space-test）：拖动松手后立刻按 Space。
+  // 在线变体（给了 bvid）验证 seek 落地后补播；本地变体只作对照。
+  bool scrub_space = false;
+  bool scrub_space_local = false;
+  int scrub_space_repeats = 20;
 };
 
 // T8.6.1b 真实窗口探针：在线增长会话拖动预览。
@@ -138,6 +143,7 @@ class OnlineDragPreviewTestRunner {
   void RunParity();
   void RunLocalParity();
   void RunOnlineParity();
+  void RunScrubSpace();
   bool EnsureLocalReady(QString* error);
   ParityResult RunParitySequence(const QString& label, qint64 start, qint64 end,
                                  int samples, int duration_ms, bool forward,

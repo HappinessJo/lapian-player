@@ -1697,7 +1697,116 @@ void OnlineDragPreviewTestRunner::RunOnlineParity() {
   QCoreApplication::exit(failures_ == 0 ? 0 : 1);
 }
 
+void OnlineDragPreviewTestRunner::RunScrubSpace() {
+  const bool local = options_.scrub_space_local;
+  Print(QStringLiteral(
+            "scrub_space_sample mode=%1 bvid=%2 cid=%3 repeats=%4 start=%5 "
+            "target=%6")
+            .arg(local ? QStringLiteral("local") : QStringLiteral("online"),
+                 options_.bvid)
+            .arg(options_.cid)
+            .arg(options_.scrub_space_repeats)
+            .arg(options_.start_frame)
+            .arg(options_.start_frame + 60));
+  window_->raise();
+  window_->activateWindow();
+  window_->FocusVideoForTest();
+
+  QString open_error;
+  const bool opened =
+      local ? EnsureLocalReady(&open_error) : OpenOnline(false, &open_error);
+  Check(local ? "scrub_space_local_open" : "scrub_space_online_open", opened,
+        open_error);
+  if (!opened) {
+    Print(QStringLiteral(
+              "scrub_space_result mode=%1 checks=%2 failures=%3 verdict=fail")
+              .arg(local ? QStringLiteral("local") : QStringLiteral("online"))
+              .arg(checks_)
+              .arg(failures_));
+    QCoreApplication::exit(2);
+    return;
+  }
+  Check("scrub_space_default_paused", !window_->IsPlayingForTest());
+  if (!local) {
+    Check("scrub_space_online_growing",
+          window_->OnlineModeForTest() && !window_->OnlineCacheHitForTest(),
+          QStringLiteral("online=%1 cache_hit=%2")
+              .arg(window_->OnlineModeForTest() ? 1 : 0)
+              .arg(window_->OnlineCacheHitForTest() ? 1 : 0));
+    const qint64 need_frame = options_.start_frame + 60;
+    const bool indexed = WaitUntil(
+        [this, need_frame]() {
+          return window_->OnlineLastFrameForTest() >= need_frame &&
+                 window_->OnlineSeekIdleForTest();
+        },
+        std::max(10000, options_.timeout_ms), "scrub_space_index");
+    Check("scrub_space_online_index", indexed,
+          QStringLiteral("last=%1 need=%2")
+              .arg(window_->OnlineLastFrameForTest())
+              .arg(need_frame));
+    if (!indexed) {
+      Print(QStringLiteral(
+                "scrub_space_result mode=online checks=%1 failures=%2 "
+                "verdict=fail")
+                .arg(checks_)
+                .arg(failures_));
+      QCoreApplication::exit(2);
+      return;
+    }
+  }
+
+  const qint64 start = options_.start_frame;
+  const qint64 target = start + 60;
+  const qint64 middle = start + 30;
+  const int repeats = std::max(1, options_.scrub_space_repeats);
+  for (int i = 0; i < repeats; ++i) {
+    // 上一轮播放先停下；等上一次异步 seek 落地，避免把两轮混在一起。
+    window_->PausePlaybackForTest();
+    WaitUntil([this]() { return window_->OnlineSeekIdleForTest(); }, 5000,
+              "scrub_space_idle_before");
+    window_->ScrubStartForTest(start);
+    Pump(40);
+    window_->ScrubTargetForTest(middle);
+    Pump(30);
+    window_->ScrubFinishForTest(target);
+    const int presented_before = window_->PresentedFrameCountForTest();
+    // 用户动作：松手后立刻 Space（不 Pump，保证落在 seek 落地之前）。
+    window_->PressSpaceKeyForTest();
+    const bool pending = window_->OnlinePendingPlayForTest();
+    Pump(1000);
+    const int presented_after = window_->PresentedFrameCountForTest();
+    const bool playing = window_->IsPlayingForTest();
+    const bool idle = window_->OnlineSeekIdleForTest();
+    const std::string suffix = std::to_string(i);
+    const QString detail =
+        QStringLiteral("iter=%1 pending=%2 presented=%3->%4 seek_idle=%5")
+            .arg(i)
+            .arg(pending ? 1 : 0)
+            .arg(presented_before)
+            .arg(presented_after)
+            .arg(idle ? 1 : 0);
+    Check((std::string("scrub_space_playing_") + suffix).c_str(), playing,
+          detail);
+    Check((std::string("scrub_space_presented_") + suffix).c_str(),
+          presented_after > presented_before, detail);
+    Check((std::string("scrub_space_seek_idle_") + suffix).c_str(), idle,
+          detail);
+  }
+  Print(QStringLiteral(
+            "scrub_space_result mode=%1 checks=%2 failures=%3 verdict=%4")
+            .arg(local ? QStringLiteral("local") : QStringLiteral("online"))
+            .arg(checks_)
+            .arg(failures_)
+            .arg(failures_ == 0 ? QStringLiteral("pass")
+                                : QStringLiteral("fail")));
+  QCoreApplication::exit(failures_ == 0 ? 0 : 1);
+}
+
 void OnlineDragPreviewTestRunner::Run() {
+  if (options_.scrub_space) {
+    RunScrubSpace();
+    return;
+  }
   if (options_.local_only) {
     RunLocalParity();
     return;

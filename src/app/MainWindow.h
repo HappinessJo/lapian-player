@@ -225,6 +225,8 @@ class MainWindow : public QMainWindow {
   bool OnlineModeForTest() const { return online_mode_; }
   qint64 OnlineStableFramesForTest() const;
   bool OnlineSeekIdleForTest() const { return !online_seek_running_; }
+  // P0 热修：在线 seek 落地前按 Space 只记“待播”，落地后由回调补 Play。
+  bool OnlinePendingPlayForTest() const { return online_pending_play_; }
   int OnlineQualityForTest() const { return online_qn_; }
   int OnlineCodecidForTest() const { return online_codecid_; }
   QString OnlinePartPathForTest() const { return online_part_path_; }
@@ -1071,6 +1073,9 @@ class MainWindow : public QMainWindow {
   std::shared_ptr<std::atomic<bool>> online_seek_cancel_;
   std::uint64_t online_seek_generation_ = 0;
   bool online_seek_running_ = false;
+  // P0 热修：在线异步 seek 落地前按 Space 的“待播”意图。SetPosition() 第一行
+  // 会 Pause()，所以不能在 seek 在途时直接 Play；落地回调补 Play 并清标记。
+  bool online_pending_play_ = false;
   bool online_session_poisoned_ = false;
   // T8.6.1a：最近一次在线 seek 目标（未落地时步进从该目标 ±1，而不是从旧画面）。
   std::int64_t online_seek_target_ = -1;

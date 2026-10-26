@@ -3046,6 +3046,8 @@ void MainWindow::BeginOnlineRequest(const lapian::app::OnlineRequest& request) {
     statusBar()->showMessage(online_last_error_, 8000);
     return;
   }
+  // P0：新会话/切档不继承上一会话的待播意图。
+  online_pending_play_ = false;
   ClearOnlineQualitySwitch();
   ShutdownOnlineSession(false);
   EnsureOnlineSession();
@@ -4331,6 +4333,8 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
       !session_->growing_source_for_index()) {
     return;
   }
+  // P0：新 seek 取代旧的待播意图（旧意图只属于被取消的那次落地）。
+  online_pending_play_ = false;
   // P0：seek 前取消延迟预热，并保证预览 reader 已关闭，不与精确 seek 抢
   // `.part`；拖动中的预览由 OnScrubFinished 负责停。
   CancelOnlinePreviewWarm();
@@ -4430,6 +4434,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                       return;
                     }
                     online_seek_running_ = false;
+                    online_pending_play_ = false;
                     online_last_error_ = result->error;
                     statusBar()->showMessage(result->error, 8000);
                     InstallPendingOnlineIndex();
@@ -4489,6 +4494,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                     return;
                   }
                   online_seek_running_ = false;
+                  online_pending_play_ = false;
                   online_session_poisoned_ = true;
                   online_last_error_ = result->error;
                   statusBar()->showMessage(
@@ -4551,6 +4557,12 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
                 timeline_->SetCurrentFrame(target);
                 if (playback_) {
                   playback_->SetPosition(target, result->info.pts_us);
+                  // P0：seek 在途时按下的 Space 在落地前只记了待播意图；
+                  // SetPosition 已 Pause，这里补 Play（只补这次，随后清标记）。
+                  if (online_pending_play_) {
+                    online_pending_play_ = false;
+                    playback_->Play();
+                  }
                 }
                 current_frame_ = target;
                 current_pts_us_ = result->info.pts_us;
@@ -4572,6 +4584,7 @@ void MainWindow::RequestOnlineSeek(std::int64_t target,
         });
   } catch (...) {
     online_seek_running_ = false;
+    online_pending_play_ = false;
     statusBar()->showMessage(QStringLiteral("在线 seek 线程启动失败"), 5000);
     InstallPendingOnlineIndex();
   }
@@ -4581,6 +4594,8 @@ void MainWindow::CancelOnlineLoading() {
   if (!online_ && !online_mode_) {
     return;
   }
+  // P0：取消在线加载后不应在旧 seek 落地时补播放。
+  online_pending_play_ = false;
   if (playback_) {
     playback_->Pause();
   }
@@ -4597,6 +4612,8 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (!online_ && !online_mode_) {
     return;
   }
+  // P0：关会话/切文件不继承待播意图。
+  online_pending_play_ = false;
   CancelOnlinePreviewWarm();
   const bool log = qEnvironmentVariableIsSet("LAPIAN_ONLINE_LOG");
   auto mark = [log](const char* step) {
@@ -6614,6 +6631,18 @@ void MainWindow::TogglePlayback() {
   if (preview_timer_ != nullptr && preview_timer_->isActive()) {
     EndScrubPreview();
   }
+  // P0（3D 热修）：在线增长会话松手后的精确 seek 是异步的，落地回调里的
+  // PlaybackController::SetPosition() 第一行会 Pause()。seek 在途时直接 Play
+  // 会被几十毫秒后的落地回调停掉（用户看到的“拖动后立刻 Space 卡住”）。
+  // 这里只记“待播”意图，由落地回调补 Play；再按一次 Space 取消待播。
+  if (online_mode_ && !online_cache_hit_ && online_seek_running_) {
+    online_pending_play_ = !online_pending_play_;
+    statusBar()->showMessage(
+        online_pending_play_ ? QStringLiteral("定位完成后开始播放")
+                             : QStringLiteral("已取消播放"),
+        2500);
+    return;
+  }
   playback_->Toggle();
 }
 
@@ -7001,6 +7030,8 @@ void MainWindow::OnScrubStarted(qint64 frame) {
   if (session_ == nullptr || !session_->IsOpen()) {
     return;
   }
+  // P0：重新拖动 = 放弃“落地后播放”的待播意图（用户已经改了目标）。
+  online_pending_play_ = false;
   CancelPendingMarkJump();
   if (playback_ != nullptr) {
     playback_->Pause();

@@ -903,6 +903,8 @@ int main(int argc, char* argv[]) {
   int online_drag_samples = 60;
   qint64 online_drag_start_frame = 15;
   bool online_drag_cache_hit = false;
+  // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
+  bool scrub_space_test = false;
   QString online_m1_bvid;
   QString online_m1_cid_text;
   QString online_m1_tag;
@@ -1313,6 +1315,15 @@ int main(int argc, char* argv[]) {
                i + 1 < arguments.size()) {
       online_quality_switch_wait_ms = arguments[++i].toInt();
     }
+  }
+
+  // P0：单独扫描（不塞进上面的 if/else-if 长链，MSVC 的块嵌套有上限）。
+  // 在线变体必须带 --bvid/--cid；只给 --file 时走本地对照路径。
+  if (arguments.contains(QStringLiteral("--scrub-space-test"))) {
+    scrub_space_test = true;
+  }
+  if (scrub_space_test && !online_m1_bvid.isEmpty()) {
+    online_drag_preview_test = true;
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
@@ -2091,7 +2102,7 @@ int main(int argc, char* argv[]) {
   // T8.6.1b：在线增长会话拖动预览（已缓存 FPS/精确落帧/未缓存提示/缓存命中）。
   std::unique_ptr<lapian::app::OnlineDragPreviewTestRunner>
       online_drag_preview_runner;
-  if (online_drag_preview_test || local_drag_parity_test) {
+  if (online_drag_preview_test || local_drag_parity_test || scrub_space_test) {
     lapian::app::OnlineDragPreviewTestOptions options;
     options.bvid = online_m1_bvid;
     options.cid = online_m1_cid;
@@ -2106,6 +2117,8 @@ int main(int argc, char* argv[]) {
     options.parity = online_drag_parity_test;
     options.local_only = local_drag_parity_test;
     options.local_file = file_path;
+    options.scrub_space = scrub_space_test;
+    options.scrub_space_local = scrub_space_test && online_m1_bvid.isEmpty();
     online_drag_preview_runner =
         std::make_unique<lapian::app::OnlineDragPreviewTestRunner>(&window,
                                                                    options);
