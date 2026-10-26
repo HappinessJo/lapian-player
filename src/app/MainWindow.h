@@ -452,6 +452,12 @@ class MainWindow : public QMainWindow {
   void RunCacheMaintenanceForTest();
   bool ApplyCacheSettingsForTest(const QString& root, int quota_gb,
                                  QString* error);
+  // D3：拖动预览设置与缓存目录/配额同一次 SettingsStore::Save 落盘；
+  // preview_* 已按 D1 纯函数修正。保存不改当前会话的预览解码器（不热切换）。
+  bool ApplyCacheSettingsForTest(
+      const QString& root, int quota_gb,
+      lapian::core::PreviewResolution preview_resolution, int preview_cache_mb,
+      QString* error);
   // P1 热修：在线会话中保存缓存目录/配额 → 两阶段（本次会话继续用旧 store，
   // idle 后由 ApplyPendingCacheStoreIfIdle() 换新 store）。
   bool CacheSettingsPendingForTest() const { return cache_settings_pending_; }
@@ -709,7 +715,12 @@ class MainWindow : public QMainWindow {
   void EnsureOnlineSession();
   void InitializeOnlineCacheStore();
   bool EnsureOnlineCacheReady(QString* error);
-  bool ApplyCacheSettings(const QString& root, int quota_gb, QString* error);
+  bool ApplyCacheSettings(const QString& root, int quota_gb,
+                          lapian::core::PreviewResolution preview_resolution,
+                          int preview_cache_mb, QString* error);
+  // D3：可用物理内存（MB，0=未知）。预览缓存 25% 上限与设置页估算共用同一
+  // 数据源，避免两处内联 GlobalMemoryStatusEx。
+  int AvailableMemoryMbForPreview();
   // P1：只有 online_==nullptr && !online_mode_（idle）时把延迟的缓存设置换成
   // 新 CacheStore；在线/会话进行中一律不换，避免 OnlineSession 持有悬空指针
   // 或清掉正在写的 `.part`。

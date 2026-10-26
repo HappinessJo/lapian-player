@@ -1,5 +1,6 @@
 #include "app/CacheSettingsDialog.h"
 
+#include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -10,11 +11,14 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QStyle>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include "core/AppSettings.h"
@@ -36,6 +40,65 @@ void SetStateProperty(QWidget* widget, const char* state) {
   widget->setProperty("state", QString::fromLatin1(state));
   widget->style()->unpolish(widget);
   widget->style()->polish(widget);
+}
+
+// D3：缓存挡位下拉的 itemData（顺序与文案固定，见计划 §3.3）。
+enum class PreviewPreset : int {
+  kLowMemory = 0,    // 省内存（720P / 128MiB）
+  kBalanced = 1,     // 均衡（1080P / 256MiB）
+  kRecommended = 2,  // 推荐（1080P / 512MiB）
+  kLong = 3,         // 长拖（1080P / 1GiB）
+  kCustom = 4,       // 高级自定义（不改分辨率）
+};
+
+// 16:9 估计帧高（偶数，与 OnlinePreviewDecoder 的估算一致）。
+int PreviewFrameHeightForMaxSide(int max_side) {
+  return std::max(2, (max_side * 9 / 16 + 1) & ~1);
+}
+
+// 分辨率标签：1920→1080P、1280→720P，其它按高度 <h>P（计划 §3.3）。
+QString PreviewMaxSideLabel(int max_side) {
+  if (max_side == 1920) {
+    return QStringLiteral("1080P");
+  }
+  if (max_side == 1280) {
+    return QStringLiteral("720P");
+  }
+  return QStringLiteral("%1P").arg(PreviewFrameHeightForMaxSide(max_side));
+}
+
+QString PreviewResolutionLabel(lapian::core::PreviewResolution resolution) {
+  switch (resolution) {
+    case lapian::core::PreviewResolution::k1080p:
+      return QStringLiteral("1080P");
+    case lapian::core::PreviewResolution::k720p:
+      return QStringLiteral("720P");
+    case lapian::core::PreviewResolution::kAuto:
+    default:
+      return QStringLiteral("自动");
+  }
+}
+
+// (分辨率, 缓存) → 挡位：只有完全匹配预设才算预设档，否则显示高级自定义。
+PreviewPreset DerivePreviewPreset(lapian::core::PreviewResolution resolution,
+                                  int cache_mb) {
+  if (cache_mb == lapian::core::kPreviewCacheMinMb720p &&
+      resolution == lapian::core::PreviewResolution::k720p) {
+    return PreviewPreset::kLowMemory;
+  }
+  if (cache_mb == lapian::core::kPreviewCacheMinMb1080p &&
+      resolution == lapian::core::PreviewResolution::k1080p) {
+    return PreviewPreset::kBalanced;
+  }
+  if (cache_mb == lapian::core::kPreviewCacheDefaultMb &&
+      resolution == lapian::core::PreviewResolution::k1080p) {
+    return PreviewPreset::kRecommended;
+  }
+  if (cache_mb == 1024 &&
+      resolution == lapian::core::PreviewResolution::k1080p) {
+    return PreviewPreset::kLong;
+  }
+  return PreviewPreset::kCustom;
 }
 
 }  // namespace
@@ -134,6 +197,82 @@ void CacheSettingsDialog::BuildUi() {
   quota_layout->addWidget(free_label_);
   root_layout->addWidget(quota_group);
 
+  // D3：拖动预览（分辨率 + 缓存挡位 + 自定义 + 估算/修正提示）。
+  // 与缓存目录不同：在线会话中也可编辑，保存后下次在线会话生效（不热切换）。
+  auto* preview_group = new QGroupBox(QStringLiteral("拖动预览"), this);
+  auto* preview_layout = new QVBoxLayout(preview_group);
+  auto* preview_row = new QHBoxLayout();
+  auto* preview_resolution_label =
+      new QLabel(QStringLiteral("预览分辨率"), preview_group);
+  preview_resolution_combo_ = new QComboBox(preview_group);
+  preview_resolution_combo_->setObjectName(
+      QStringLiteral("previewResolutionCombo"));
+  preview_resolution_combo_->addItem(
+      QStringLiteral("自动（推荐）"),
+      static_cast<int>(lapian::core::PreviewResolution::kAuto));
+  preview_resolution_combo_->addItem(
+      QStringLiteral("1080P"),
+      static_cast<int>(lapian::core::PreviewResolution::k1080p));
+  preview_resolution_combo_->addItem(
+      QStringLiteral("720P"),
+      static_cast<int>(lapian::core::PreviewResolution::k720p));
+  auto* preview_cache_label =
+      new QLabel(QStringLiteral("预览缓存"), preview_group);
+  preview_cache_combo_ = new QComboBox(preview_group);
+  preview_cache_combo_->setObjectName(QStringLiteral("previewCacheCombo"));
+  preview_cache_combo_->addItem(
+      QStringLiteral("省内存（720P / 128MiB）"),
+      static_cast<int>(PreviewPreset::kLowMemory));
+  preview_cache_combo_->addItem(
+      QStringLiteral("均衡（1080P / 256MiB）"),
+      static_cast<int>(PreviewPreset::kBalanced));
+  preview_cache_combo_->addItem(
+      QStringLiteral("推荐（1080P / 512MiB）"),
+      static_cast<int>(PreviewPreset::kRecommended));
+  preview_cache_combo_->addItem(
+      QStringLiteral("长拖（1080P / 1GiB）"),
+      static_cast<int>(PreviewPreset::kLong));
+  preview_cache_combo_->addItem(QStringLiteral("高级自定义"),
+                                static_cast<int>(PreviewPreset::kCustom));
+  preview_row->addWidget(preview_resolution_label);
+  preview_row->addWidget(preview_resolution_combo_);
+  preview_row->addSpacing(16);
+  preview_row->addWidget(preview_cache_label);
+  preview_row->addWidget(preview_cache_combo_, 1);
+  preview_layout->addLayout(preview_row);
+
+  auto* preview_custom_row = new QHBoxLayout();
+  auto* preview_custom_label =
+      new QLabel(QStringLiteral("自定义缓存"), preview_group);
+  preview_cache_spin_ = new QSpinBox(preview_group);
+  preview_cache_spin_->setObjectName(QStringLiteral("previewCacheSpin"));
+  preview_cache_spin_->setRange(lapian::core::kPreviewCacheMinMb720p,
+                                lapian::core::kPreviewCacheMaxMb);
+  preview_cache_spin_->setSingleStep(64);
+  preview_cache_spin_->setSuffix(QStringLiteral(" MiB"));
+  preview_custom_row->addWidget(preview_custom_label);
+  preview_custom_row->addWidget(preview_cache_spin_);
+  preview_custom_row->addStretch(1);
+  preview_layout->addLayout(preview_custom_row);
+
+  auto* preview_estimate_row = new QHBoxLayout();
+  preview_estimate_label_ = new QLabel(preview_group);
+  preview_estimate_label_->setObjectName(
+      QStringLiteral("previewEstimateLabel"));
+  preview_restore_button_ =
+      new QPushButton(QStringLiteral("恢复推荐设置"), preview_group);
+  preview_restore_button_->setObjectName(
+      QStringLiteral("previewRestoreButton"));
+  preview_estimate_row->addWidget(preview_estimate_label_, 1);
+  preview_estimate_row->addWidget(preview_restore_button_);
+  preview_layout->addLayout(preview_estimate_row);
+
+  preview_hint_label_ = new QLabel(preview_group);
+  preview_hint_label_->setObjectName(QStringLiteral("previewHintLabel"));
+  preview_hint_label_->setWordWrap(true);
+  preview_layout->addWidget(preview_hint_label_);
+  root_layout->addWidget(preview_group);
+
   // 在线记录
   auto* records_group = new QGroupBox(QStringLiteral("在线记录（不随缓存清空）"), this);
   auto* records_layout = new QVBoxLayout(records_group);
@@ -192,6 +331,21 @@ void CacheSettingsDialog::BuildUi() {
   connect(save_button_, &QPushButton::clicked, this,
           [this]() { ApplyInternal(true, nullptr); });
   connect(close_button_, &QPushButton::clicked, this, &QDialog::reject);
+  // D3：拖动预览交互。预设切换同时改分辨率；分辨率切换只抬下限、不下调。
+  connect(preview_resolution_combo_, &QComboBox::currentIndexChanged, this,
+          [this](int) { OnPreviewResolutionChanged(); });
+  connect(preview_cache_combo_, &QComboBox::currentIndexChanged, this,
+          [this](int) { OnPreviewPresetChanged(); });
+  connect(preview_cache_spin_, &QSpinBox::valueChanged, this, [this](int value) {
+    preview_cache_mb_ = value;
+    preview_custom_mode_ = true;
+    preview_lifted_ = false;
+    preview_limited_by_memory_ = false;
+    UpdatePreviewUi();
+  });
+  connect(preview_restore_button_, &QPushButton::clicked, this,
+          [this]() { RestoreRecommended(); });
+  UpdatePreviewUi();
 }
 
 void CacheSettingsDialog::Refresh() {
@@ -326,18 +480,30 @@ bool CacheSettingsDialog::ApplyInternal(bool close_on_success, QString* error) {
   }
   const QString normalized = CacheManager::NormalizeRoot(pending_root_);
   const int quota_gb = quota_spin_->value();
+  // D3：交给 callbacks.apply 之前先按 D1 纯函数修正拖动预览的非法组合
+  // （抬下限/夹 2GiB/夹可用内存 25%），并让提示显示“已自动调整”。
+  const int preview_mb = ApplyPreviewClamp();
   QString apply_error;
-  if (!callbacks_.apply(normalized, quota_gb, &apply_error)) {
+  if (!callbacks_.apply(normalized, quota_gb, preview_resolution_, preview_mb,
+                        &apply_error)) {
     return fail(apply_error.isEmpty() ? QStringLiteral("保存失败") : apply_error);
   }
   pending_root_ = normalized;
   // P1：在线会话中保存是两阶段的——本次会话仍用旧 CacheStore，MainWindow 只
   // 写 settings + pending；新目录/配额在会话结束后生效。
+  // D3：拖动预览也只在下次在线会话生效（不重建当前预览解码器）。
+  const QString preview_state =
+      QStringLiteral("%1 / %2MiB")
+          .arg(PreviewResolutionLabel(preview_resolution_))
+          .arg(preview_mb);
   SetStatus(session_active_
-                ? QStringLiteral("已保存：本次在线会话继续使用旧目录/配额，"
-                                 "会话结束后生效（下次在线打开使用）。")
+                ? QStringLiteral("已保存：缓存目录/配额在本次会话结束后生效；"
+                                 "拖动预览 %1 下次在线会话生效。")
+                      .arg(preview_state)
                 : QStringLiteral(
-                      "已保存：缓存目录/配额已生效，并在下次启动继续使用。"),
+                      "已保存：缓存目录/配额已生效，并在下次启动继续使用；"
+                      "拖动预览 %1 下次在线会话生效。")
+                      .arg(preview_state),
             false);
   if (close_on_success) {
     accept();
@@ -480,5 +646,276 @@ void CacheSettingsDialog::ClearWithoutConfirmForTest() { PerformClear(false); }
 void CacheSettingsDialog::CleanupForTest() { PerformCleanup(); }
 
 void CacheSettingsDialog::OpenDirectoryForTest() { OpenDirectory(); }
+
+// ---- D3：拖动预览 ---------------------------------------------------------
+
+void CacheSettingsDialog::SetPreviewContext(int source_max_side,
+                                            double source_fps,
+                                            int available_memory_mb) {
+  preview_source_max_side_ = std::max(0, source_max_side);
+  preview_source_fps_ =
+      std::isfinite(source_fps) && source_fps > 0.0 ? source_fps : 0.0;
+  preview_available_memory_mb_ = std::max(0, available_memory_mb);
+  UpdatePreviewUi();
+}
+
+void CacheSettingsDialog::SetPreviewSettings(
+    lapian::core::PreviewResolution resolution, int cache_mb) {
+  preview_resolution_ = resolution;
+  preview_cache_mb_ = std::clamp(cache_mb,
+                                 lapian::core::kPreviewCacheMinMb720p,
+                                 lapian::core::kPreviewCacheMaxMb);
+  preview_custom_mode_ = false;
+  preview_lifted_ = false;
+  preview_limited_by_memory_ = false;
+  UpdatePreviewUi();
+}
+
+void CacheSettingsDialog::UpdatePreviewUi() {
+  if (preview_resolution_combo_ == nullptr || preview_cache_combo_ == nullptr ||
+      preview_cache_spin_ == nullptr) {
+    return;
+  }
+  {
+    // 程序化同步 combo 不回弹到事件处理，避免预设/分辨率互相改写时递归。
+    const QSignalBlocker blocker(preview_resolution_combo_);
+    const int index = preview_resolution_combo_->findData(
+        static_cast<int>(preview_resolution_));
+    if (index >= 0) {
+      preview_resolution_combo_->setCurrentIndex(index);
+    }
+  }
+  const PreviewPreset derived =
+      DerivePreviewPreset(preview_resolution_, preview_cache_mb_);
+  const PreviewPreset shown =
+      preview_custom_mode_ ? PreviewPreset::kCustom : derived;
+  {
+    const QSignalBlocker blocker(preview_cache_combo_);
+    const int index = preview_cache_combo_->findData(static_cast<int>(shown));
+    if (index >= 0) {
+      preview_cache_combo_->setCurrentIndex(index);
+    }
+  }
+  {
+    const QSignalBlocker blocker(preview_cache_spin_);
+    preview_cache_spin_->setValue(std::clamp(
+        preview_cache_mb_, lapian::core::kPreviewCacheMinMb720p,
+        lapian::core::kPreviewCacheMaxMb));
+  }
+  // 预设档显示预设值但禁用；只有“高级自定义”允许编辑 spin。
+  preview_cache_spin_->setEnabled(shown == PreviewPreset::kCustom);
+  if (preview_estimate_label_ != nullptr) {
+    preview_estimate_label_->setText(PreviewEstimateText());
+  }
+  if (preview_hint_label_ != nullptr) {
+    preview_hint_label_->setText(PreviewHintText());
+    SetStateProperty(preview_hint_label_,
+                     PreviewHintIsWarning() ? "warn" : "muted");
+  }
+}
+
+int CacheSettingsDialog::ApplyPreviewClamp() {
+  const int min_mb =
+      lapian::core::PreviewCacheMinMbForResolution(preview_resolution_);
+  const bool lifted = preview_cache_mb_ < min_mb;
+  bool limited_by_memory = false;
+  const int clamped = lapian::core::ClampPreviewCacheMb(
+      preview_cache_mb_, preview_resolution_, preview_available_memory_mb_,
+      &limited_by_memory);
+  preview_lifted_ = lifted;
+  // 下限与内存上限同时触发时只报“抬下限”：此时 25% 上限可能低于下限。
+  preview_limited_by_memory_ = limited_by_memory && !lifted;
+  preview_cache_mb_ = clamped;
+  UpdatePreviewUi();
+  return preview_cache_mb_;
+}
+
+void CacheSettingsDialog::ApplyPreviewResolutionChange(
+    lapian::core::PreviewResolution resolution) {
+  preview_resolution_ = resolution;
+  preview_limited_by_memory_ = false;
+  const int min_mb = lapian::core::PreviewCacheMinMbForResolution(resolution);
+  // 切到 auto/1080P 且当前缓存低于下限时立即抬到下限；切到 720P 不主动下调
+  // （计划 §3.2：低于下限自动抬升，不为了省内存偷偷丢用户设置）。
+  if (resolution != lapian::core::PreviewResolution::k720p &&
+      preview_cache_mb_ < min_mb) {
+    preview_cache_mb_ = min_mb;
+    preview_lifted_ = true;
+  } else {
+    preview_lifted_ = false;
+  }
+  UpdatePreviewUi();
+}
+
+void CacheSettingsDialog::OnPreviewResolutionChanged() {
+  if (preview_resolution_combo_ == nullptr) {
+    return;
+  }
+  ApplyPreviewResolutionChange(static_cast<lapian::core::PreviewResolution>(
+      preview_resolution_combo_->currentData().toInt()));
+}
+
+void CacheSettingsDialog::OnPreviewPresetChanged() {
+  if (preview_cache_combo_ == nullptr) {
+    return;
+  }
+  const PreviewPreset preset = static_cast<PreviewPreset>(
+      preview_cache_combo_->currentData().toInt());
+  preview_lifted_ = false;
+  preview_limited_by_memory_ = false;
+  switch (preset) {
+    case PreviewPreset::kLowMemory:
+      preview_custom_mode_ = false;
+      preview_resolution_ = lapian::core::PreviewResolution::k720p;
+      preview_cache_mb_ = lapian::core::kPreviewCacheMinMb720p;
+      break;
+    case PreviewPreset::kBalanced:
+      preview_custom_mode_ = false;
+      preview_resolution_ = lapian::core::PreviewResolution::k1080p;
+      preview_cache_mb_ = lapian::core::kPreviewCacheMinMb1080p;
+      break;
+    case PreviewPreset::kRecommended:
+      preview_custom_mode_ = false;
+      preview_resolution_ = lapian::core::PreviewResolution::k1080p;
+      preview_cache_mb_ = lapian::core::kPreviewCacheDefaultMb;
+      break;
+    case PreviewPreset::kLong:
+      preview_custom_mode_ = false;
+      preview_resolution_ = lapian::core::PreviewResolution::k1080p;
+      preview_cache_mb_ = 1024;
+      break;
+    case PreviewPreset::kCustom:
+    default:
+      // 高级自定义不改分辨率，只允许直接编辑缓存值。
+      preview_custom_mode_ = true;
+      break;
+  }
+  UpdatePreviewUi();
+}
+
+void CacheSettingsDialog::RestoreRecommended() {
+  preview_resolution_ = lapian::core::PreviewResolution::kAuto;
+  preview_cache_mb_ = lapian::core::kPreviewCacheDefaultMb;
+  preview_custom_mode_ = false;
+  preview_lifted_ = false;
+  preview_limited_by_memory_ = false;
+  UpdatePreviewUi();
+}
+
+int CacheSettingsDialog::PreviewMaxSide() const {
+  lapian::core::AppSettings settings;
+  settings.preview_resolution = preview_resolution_;
+  settings.preview_cache_mb = preview_cache_mb_;
+  return lapian::core::ResolvePreviewConfig(settings, preview_source_max_side_, 0)
+      .max_side;
+}
+
+QString CacheSettingsDialog::PreviewEstimateText() const {
+  const int max_side = PreviewMaxSide();
+  const int frame_height = PreviewFrameHeightForMaxSide(max_side);
+  const qint64 frame_bytes =
+      static_cast<qint64>(max_side) * frame_height * 3 / 2;
+  // fps：源 >1 时四舍五入到最近整数；未知/异常回退 30（计划 §3.3）。
+  int fps = 30;
+  if (preview_source_fps_ > 1.0) {
+    fps = std::max(1, static_cast<int>(std::lround(preview_source_fps_)));
+  }
+  double seconds = 0.0;
+  if (frame_bytes > 0 && fps > 0) {
+    seconds = static_cast<double>(preview_cache_mb_) * 1024.0 * 1024.0 /
+              static_cast<double>(frame_bytes) / static_cast<double>(fps);
+  }
+  return QStringLiteral("当前约可缓存 %1 秒（%2 / %3fps）")
+      .arg(QString::number(seconds, 'f', 1), PreviewMaxSideLabel(max_side))
+      .arg(fps);
+}
+
+QString CacheSettingsDialog::PreviewHintText() const {
+  QStringList hints;
+  if (preview_lifted_) {
+    hints << QStringLiteral("%1 最低需要 %2MiB，已自动调整")
+                 .arg(PreviewResolutionLabel(preview_resolution_))
+                 .arg(lapian::core::PreviewCacheMinMbForResolution(
+                     preview_resolution_));
+  }
+  // 源更小：不向上放大。auto 也走这条（实际输出仍受源限制），720P 是用户
+  // 主动降采样，不提示。
+  if (preview_source_max_side_ > 0 &&
+      preview_resolution_ != lapian::core::PreviewResolution::k720p &&
+      PreviewMaxSide() < 1920) {
+    hints << QStringLiteral("源分辨率 %1P，实际预览仍为 %2P")
+                 .arg(PreviewFrameHeightForMaxSide(preview_source_max_side_))
+                 .arg(PreviewFrameHeightForMaxSide(PreviewMaxSide()));
+  }
+  if (preview_limited_by_memory_) {
+    hints << QStringLiteral("已按可用内存 25% 限制为 %1 MiB")
+                 .arg(preview_cache_mb_);
+  }
+  hints << QStringLiteral("修改后下次打开在线会话生效");
+  return hints.join(QLatin1Char('\n'));
+}
+
+bool CacheSettingsDialog::PreviewHintIsWarning() const {
+  if (preview_lifted_ || preview_limited_by_memory_) {
+    return true;
+  }
+  return preview_source_max_side_ > 0 &&
+         preview_resolution_ != lapian::core::PreviewResolution::k720p &&
+         PreviewMaxSide() < 1920;
+}
+
+bool CacheSettingsDialog::PreviewCustomPresetSelected() const {
+  return preview_custom_mode_ ||
+         DerivePreviewPreset(preview_resolution_, preview_cache_mb_) ==
+             PreviewPreset::kCustom;
+}
+
+lapian::core::PreviewResolution CacheSettingsDialog::PreviewResolutionForTest()
+    const {
+  return preview_resolution_;
+}
+
+int CacheSettingsDialog::PreviewCacheMbForTest() const {
+  return preview_cache_mb_;
+}
+
+QString CacheSettingsDialog::PreviewEstimateTextForTest() const {
+  return preview_estimate_label_ == nullptr ? QString()
+                                            : preview_estimate_label_->text();
+}
+
+QString CacheSettingsDialog::PreviewHintTextForTest() const {
+  return preview_hint_label_ == nullptr ? QString()
+                                        : preview_hint_label_->text();
+}
+
+void CacheSettingsDialog::SetPreviewResolutionForTest(
+    lapian::core::PreviewResolution resolution) {
+  ApplyPreviewResolutionChange(resolution);
+}
+
+void CacheSettingsDialog::SetPreviewCacheMbForTest(int mb) {
+  preview_cache_mb_ = std::clamp(mb, lapian::core::kPreviewCacheMinMb720p,
+                                 lapian::core::kPreviewCacheMaxMb);
+  preview_custom_mode_ = true;
+  preview_lifted_ = false;
+  preview_limited_by_memory_ = false;
+  UpdatePreviewUi();
+}
+
+void CacheSettingsDialog::RestoreRecommendedForTest() { RestoreRecommended(); }
+
+bool CacheSettingsDialog::PreviewControlsEnabledForTest() const {
+  if (preview_resolution_combo_ == nullptr || preview_cache_combo_ == nullptr ||
+      preview_cache_spin_ == nullptr || preview_restore_button_ == nullptr) {
+    return false;
+  }
+  if (!preview_resolution_combo_->isEnabled() ||
+      !preview_cache_combo_->isEnabled() ||
+      !preview_restore_button_->isEnabled()) {
+    return false;
+  }
+  return preview_cache_spin_->isEnabled() == PreviewCustomPresetSelected();
+}
 
 }  // namespace lapian::app

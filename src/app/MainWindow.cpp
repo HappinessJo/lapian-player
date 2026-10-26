@@ -2895,14 +2895,21 @@ QString MainWindow::OnlineRecordsRoot() const {
   return lapian::online::CacheManager::DefaultRecordsRoot();
 }
 
-bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
-                                    QString* error) {
+bool MainWindow::ApplyCacheSettings(
+    const QString& root, int quota_gb,
+    lapian::core::PreviewResolution preview_resolution, int preview_cache_mb,
+    QString* error) {
   auto fail = [&](const QString& message) {
     if (error != nullptr) {
       *error = message;
     }
     return false;
   };
+  // D3：一次保存同时写 cache 与 preview 键；预览值在这里再按 D1 纯函数修正
+  // 一次（对话框已修正，这里防直接调用/旧设置越界），25% 用当前可用内存。
+  const int preview_mb = lapian::core::ClampPreviewCacheMb(
+      preview_cache_mb, preview_resolution, AvailableMemoryMbForPreview(),
+      nullptr);
   if (online_mode_) {
     // P1（两阶段保存）：在线会话的 OnlineSession 持有当前 CacheStore*，.part/
     // 下载/读层都指向旧目录；这里只校验新目录（临时 store）并写 settings，
@@ -2938,6 +2945,8 @@ bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
             ? QString()
             : pending_root;
     updated.cache_quota_gb = pending_gb;
+    updated.preview_resolution = preview_resolution;
+    updated.preview_cache_mb = preview_mb;
     if (settings_store_ == nullptr) {
       return fail(
           QStringLiteral("设置存储未初始化，无法保存缓存目录/配额。"));
@@ -2995,6 +3004,8 @@ bool MainWindow::ApplyCacheSettings(const QString& root, int quota_gb,
           ? QString()
           : normalized;
   updated.cache_quota_gb = clamped_gb;
+  updated.preview_resolution = preview_resolution;
+  updated.preview_cache_mb = preview_mb;
   if (settings_store_ == nullptr) {
     return fail(QStringLiteral("设置存储未初始化，无法保存缓存目录/配额。"));
   }
@@ -3130,8 +3141,11 @@ void MainWindow::ShowCacheSettingsDialog() {
     return;
   }
   lapian::app::CacheSettingsDialog::Callbacks callbacks;
-  callbacks.apply = [this](const QString& root, int quota_gb, QString* error) {
-    return ApplyCacheSettings(root, quota_gb, error);
+  callbacks.apply = [this](const QString& root, int quota_gb,
+                           lapian::core::PreviewResolution preview_resolution,
+                           int preview_cache_mb, QString* error) {
+    return ApplyCacheSettings(root, quota_gb, preview_resolution,
+                              preview_cache_mb, error);
   };
   callbacks.clear = [this](QString* error, qint64* removed, int* kept) {
     return ClearOnlineCache(error, removed, kept);
@@ -3151,6 +3165,19 @@ void MainWindow::ShowCacheSettingsDialog() {
   lapian::app::CacheSettingsDialog dialog(
       online_cache_.get(), OnlineRecordsRoot(), online_mode_, description,
       callbacks, this);
+  // D3：拖动预览上下文/当前值。源信息只在会话就绪时可得；未知传 0（对话框
+  // 按 1920/30fps 估算并在提示里不写源分辨率）。
+  int preview_source_max_side = 0;
+  double preview_source_fps = 0.0;
+  if (session_ != nullptr && session_->IsOpen()) {
+    const lapian::media::MediaInfo& media = session_->info();
+    preview_source_max_side = std::max(media.video.width, media.video.height);
+    preview_source_fps = media.video.frame_rate.ToDouble();
+  }
+  dialog.SetPreviewContext(preview_source_max_side, preview_source_fps,
+                           AvailableMemoryMbForPreview());
+  dialog.SetPreviewSettings(loaded_settings_.preview_resolution,
+                            loaded_settings_.preview_cache_mb);
   cache_settings_dialog_open_ = true;
   dialog.exec();
   cache_settings_dialog_open_ = false;
@@ -3227,7 +3254,17 @@ void MainWindow::RunCacheMaintenanceForTest() { RunCacheMaintenance("test"); }
 
 bool MainWindow::ApplyCacheSettingsForTest(const QString& root, int quota_gb,
                                            QString* error) {
-  return ApplyCacheSettings(root, quota_gb, error);
+  // D3：旧 3 参重载沿用当前已加载的拖动预览设置（测试/旧调用方不需要传）。
+  return ApplyCacheSettings(root, quota_gb, loaded_settings_.preview_resolution,
+                            loaded_settings_.preview_cache_mb, error);
+}
+
+bool MainWindow::ApplyCacheSettingsForTest(
+    const QString& root, int quota_gb,
+    lapian::core::PreviewResolution preview_resolution, int preview_cache_mb,
+    QString* error) {
+  return ApplyCacheSettings(root, quota_gb, preview_resolution,
+                            preview_cache_mb, error);
 }
 
 void MainWindow::SetCacheMaintenanceEnabledForTest(bool enabled) {
@@ -7677,15 +7714,8 @@ void MainWindow::EndScrubPreview() {
   ClearOnlinePreviewWaitPrompt();
 }
 
-void MainWindow::ResolveOnlinePreviewConfig() {
-  // D2：一次在线会话只解析一次（会话就绪时）。拖动开始/结束都不重算，
-  // 设置改动也只影响下一次在线会话（D3 负责设置 UI）。
-  online_preview_config_valid_ = false;
-  if (session_ == nullptr || !session_->IsOpen()) {
-    return;
-  }
-  const lapian::media::MediaInfo& media = session_->info();
-  const int source_max_side = std::max(media.video.width, media.video.height);
+int MainWindow::AvailableMemoryMbForPreview() {
+  // D3：预览缓存 25% 上限与设置页估算共用；0 表示未知（不夹）。
   int available_memory_mb = 0;
 #if defined(_WIN32)
   MEMORYSTATUSEX memory{};
@@ -7697,6 +7727,19 @@ void MainWindow::ResolveOnlinePreviewConfig() {
         std::min<unsigned long long>(megabytes, 2147483647ull));
   }
 #endif
+  return available_memory_mb;
+}
+
+void MainWindow::ResolveOnlinePreviewConfig() {
+  // D2：一次在线会话只解析一次（会话就绪时）。拖动开始/结束都不重算，
+  // 设置改动也只影响下一次在线会话（D3 负责设置 UI）。
+  online_preview_config_valid_ = false;
+  if (session_ == nullptr || !session_->IsOpen()) {
+    return;
+  }
+  const lapian::media::MediaInfo& media = session_->info();
+  const int source_max_side = std::max(media.video.width, media.video.height);
+  const int available_memory_mb = AvailableMemoryMbForPreview();
 
   lapian::core::AppSettings settings = loaded_settings_;
   // 测试覆盖（只 test-only；产品用设置页）：非法值忽略，回退设置解析。
