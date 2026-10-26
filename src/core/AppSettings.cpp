@@ -40,6 +40,13 @@ QByteArray SerializeAppSettings(const AppSettings& settings) {
   // T8.3 新增键：旧版本读到会当未知键忽略（不改变 v1 键语义）。
   root.insert(QStringLiteral("cache_root"), settings.cache_root);
   root.insert(QStringLiteral("cache_quota_gb"), ClampCacheQuotaGb(settings.cache_quota_gb));
+  // D1：预览两个键总是写；resolution 写小写规范键，cache 落盘前先夹到合法范围
+  // （不按内存夹），旧版本读到同样当未知键忽略。
+  root.insert(QStringLiteral("preview_resolution"),
+              PreviewResolutionKey(settings.preview_resolution));
+  root.insert(QStringLiteral("preview_cache_mb"),
+              ClampPreviewCacheMb(settings.preview_cache_mb,
+                                  settings.preview_resolution, 0, nullptr));
   return QJsonDocument(root).toJson(QJsonDocument::Compact) + '\n';
 }
 
@@ -48,6 +55,8 @@ SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {  SettingsLoadResu
   result.settings.waveform_visible = kDefaultWaveformVisible;
   result.settings.cache_root.clear();
   result.settings.cache_quota_gb = kCacheQuotaDefaultGb;
+  result.settings.preview_resolution = PreviewResolution::kAuto;
+  result.settings.preview_cache_mb = kPreviewCacheDefaultMb;
 
   const QByteArray trimmed = bytes.trimmed();
   if (trimmed.isEmpty()) {
@@ -115,6 +124,31 @@ SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {  SettingsLoadResu
       }
     }
   }
+  // D1：预览分辨率非字符串/未知字符串 → auto；缓存非数字/非有限值 → 512，
+  // 数字越界先四舍五入再按当前分辨率的 [下限, 2048] 夹取。
+  const QJsonValue preview_resolution = root.value(QStringLiteral("preview_resolution"));
+  if (preview_resolution.isString()) {
+    result.settings.preview_resolution =
+        ParsePreviewResolutionKey(preview_resolution.toString());
+  }
+  const QJsonValue preview_cache = root.value(QStringLiteral("preview_cache_mb"));
+  if (preview_cache.isDouble()) {
+    const double raw = preview_cache.toDouble();
+    if (std::isfinite(raw)) {
+      const int min_mb = PreviewCacheMinMbForResolution(result.settings.preview_resolution);
+      int rounded = min_mb;
+      if (raw <= static_cast<double>(min_mb)) {
+        // 先按范围截断再四舍五入，避免 1e300/-1e300 在 lround/cast 时溢出。
+        rounded = min_mb;
+      } else if (raw >= static_cast<double>(kPreviewCacheMaxMb)) {
+        rounded = kPreviewCacheMaxMb;
+      } else {
+        rounded = static_cast<int>(std::lround(raw));
+      }
+      result.settings.preview_cache_mb =
+          ClampPreviewCacheMb(rounded, result.settings.preview_resolution, 0, nullptr);
+    }
+  }
 
   // 未知键（含未来版本新增键）直接忽略。
   result.status = SettingsLoadStatus::kLoaded;
@@ -128,6 +162,89 @@ AppSettings MergeVolumeWaveform(const AppSettings& base, int volume,
   merged.waveform_visible = waveform_visible;
   merged.cache_quota_gb = ClampCacheQuotaGb(base.cache_quota_gb);
   return merged;
+}
+
+QString PreviewResolutionKey(PreviewResolution resolution) {
+  switch (resolution) {
+    case PreviewResolution::k1080p:
+      return QStringLiteral("1080p");
+    case PreviewResolution::k720p:
+      return QStringLiteral("720p");
+    case PreviewResolution::kAuto:
+    default:
+      return QStringLiteral("auto");
+  }
+}
+
+PreviewResolution ParsePreviewResolutionKey(const QString& key,
+                                            PreviewResolution fallback) {
+  if (key.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0) {
+    return PreviewResolution::kAuto;
+  }
+  if (key.compare(QStringLiteral("1080p"), Qt::CaseInsensitive) == 0) {
+    return PreviewResolution::k1080p;
+  }
+  if (key.compare(QStringLiteral("720p"), Qt::CaseInsensitive) == 0) {
+    return PreviewResolution::k720p;
+  }
+  return fallback;
+}
+
+int PreviewCacheMinMbForMaxSide(int max_side) {
+  return max_side <= 1280 ? kPreviewCacheMinMb720p : kPreviewCacheMinMb1080p;
+}
+
+int PreviewCacheMinMbForResolution(PreviewResolution resolution) {
+  // auto 可能落到 1080P，取下限的保守值 256。
+  return resolution == PreviewResolution::k720p ? kPreviewCacheMinMb720p
+                                                : kPreviewCacheMinMb1080p;
+}
+
+int ClampPreviewCacheMb(int mb, PreviewResolution resolution,
+                        int available_memory_mb, bool* limited_by_memory) {
+  if (limited_by_memory != nullptr) {
+    *limited_by_memory = false;
+  }
+  const int min_mb = PreviewCacheMinMbForResolution(resolution);
+  int clamped = std::clamp(mb, min_mb, kPreviewCacheMaxMb);
+  if (available_memory_mb > 0) {
+    const int memory_cap_mb = available_memory_mb / 4;  // 可用内存 25%
+    if (memory_cap_mb < min_mb) {
+      // 可用内存太小：保下限，冲突通过 limited_by_memory 报告。
+      clamped = min_mb;
+      if (limited_by_memory != nullptr) {
+        *limited_by_memory = true;
+      }
+    } else if (clamped > memory_cap_mb) {
+      clamped = memory_cap_mb;
+      if (limited_by_memory != nullptr) {
+        *limited_by_memory = true;
+      }
+    }
+  }
+  return clamped;
+}
+
+ResolvedPreviewConfig ResolvePreviewConfig(const AppSettings& settings,
+                                           int source_max_side,
+                                           int available_memory_mb) {
+  ResolvedPreviewConfig config;
+  // 源未知（<=0）按 1920 处理；任何档位都不向上放大。
+  const int source_side = source_max_side > 0 ? source_max_side : 1920;
+  const int cap_side =
+      settings.preview_resolution == PreviewResolution::k720p ? 1280 : 1920;
+  config.max_side = std::min(cap_side, source_side);
+  config.follow_source = settings.preview_resolution == PreviewResolution::kAuto;
+  config.source_limited = settings.preview_resolution == PreviewResolution::k1080p &&
+                          source_side < 1920;
+  const int min_mb = PreviewCacheMinMbForResolution(settings.preview_resolution);
+  config.cache_mb = ClampPreviewCacheMb(settings.preview_cache_mb,
+                                        settings.preview_resolution,
+                                        available_memory_mb,
+                                        &config.cache_limited_by_memory);
+  config.cache_lifted_to_min = settings.preview_cache_mb < min_mb;
+  config.cache_bytes = static_cast<std::size_t>(config.cache_mb) * 1024u * 1024u;
+  return config;
 }
 
 QString SettingsLoadStatusName(SettingsLoadStatus status) {
