@@ -213,6 +213,7 @@ QGroupBox { color: @text_dim; }
 #cacheRootState[state="ok"] { color: @ok; }
 #cacheRootState[state="warn"] { color: @warn; }
 #cacheRootState[state="error"] { color: @err; }
+#previewHintLabel[state="warn"] { color: @warn; }
 #cacheStatusLabel { color: @text_meta; }
 #cacheStatusLabel[state="ok"] { color: @ok; }
 #cacheStatusLabel[state="error"] { color: @err; }

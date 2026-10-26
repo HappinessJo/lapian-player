@@ -6,11 +6,15 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStringList>
@@ -120,17 +124,77 @@ CacheSettingsDialog::CacheSettingsDialog(CacheStore* cache, QString records_root
   }
   BuildUi();
   Refresh();
+  AdjustToScreen();
 }
 
 CacheSettingsDialog::~CacheSettingsDialog() = default;
+
+QRect CacheSettingsDialog::AvailableScreenRect() const {
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  return screen == nullptr ? QRect() : screen->availableGeometry();
+}
+
+QSize CacheSettingsDialog::sizeHint() const {
+  if (scroll_content_ == nullptr) {
+    return QDialog::sizeHint();
+  }
+  // QScrollArea 不会把内容 sizeHint 传给顶层窗口：显式 = 滚动内容 + 固定 footer。
+  const QSize content = scroll_content_->sizeHint();
+  const QSize footer = footer_ == nullptr ? QSize() : footer_->sizeHint();
+  const int width = std::max({minimumWidth(), content.width(), footer.width()});
+  return QSize(width, content.height() + footer.height());
+}
+
+void CacheSettingsDialog::AdjustToScreen() {
+  const QRect avail = AvailableScreenRect();
+  if (!avail.isEmpty()) {
+    // 先按 Qt 常规 adjustSize，再显式用满“可用屏幕 90%”（QWidget::adjustSize
+    // 对窗口还有 2/3 屏高的额外限制，会把 150%/200% 的对话框压得过小）；
+    // maximumSize 之后 resize 自动受限，超出由滚动区承担。
+    const int max_w = std::max(320, avail.width() * 9 / 10);
+    const int max_h = std::max(240, avail.height() * 9 / 10);
+    if (minimumWidth() > max_w) {
+      setMinimumWidth(max_w);
+    }
+    setMaximumSize(max_w, max_h);
+    adjustSize();
+    const QSize natural = sizeHint();
+    resize(std::min(natural.width(), max_w), std::min(natural.height(), max_h));
+    return;
+  }
+  adjustSize();
+}
+
+void CacheSettingsDialog::showEvent(QShowEvent* event) {
+  QDialog::showEvent(event);
+  AdjustToScreen();
+}
 
 void CacheSettingsDialog::BuildUi() {
   setWindowTitle(QStringLiteral("设置 — 在线缓存"));
   setMinimumWidth(640);
 
-  auto* root_layout = new QVBoxLayout(this);
+  // D3b：主体（缓存组 + 拖动预览组 + 记录/操作）放进 QScrollArea；保存/关闭
+  // 固定在 footer，高 DPI 下窗口夹到可用屏幕 90%，超出只滚动内容，按钮始终可达。
+  auto* outer_layout = new QVBoxLayout(this);
+  outer_layout->setContentsMargins(0, 0, 0, 0);
+  outer_layout->setSpacing(0);
+  scroll_area_ = new QScrollArea(this);
+  scroll_area_->setObjectName(QStringLiteral("cacheScroll"));
+  scroll_area_->setWidgetResizable(true);
+  scroll_area_->setFrameShape(QFrame::NoFrame);
+  scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  scroll_content_ = new QWidget(scroll_area_);
+  scroll_content_->setObjectName(QStringLiteral("cacheScrollContent"));
+  auto* root_layout = new QVBoxLayout(scroll_content_);
   root_layout->setContentsMargins(14, 12, 14, 12);
   root_layout->setSpacing(10);
+  scroll_area_->setWidget(scroll_content_);
+  outer_layout->addWidget(scroll_area_, 1);
 
   auto* intro = new QLabel(
       QStringLiteral("在线模式会把播放数据缓存到本地。清空缓存不会删除在线标记、"
@@ -301,22 +365,30 @@ void CacheSettingsDialog::BuildUi() {
   action_row->addWidget(clear_button_);
   root_layout->addLayout(action_row);
 
-  status_label_ = new QLabel(this);
+  // 固定 footer：状态 + 保存/关闭不随滚动内容移动（200% DPI 也一定可达）。
+  footer_ = new QWidget(this);
+  footer_->setObjectName(QStringLiteral("cacheFooter"));
+  auto* footer_layout = new QVBoxLayout(footer_);
+  footer_layout->setContentsMargins(14, 6, 14, 12);
+  footer_layout->setSpacing(8);
+
+  status_label_ = new QLabel(footer_);
   status_label_->setWordWrap(true);
   status_label_->setObjectName(QStringLiteral("cacheStatusLabel"));
   status_label_->setMinimumHeight(32);
-  root_layout->addWidget(status_label_);
+  footer_layout->addWidget(status_label_);
 
   auto* button_row = new QHBoxLayout();
   button_row->addStretch(1);
-  save_button_ = new QPushButton(QStringLiteral("保存"), this);
+  save_button_ = new QPushButton(QStringLiteral("保存"), footer_);
   save_button_->setObjectName(QStringLiteral("cacheSaveButton"));
   save_button_->setDefault(true);
-  close_button_ = new QPushButton(QStringLiteral("关闭"), this);
+  close_button_ = new QPushButton(QStringLiteral("关闭"), footer_);
   close_button_->setObjectName(QStringLiteral("cacheCloseButton"));
   button_row->addWidget(save_button_);
   button_row->addWidget(close_button_);
-  root_layout->addLayout(button_row);
+  footer_layout->addLayout(button_row);
+  outer_layout->addWidget(footer_);
 
   connect(browse_button_, &QPushButton::clicked, this,
           &CacheSettingsDialog::ChooseDirectory);
@@ -916,6 +988,19 @@ bool CacheSettingsDialog::PreviewControlsEnabledForTest() const {
     return false;
   }
   return preview_cache_spin_->isEnabled() == PreviewCustomPresetSelected();
+}
+
+QString CacheSettingsDialog::DialogSizeForTest() const {
+  const QRect avail = AvailableScreenRect();
+  // 窗口被 90% 夹住时内容必然滚动（未 show 前视口几何尚未布局，不能看
+  // scrollbar/height；用自然尺寸与当前窗口高的差判断）。
+  const bool scroll = scroll_area_ != nullptr && sizeHint().height() > height();
+  return QStringLiteral("w=%1 h=%2 avail_w=%3 avail_h=%4 scroll=%5")
+      .arg(width())
+      .arg(height())
+      .arg(avail.width())
+      .arg(avail.height())
+      .arg(scroll ? 1 : 0);
 }
 
 }  // namespace lapian::app

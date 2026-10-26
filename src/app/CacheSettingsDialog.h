@@ -21,7 +21,10 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QScrollArea;
+class QShowEvent;
 class QSpinBox;
+class QWidget;
 
 namespace lapian::online {
 class CacheManager;
@@ -97,6 +100,14 @@ class CacheSettingsDialog : public QDialog {
   void RestoreRecommendedForTest();
   // 分辨率/缓存/恢复按钮均可用，且自定义 spin 的可用状态与挡位一致。
   bool PreviewControlsEnabledForTest() const;
+  // D3b：当前窗口尺寸与可用屏幕（w/h/avail_w/avail_h/scroll）。
+  QString DialogSizeForTest() const;
+  // D3b：自然尺寸 = 滚动内容 + 固定 footer；QScrollArea 不会把它传给顶层窗口。
+  QSize sizeHint() const override;
+
+ protected:
+  // D3b：显示时按内容 adjustSize，再夹到可用屏幕的 90%（超出交给滚动区）。
+  void showEvent(QShowEvent* event) override;
 
  private:
   void BuildUi();
@@ -109,6 +120,8 @@ class CacheSettingsDialog : public QDialog {
   void SetStatus(const QString& text, bool error);
   void UpdatePendingUi();
   void UpdateSummaryUi();
+  void AdjustToScreen();
+  QRect AvailableScreenRect() const;
 
   // D3：拖动预览。UpdatePreviewUi 统一同步下拉/数值/估算/提示；保存前
   // ApplyPreviewClamp 用 D1 纯函数修正非法组合并更新提示。
@@ -144,6 +157,9 @@ class CacheSettingsDialog : public QDialog {
   int preview_available_memory_mb_ = 0;
 
   QLineEdit* root_edit_ = nullptr;
+  QScrollArea* scroll_area_ = nullptr;
+  QWidget* scroll_content_ = nullptr;
+  QWidget* footer_ = nullptr;
   QPushButton* browse_button_ = nullptr;
   QPushButton* default_button_ = nullptr;
   QLabel* root_hint_label_ = nullptr;

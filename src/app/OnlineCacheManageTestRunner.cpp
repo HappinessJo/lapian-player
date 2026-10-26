@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QAction>
+#include <QApplication>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
@@ -12,6 +13,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSpinBox>
 #include <QStringList>
 #include <QVector>
@@ -22,6 +24,7 @@
 
 #include "app/CacheSettingsDialog.h"
 #include "app/MainWindow.h"
+#include "app/ui/Theme.h"
 #include "core/AppSettings.h"
 #include "online/CacheManager.h"
 #include "online/CacheStore.h"
@@ -887,6 +890,11 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
   QString preview_state = QStringLiteral("skip");
   if (options.ui_smoke) {
     const int failures_before = g_failures;
+    // D3b：本段按真实 GUI 主题构造对话框（设置页的 warn 色、12px 字体与
+    // 高 DPI 度量都按产品外观；不影响前面 113 条已有 UI smoke）。
+    if (auto* app = qobject_cast<QApplication*>(QCoreApplication::instance())) {
+      lapian::ui::ApplyTheme(*app);
+    }
     const QString preview_settings_root =
         QDir(scratch).filePath(QStringLiteral("settings-preview"));
     QDir(preview_settings_root).removeRecursively();
@@ -944,6 +952,48 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                 .arg(preview_dialog.sizeHint().height())
                 .arg(preview_dialog.minimumSizeHint().width())
                 .arg(preview_dialog.minimumSizeHint().height()));
+    // D3b：高 DPI 下窗口必须夹到可用屏幕 90%；自然地 resize(sizeHint()) 也不超。
+    preview_dialog.resize(preview_dialog.sizeHint());
+    QCoreApplication::processEvents();
+    const QString dialog_size = preview_dialog.DialogSizeForTest();
+    const QRegularExpression dialog_size_re(
+        QStringLiteral("w=(\\d+) h=(\\d+) avail_w=(\\d+) avail_h=(\\d+)"));
+    const QRegularExpressionMatch dialog_size_match =
+        dialog_size_re.match(dialog_size);
+    const int dialog_w = dialog_size_match.hasMatch()
+                             ? dialog_size_match.captured(1).toInt()
+                             : -1;
+    const int dialog_h = dialog_size_match.hasMatch()
+                             ? dialog_size_match.captured(2).toInt()
+                             : -1;
+    const int dialog_avail_w = dialog_size_match.hasMatch()
+                                   ? dialog_size_match.captured(3).toInt()
+                                   : -1;
+    const int dialog_avail_h = dialog_size_match.hasMatch()
+                                   ? dialog_size_match.captured(4).toInt()
+                                   : -1;
+    Check(QStringLiteral("ui-preview-dialog-fits"),
+          dialog_avail_w > 0 && dialog_avail_h > 0 &&
+              dialog_w <= dialog_avail_w * 9 / 10 + 1 &&
+              dialog_h <= dialog_avail_h * 9 / 10 + 1,
+          dialog_size);
+    PrintKV("ui_dialog_size", dialog_size);
+    const QString dialog_shot_path =
+        qEnvironmentVariable("LAPIAN_UI_DIALOG_SHOT");
+    if (!dialog_shot_path.isEmpty()) {
+      QDir().mkpath(QFileInfo(dialog_shot_path).absolutePath());
+      preview_dialog.show();
+      QCoreApplication::processEvents();
+      const bool shot_ok = preview_dialog.grab().save(dialog_shot_path);
+      PrintKV("ui_dialog_shot",
+              QStringLiteral("path=%1 ok=%2 size=%3x%4")
+                  .arg(dialog_shot_path)
+                  .arg(shot_ok ? 1 : 0)
+                  .arg(preview_dialog.width())
+                  .arg(preview_dialog.height()));
+      preview_dialog.hide();
+      QCoreApplication::processEvents();
+    }
     Check(QStringLiteral("ui-preview-default-auto-512"),
           preview_dialog.PreviewResolutionForTest() ==
                   lapian::core::PreviewResolution::kAuto &&
@@ -1050,6 +1100,23 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                 .arg(preview_dialog.PreviewHintTextForTest(), lift_error));
       PrintKV("preview_lift", preview_values_text());
       PrintKV("preview_lift_hint", preview_dialog.PreviewHintTextForTest());
+      // 可选：抓 warn 态截图（验证 #previewHintLabel[state="warn"] 的 QSS 生效）。
+      const QString warn_shot_path =
+          qEnvironmentVariable("LAPIAN_UI_DIALOG_SHOT_WARN");
+      if (!warn_shot_path.isEmpty()) {
+        QDir().mkpath(QFileInfo(warn_shot_path).absolutePath());
+        preview_dialog.show();
+        QCoreApplication::processEvents();
+        const bool warn_shot_ok = preview_dialog.grab().save(warn_shot_path);
+        PrintKV("ui_dialog_warn_shot",
+                QStringLiteral("path=%1 ok=%2 size=%3x%4")
+                    .arg(warn_shot_path)
+                    .arg(warn_shot_ok ? 1 : 0)
+                    .arg(preview_dialog.width())
+                    .arg(preview_dialog.height()));
+        preview_dialog.hide();
+        QCoreApplication::processEvents();
+      }
 
       // 5) 720P/128 合法，不提示下限。
       preview_dialog.SetPreviewResolutionForTest(
