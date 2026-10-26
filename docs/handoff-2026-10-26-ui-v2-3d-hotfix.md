@@ -1,6 +1,8 @@
 # UI v2 3D 热修交接 — 2026-10-26
 
 - **状态**：3D 收口已提交（代码 `b38df22`、文档 `ee2579f`）；**本文件只做交接/规划，未改代码**。
+  **实现结果见 [3D 热修实现交接](handoff-2026-10-26-ui-v2-3d-hotfix-close.md)**（P0–P3 四个独立 commit、
+  `--scrub-space-test` / `--cache-switch-online-test` / QR 26/0 / 清晰度 chip 证据、门禁与残余）。
 - **上游**：[3D 交接](handoff-2026-10-26-ui-v2-3d.md)、[3C](handoff-2026-10-26-ui-v2-3c.md)、
   [3B](handoff-2026-10-26-ui-v2-3b.md)、[AGENTS](../AGENTS.md) §1/§9/§11/§12。
 - **用户反馈（2026-10-26 实机）**：
