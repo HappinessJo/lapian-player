@@ -780,12 +780,14 @@ class PlayerShell : public QWidget {
 | 画面 | `videoStage`*（StageStack 容器）、`videoGfx`（GfxWidget）、`v2StageEmpty`、`v2EmptyTitle`、`v2EmptyOpen`、`v2EmptyOnline`、`v2StageError`、`v2ErrorReason`、`v2ErrorRetry`、`v2ErrorQuality`、`v2ErrorOpenLocal`、`v2StageLoading`、`v2LoadingProgress`、`v2LoadingCancel` |
 | Transport | `v2Transport`、`v2TransportLeft`、`v2TransportReadout`、`v2TransportRight`、`v2PlayButton`、`v2StepBack`、`v2StepFwd`、`v2ToStart`、`v2ToEnd`、`v2SetInButton`、`v2SetOutButton`、`v2SpeedButton`、`v2MuteButton`、`volumeSlider`*、`v2BufferSlot`、`v2BufferText`、`v2LoopButton`、`v2WaveButton`、`v2MarkButton`、`v2SnapButton`、`v2FullScreenButton`、`v2InspectorToggle`、`v2Timecode`、`v2FrameNumber`、`v2FrameTotal` |
 | 时间轴 | `v2TimelinePanel`、`v2TimelineHead`、`v2TimelineMeta`、`v2ViewMeta`、`v2ZoomIn`、`v2ZoomOut`、`v2ZoomFit`、`v2ViewBar`、`v2ViewHandleLeft`、`v2ViewHandleRight`、`v2WorkBar`、`v2WorkHandleLeft`、`v2WorkHandleRight`、`timeline`* |
-| 检查器 | `v2Inspector`、`v2InspectorHead`、`v2TabMarks`、`v2TabShots`、`v2TabInfo`、`v2MarkBadge`、`v2ShotBadge`、`v2InspectorCollapse`、`v2InspectorRail`、`v2InspectorStack`、`v2ShotGrid`、`v2InfoTable`、`v2InspectorFooter`、`v2StoreText`、`markPanel`*、`markTree`*、`markLabelEdit`*、`markNoteEdit`*、`markStorage`* |
+| 检查器 | `v2Inspector`、`v2InspectorHead`、`v2TabMarks`、`v2TabShots`、`v2TabInfo`、`v2MarkBadge`、`v2ShotBadge`、`v2InspectorCollapse`、`v2InspectorRail`、`v2InspectorStack`、`v2ShotGrid`、`v2InfoTable`、`v2InspectorFooter`、`v2StoreText`、`markPanel`*、`markTree`*、`markLabelEdit`*、`markNoteEdit`*、`markStorage`*；**3C 追加**：`v2InspectorAdd`（`+`=添加标记第二入口，M5 复核用）、`v2InspectorExpand`（折叠 rail 的展开按钮）、`v2ShotEmpty`（"还没有截图（S）"空态）、`v2ShotNote`（>60 张时的截断说明） |
 | 状态栏 | `v2StatusMessage`、`noticeInfo`*、`audioInfo`*、`cacheInfo`（新）、`waveformInfo`*、`statusInfo`* |
 
 > `*` = **沿用旧名**（测试/日志已按名读，不改；共 17 项）。
 > `timelineScrollBar` 不在清单里：3B 删除时间轴内部横向滚动条（视图窗滑块取代）。
 > 已 grep 确认 `src/` 与 `tests/` 都没有按这个名字取控件（只在 `TimelineWidget.cpp:41` 设置过一次）。
+> **3C 追加的 4 个名字**是原清单没覆盖到的可见入口/空态，实现时按"稳定可寻址"补上并写进交接
+> （`+` 与折叠/展开按钮是 M5 与折叠态断言必需；两个截图网格空态/截断标签用于视觉与自动化）。
 
 ### 7.8 新增测试缝（getter，全部只读、无副作用）
 
@@ -804,6 +806,8 @@ class PlayerShell : public QWidget {
 | `DragSplitterForTest(bool vertical, int delta)` | — | 合成 `QMouseEvent` 打到 handle（同 `PressTimelineForTest` 的做法），端到端验拖动 |
 | `FullScreenChromeForTest()` | `appbar=0 banner=0 status=0 inspector=0 transport=1 timeline=1` | 全屏 |
 | `InspectorCollapsedForTest()` | bool | 折叠 |
+| `SetInspectorCollapsedForTest(bool)`（3C） | — | 走 `PlayerShell::SetInspectorCollapsed`（与按钮同路径），供折叠态断言 |
+| `InspectorStateForTest()`（3C） | `v2=1 host_w=304 collapsed=0 tab=marks page=0 marks=101 shots=3 tiles=3 badge=101 shotbadge=3 rail=0 store=存储：…` | 检查器一行诊断（折叠/tab/页/计数/页脚），只读无副作用 |
 
 ### 7.9 构建改动
 

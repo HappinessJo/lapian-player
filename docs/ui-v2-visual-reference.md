@@ -69,7 +69,7 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
 | Transport | `.transport 46px`：左组 5+2 按钮 + 速度 + 静音 + 音量；中间 26px 等宽时间码 + `帧 N / 总 N`；右组 6 开关 | `TransportBar`（`v2Transport`/`v2TransportLeft`/`v2TransportReadout`/`v2TransportRight`/`v2PlayButton`/`v2LoopButton`/…） | ✅ 3A.5（读数改用 `infoTimecode/infoFrame/infoTotal` 原对象） |
 | 按钮态 | `.btn { h=26, min-w=26, radius 3, icon 16, color text-dim }`；`.btn.on { accent 18% 底 + accent 图标 + 35% 边框 }`；播放键实心 accent | QSS `QToolButton` 规则 + `#v2PlayButton`；`BindGlyph()` 在 checked 时换 accent 图标 | ✅ 3A.5 |
 | 时间轴面板 | `.panel.timeline 132`：`.panelhead 26`（◷ 时间轴 + 工作区/视图/缩放）+ 视图窗条 13 + 工作区条 15 + 画布 | `TimelinePanel`（`v2TimelinePanel`/`v2TimelineHead`/`v2WorkMeta`/`v2ViewMeta`/`v2ZoomIn/Out/Fit`）+ `RangeBar`（`v2ViewBar`/`v2ViewHandleLeft/Right`/`v2WorkBar`/`v2WorkHandleLeft/Right`）+ 既有 `TimelineWidget` | ✅ 3B（两条滑块、播放头常驻、删内部滚动条；dense 档无头但数值未搬 Transport 副行 → 见 §5-2）。**有意偏差**：画布左右各 8px 外边距（原型画布铺满），与滑块轨道的 8px 内边距对齐，否则工作区端点对不准画布（2026-10-26 用户要求"往里收"） |
-| 检查器 | `.ins-head 26` 三 tab（标记/截图 3/信息）+ `+`；列表卡片；标签/备注编辑；`.ins-foot` 存储位置 | 现在只有 `MarkPanel` 自己的表头 | ❌ → 3C（3A 只保留原对象与 getter） |
+| 检查器 | `.ins-head 26` 三 tab（标记/截图 3/信息）+ `+`；列表卡片；标签/备注编辑；`.ins-foot` 存储位置 | `ui/InspectorPanel`（`v2InspectorHead`/`v2TabMarks`/`v2TabShots`/`v2TabInfo`/`v2MarkBadge`/`v2ShotBadge`/`v2InspectorAdd`/`v2InspectorCollapse`）+ `v2InspectorStack` 三页（MarkPanel 原对象 / `v2ShotGrid` / `v2InfoTable`）+ `v2InspectorFooter`/`v2StoreText` + 折叠 `v2InspectorRail`/`v2InspectorExpand` | ✅ 3C（行内删除/选中左侧 accent 竖条仍缺，见 §5-3） |
 | 状态栏 | `.statusbar 24`：左 1 条消息 + 右 3 个指标（音频/缓存/波形） | `QStatusBar` + `noticeInfo/audioInfo/loopInfo/waveformInfo/statusInfo` | ⚠️ 配色已对；**仍是 6 个控件**、`循环: 关` 与 Transport 循环键重复 → 3D |
 | 分隔条 | `.split-h/.split-v { 6px }` + `::after` 1–2px accent 细线（悬停/拖拽时 65% 不透明） | `PlayerSplitter`/`PlayerSplitHandle`（悬停 2px accent） | ✅ 3A.5 |
 | 密度 | `#app.density-compact/dense` 覆盖 appbar/banner/transport/timeline/status/panelhead | `Tokens::MakeTokens()` + `ResolveDensity()`（客户区高 + 20px 迟滞） | ✅ 3A.5（dense 无面板头） |
@@ -100,8 +100,12 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
    独立标记带），标记只有细线 + 3px 小旗（原型是带帧号文字的旗标条）。属"仍缺"，3C/收口再定。
    另：dense 档（客户区 <520）时间轴按 §3.1 无面板头，但"工作区/视图数值移到 Transport 副行"这半句
    **3B 未做**（Transport 副行在 502px 宽时只剩 ~190px，塞不下）→ 见 [3B 交接](handoff-2026-10-26-ui-v2-3b.md) §10-2。
-3. **检查器还没 tab 化**：现在直接露出 `MarkPanel` 自己的表头。3C 做 `InspectorPanel`
-   （三 tab + 折叠 44 + 页脚存储位置），届时 MarkPanel 只保留列表与编辑区。
+3. **检查器已 tab 化（3C，2026-10-26）**：`ui/InspectorPanel` 做了头 26 三 tab + 计数徽标 + `+`/折叠、
+   `v2InspectorStack` 三页（既有 MarkPanel 原对象 / 截图网格 / 信息表）、页脚存储位置、折叠 44 rail。
+   与原型仍有差距：标记行没有 hover 删除按钮、选中行没有左侧 2px accent 竖条（MarkPanel 既有行为，
+   单测断言依赖）；截图网格 caption 按任务用 `f<帧号>`（原型是"第 N 帧"）；原型截图页的独立
+   "截图目录"页脚被收敛成检查器的唯一常显页脚（规划 §2.2）。对照图：
+   `build/ui-v2-shots/3c-vs-proto-inspector.png`（上=原型，下=产品；构建产物，不入库）。
 4. **状态栏仍是 6 个控件**：原型是"1 条消息 + 3 指标"。3D 收口（同时把 `--banner-test` 的 `loop=`
    指向 Transport 的循环键，见规划附录 A.3）。
 5. **横幅配色**：容器/高度已对，`warn` 态文案颜色仍来自 `InfoBar::UpdateBannerStyle()`；
@@ -122,6 +126,9 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
   - `--readout-edit-test` 会打印**全部 tooltip 名+文案**（M5 逐条对照 §2.3）与 **M7 四态几何**
     （`rel=帧号中心−Transport 中心`，跨播放/暂停/拖动/全屏必须一致）。
   - `--dpi-test` 会打印 `dpi_bars view/work` 几何（两条滑块的行/轨道位置）与 `dpi_state` 的每栏高度。
+- **3C 起再加一个**：`InspectorStateForTest()` / `--dpi-test` 的 `dpi_inspector ...` 行会打印
+  `collapsed/tab/page/w/h/marks/shots/tiles/badge/shotbadge/rail/info/store`，并在每个 DPI 相位保存
+  `build/t6.4-dpi-<tag>-inspector-{collapsed,wide,shots,info,narrow}.png`。
 - 每栏高度仍以令牌 ±2px 为准（M4 断言在 `LayoutProblemsForTest()` 里）。
 - 正文对比度 ≥4.5:1（截屏采样，方法见 [3A 交接](handoff-2026-10-26-ui-v2-3a.md) §4.4）。
 - 新增/改动控件必须带稳定 `objectName`（列表见规划 §7.7），否则截图对比与自动化都定位不到。
