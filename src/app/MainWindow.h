@@ -190,6 +190,9 @@ class MainWindow : public QMainWindow {
   QString BufferSlotStateForTest() const;
   bool TimelineBarDragForTest(bool work_bar, int from_x, int to_x);
   QString TimelineBarGeometryForTest() const;
+  // 工作区两端的"对齐"断言（2026-10-26 用户反馈的问题）：同一个帧在
+  // **工作区滑块**上的像素 x 与在**画布**上的像素 x 必须相等（±1px）。
+  QString TimelineBarAlignForTest() const;
   // M7：帧号控件（v2FrameNumber）在播放/暂停/拖动/全屏四态的几何。
   // 输出 `visible=1 rect=.. transport=.. rel=dx,dy wxh`；rel 是"帧号中心 −
   // Transport 中心"，全屏换了窗口尺寸也应当不变（唯一可跨态比较的量）。

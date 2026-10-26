@@ -19,7 +19,14 @@ namespace {
 // 原型 plan.html §"时间轴" 的取值（.ztrack/.wtrack/.zwin/.wspan/.out/.ph）。
 // 颜色照抄：轨道 #101014 / #0e0e12 + 1px #26262e，视图窗 = accent 22% 底、
 // accent 60% 边框、手柄实心 accent；工作区 = #2b3140 / 开循环走 accent 24%。
-constexpr int kTrackInset = 8;         // 左右 8px 内边距（原型 padding 2px 8px）
+//
+// 横向 8px 内边距（原型 `.zrow` 的 `padding: 2px 8px`）**必须与画布一致**：
+// `TimelinePanel` 给画布容器也留了 8px 左右外边距，于是
+//   滑块上的帧 x = 8 + ratio × (面板宽 − 16)
+//   画布上的帧 x = 8 + ratio × (面板宽 − 16)     ← 同一个 ratio，同一像素
+// 两侧相等（`TimelineBarAlignForTest()` 断言 |dx| ≤ 1）。若只给滑块缩 8px 而画布
+// 铺满，工作区两端会比画布"短一截"（用户 2026-10-26 反馈的那个偏差）。
+constexpr int kTrackInset = 8;
 constexpr double kViewHandleWidth = 5.0;
 constexpr double kWorkHandleWidth = 7.0;
 constexpr double kMinThumbWidth = 6.0;
@@ -248,6 +255,15 @@ void RangeBar::ComputeRects() {
                               thumb_rect_.top(), hw, thumb_rect_.height());
     right_handle_rect_ = QRect(static_cast<int>(std::lround(x1)) - 3,
                                thumb_rect_.top(), hw, thumb_rect_.height());
+  }
+  // 轨道左右各留 8px（与画布的 8px 外边距一致）；端点手柄在最边缘时可能探出
+  // 半个身位，这里把**手柄矩形**夹回控件内（坐标映射仍按 8..width-8，不受影响）。
+  for (QRect* handle : {&left_handle_rect_, &right_handle_rect_}) {
+    if (handle->isNull()) {
+      continue;
+    }
+    const int max_x = std::max(0, width() - handle->width());
+    handle->moveLeft(std::clamp(handle->left(), 0, max_x));
   }
 }
 

@@ -26,7 +26,10 @@
   - **时间轴**：新增 `ui/RangeBar`（视图窗 13px 行高/4px 轨道、工作区 15px/10px）——拖端=缩放/改 A/B、拖中=平移、
     点空白=居中/平移、滚轮=以播放头为锚缩放、Shift+滚轮=平移、双击=适配/清除 A/B，全 NoFocus；**只读
     `TimelineModel`，不存第二份视图状态**（`TimelineViewFramesForTest()` 把"画布可见范围"与"滑块窗口"一起打印）。
-    面板 = 头 26 + 视图条 13 + 工作区条 15 + 画布 78（总高仍 132/112/96）。播放头常驻、越界贴边箭头；
+    面板 = 头 26 + 视图条 13 + 工作区条 15 + 画布 78（总高仍 132/112/96）；**画布左右各收 8px**，
+    与滑块轨道的 8px 内边距严格一致（用户 2026-10-26 反馈"工作区两端对不准画布"→ 只给滑块缩进会让
+    两端各差 8px；改成"画布往里收"后两侧都是 `8 + ratio×(面板宽−16)`，`TimelineBarAlignForTest()`
+    断言 |dx| ≤ 1，实测 −1/+1）。播放头常驻、越界贴边箭头；
     Fill 模式标尺/刻度/标记带/A-B 标签按实际高度派生、波形封顶 96；**删除内部横向滚动条**
     （`timelineScrollBar`/`kScrollBarHeight` 全仓 0 处）。
   - **去轮询**：删 `ui_meta_timer_`（250ms）→ `TimelineWidget::viewChanged/playheadChanged/loopRangeChanged` +

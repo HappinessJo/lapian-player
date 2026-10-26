@@ -275,6 +275,42 @@ void RunReadoutEditTest(MainWindow& window) {
             full->toolTip() == QStringLiteral("全屏（F / 双击画面）"));
     }
 
+    // 工作区端点必须与画布上的同一帧垂直对齐（用户 2026-10-26 反馈的偏差）：
+    // 设 A=300 / B=700，比较"滑块像素"与"画布像素"，两侧都要 |dx| ≤ 1。
+    window.GoToFrameForTest(300);
+    window.SetLoopInForTest();
+    window.GoToFrameForTest(700);
+    window.SetLoopOutForTest();
+    QCoreApplication::processEvents();
+    const QString align = window.TimelineBarAlignForTest();
+    std::fprintf(stderr, "T6.2 readout_align %s\n", align.toUtf8().constData());
+    std::fflush(stderr);
+    auto align_value = [&align](const char* key) {
+      const int at = align.indexOf(QString::fromLatin1(key) + QLatin1Char('='));
+      if (at < 0) {
+        return 999;
+      }
+      int start = at + static_cast<int>(std::strlen(key)) + 1;
+      const bool negative = start < align.size() && align.at(start) == QLatin1Char('-');
+      if (negative) {
+        ++start;
+      }
+      int end = start;
+      while (end < align.size() && align.at(end).isDigit()) {
+        ++end;
+      }
+      const int value = align.mid(start, end - start).toInt();
+      return negative ? -value : value;
+    };
+    const int dx_a = align_value("dx_a");
+    const int dx_b = align_value("dx_b");
+    std::fprintf(stderr, "T6.2 readout_align_dx a=%d b=%d\n", dx_a, dx_b);
+    std::fflush(stderr);
+    check("bar-align-a", std::abs(dx_a) <= 1);
+    check("bar-align-b", std::abs(dx_b) <= 1);
+    window.ClearLoopForTest();
+    QCoreApplication::processEvents();
+
     std::fprintf(stderr, "T6.2 readout_summary fails=%d tier=%s split=%s\n",
                  *failures, window.TransportTierForTest().toUtf8().constData(),
                  window.SplitterStateForTest().toUtf8().constData());

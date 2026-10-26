@@ -26,3 +26,7 @@ desktop.ini
 
 # 本地凭据（S2 spike 用，绝不入库）
 /.secrets/
+
+# 测试产物：坏 sidecar（RobustTestRunner 等写在工作目录）
+/.lapian.json
+*.lapian.json

@@ -1942,6 +1942,46 @@ QString MainWindow::TransportTierForTest() const {
   return shell_->transport()->TierStateForTest();
 }
 
+QString MainWindow::TimelineBarAlignForTest() const {
+  // 同一个帧在"工作区滑块"与"画布"上的像素 x（都换算到 TimelinePanel 坐标系）：
+  //   画布：canvas_x + 画布的左边距（8）
+  //   滑块：工作区条上的 x（它自己已含 8px 轨道内边距）
+  // 两者必须相等（±1px），否则工作区端点会与画布上的同一帧错位。
+  if (shell_ == nullptr || shell_->timelinePanel() == nullptr ||
+      timeline_ == nullptr) {
+    return QStringLiteral("align=none");
+  }
+  RangeBar* work = shell_->timelinePanel()->workBar();
+  if (work == nullptr) {
+    return QStringLiteral("align=none");
+  }
+  const lapian::core::TimelineModel& model = timeline_->model();
+  // 画布在面板里的左缘（= 画布容器的左边距）。
+  int canvas_offset = work->x();
+  if (QWidget* host = shell_->timelinePanel()->canvasHost()) {
+    canvas_offset = host->x() + (host->layout() == nullptr
+                                     ? 0
+                                     : host->layout()->contentsMargins().left());
+  }
+  const QRect thumb = work->thumbGeometryForTest();
+  auto canvas_x = [&](std::int64_t frame) {
+    return canvas_offset + static_cast<int>(std::lround(model.FrameToX(frame)));
+  };
+  const std::int64_t a = loop_.has_in() ? loop_.in() : 0;
+  const std::int64_t b = loop_.has_out() ? loop_.out() : (loop_.has_in() ? loop_.in() : 0);
+  const int a_canvas = canvas_x(a);
+  const int b_canvas = canvas_x(std::min(b + 1, model.frame_count()));
+  return QStringLiteral("offset=%1 thumb=%2..%3 a_canvas=%4 b_canvas=%5 "
+                        "dx_a=%6 dx_b=%7")
+      .arg(canvas_offset)
+      .arg(thumb.left())
+      .arg(thumb.right() + 1)
+      .arg(a_canvas)
+      .arg(b_canvas)
+      .arg(thumb.left() - a_canvas)
+      .arg(thumb.right() + 1 - b_canvas);
+}
+
 QString MainWindow::M7StateForTest() const {
   auto* label = findChild<QLabel*>(QStringLiteral("v2FrameNumber"));
   if (label == nullptr || shell_ == nullptr || shell_->transport() == nullptr) {

@@ -88,7 +88,10 @@ TimelinePanel::TimelinePanel(QWidget* parent) : QWidget(parent) {
   canvas_host_ = new QWidget(this);
   canvas_host_->setObjectName(QStringLiteral("v2TimelineCanvas"));
   auto* canvas_layout = new QVBoxLayout(canvas_host_);
-  canvas_layout->setContentsMargins(0, 0, 0, 0);
+  // 左右 8px 与两条滑块的轨道内边距**必须一致**：画布与滑块的帧坐标都映射到
+  // 同一个 ratio，这样工作区端点才能垂直对准画布上的同一帧（用户 2026-10-26
+  // 反馈的偏差就是这么来的：画布铺满、轨道缩进 8px → 最多差 8px）。
+  canvas_layout->setContentsMargins(8, 0, 8, 0);
   canvas_layout->setSpacing(0);
   root->addWidget(canvas_host_, 1);
 
