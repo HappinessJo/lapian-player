@@ -1,8 +1,8 @@
 # 新会话提示词：UI v2 3D 热修 · 发布收口（release closeout）
 
 - **状态**：待执行（2026-10-26 交接给下一个 agent）。
-- **当前代码**：HEAD `76a425a`（docs-only；源码仍是 4 个代码 commit `534d909`/`b78bbe1`/`6533da0`/`efc6831`，
-  文档 `c23003d`/`1e407ad`/`76a425a`）；四项热修已完成并通过全量回归。
+- **当前代码**：HEAD `20fa5b5`（docs-only；源码仍是 4 个代码 commit `534d909`/`b78bbe1`/`6533da0`/`efc6831`，
+  文档 `c23003d`/`1e407ad`/`76a425a`/`20fa5b5`；开工时以 `git log` 顶部为准）；四项热修已完成并通过全量回归。
 - **本轮范围**：只做**构建 → 打包 → 安装 → 安装版冒烟 → 发布文档**；**不改产品代码、不改门/阈值/
   schema、不重开 3D/热修范围**。若打包/安装失败且根因在产品代码，停下来报告，不静默热修。
 - **上游**：[热修实现交接](handoff-2026-10-26-ui-v2-3d-hotfix-close.md)（修复/门禁/证据）、
@@ -43,9 +43,9 @@ schema、不重开 3D 范围**；如果构建/打包/安装失败且根因在产
 - docs/handoff-2026-10-24-t8.16.md（静默安装/卸载参数、快捷方式/设置核对）
 
 当前状态（开工先核对，别假设）：
-- git HEAD 应为 76a425a（或之后仅 docs 提交）；`git status` 应干净。
+- git HEAD 应为 docs-only（截至交接为 20fa5b5；开工以 `git log` 顶部为准）；`git status` 应干净。
 - 4 个代码 commit：534d909（P0 待播/落地补 Play）、b78bbe1（P1 两阶段缓存设置）、
-  6533da0（P2 扫码长高/夹屏/滚动）、efc6831（P3 清晰度 chip）；文档 c23003d/1e407ad/76a425a。
+  6533da0（P2 扫码长高/夹屏/滚动）、efc6831（P3 清晰度 chip）；文档 c23003d/1e407ad/76a425a/20fa5b5。
 - 已构建 exe（热修后）：build\release\bin\lapian.exe 3,538,432B，
   SHA256 EE366C0A950B455068480EA2397EE80F1FDE62BE360103A3B4C58E85109A52CF；
   Medium 副本 %LOCALAPPDATA%\Programs\拉片软件\lapian.exe 同 hash。
@@ -116,7 +116,7 @@ schema、不重开 3D 范围**；如果构建/打包/安装失败且根因在产
      版本 0.1.0、代码 HEAD/4 个 commit、构建耗时、ctest、dist 文件数/大小/exe hash、
      setup/zip 大小+SHA256、安装验证（权限/退出码/hash/快捷方式/settings）、安装版冒烟数字、
      已知残余（T8.6.1b 35/1、fault ui_gap、SESSDATA 过期未跑 1080P、用户体感只记体感）。
-   - 更新 AGENTS §12（新发布文档 + 本轮 v6.58 摘要）与 AGENTS 顶部"最后更新"。
+   - 更新 AGENTS §12（新发布文档 + 本轮 v6.59 摘要）与 AGENTS 顶部"最后更新"。
    - 只提交 docs；`git status` 干净；报告 commit hash。
 
 退出条件：
