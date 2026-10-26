@@ -2477,10 +2477,19 @@ int main(int argc, char* argv[]) {
       if (mark_test) {
         // T5.2：101 个标记（0–100）、重开、点击跳转、100 标记操作与性能、
         // 删除持久化、空文件删除、损坏 sidecar 警告、F8-A3 文件隔离。
+        // 3C 新增 2 条：折叠不改数据/选中；折叠态 FocusNoteEditor 自动展开到标记 tab。
         const QString mark_a = file_path;
         const QString mark_b = file_b;
         const QString sidecar_a = mark_a + QStringLiteral(".lapian.json");
         const QString sidecar_b = mark_b + QStringLiteral(".lapian.json");
+        auto failures = std::make_shared<int>(0);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T5.2 mark_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
         auto schedule = [&window](int ms, auto fn) {
           QTimer::singleShot(ms, Qt::PreciseTimer, &window, std::move(fn));
         };
@@ -2493,6 +2502,11 @@ int main(int argc, char* argv[]) {
           std::fprintf(stderr, "T5.2 mark_storage path=%s fallback=%d\n",
                        window.MarkStoragePathForTest().toUtf8().constData(),
                        window.MarkUsingFallbackForTest() ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto log_inspector = [&window](const char* step) {
+          std::fprintf(stderr, "T5.2 mark_inspector %s %s\n", step,
+                       window.InspectorStateForTest().toUtf8().constData());
           std::fflush(stderr);
         };
 
@@ -2523,6 +2537,27 @@ int main(int argc, char* argv[]) {
         });
         schedule(4400, [&window]() { window.ActivateMarkForTest(100); });
         schedule(4700, [&window, log_state]() { log_state("click-frame100"); });
+        // 3C 用例 ①：折叠检查器后 MarkCount 与选中 id 不变（只 hide，不重建数据）。
+        // 3C 用例 ②：折叠态 FocusNoteEditorForTest() 自动展开并切回“标记”tab。
+        // 两条只对 v2 壳有意义（旧壳没有检查器 tab/折叠），旧壳跳过、断言一行不改。
+        schedule(4800, [&window, check, log_inspector]() {
+          if (!window.UiV2ForTest()) {
+            return;
+          }
+          const QString before = window.MarkStateForTest();
+          window.SetInspectorCollapsedForTest(true);
+          const QString collapsed = window.MarkStateForTest();
+          log_inspector("collapsed");
+          check("collapse-inspector", window.InspectorCollapsedForTest());
+          check("collapse-keeps-marks", before == collapsed);
+          const bool focused = window.FocusNoteEditorForTest();
+          log_inspector("focus-after-collapsed");
+          const QString expanded = window.InspectorStateForTest();
+          check("focus-note-auto-expand",
+                focused && !window.InspectorCollapsedForTest() &&
+                    expanded.contains(QStringLiteral("collapsed=0")) &&
+                    expanded.contains(QStringLiteral("tab=marks")));
+        });
         schedule(4900, [&window]() { window.ResetMarkPerfSamplesForTest(); });
         for (int i = 0; i < 20; ++i) {
           schedule(5000 + i * 150, [&window, i]() { window.ActivateMarkForTest(i * 5); });
@@ -2588,7 +2623,10 @@ int main(int argc, char* argv[]) {
           window.OpenFile(mark_b);
           log_state("b-final-empty");
         });
-        QTimer::singleShot(11500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
+        QTimer::singleShot(11500, Qt::PreciseTimer, &app,
+                           [&app, failures]() {
+                             app.exit(*failures == 0 ? 0 : 1);
+                           });
       }
       if (note_test) {
         // T5.3：编辑 → 直接关窗 → 重开（F8-A2）、空备注、覆盖保存、焦点隔离、
@@ -3927,7 +3965,7 @@ int main(int argc, char* argv[]) {
         };
         QTimer::singleShot(
             600, &window,
-            [&window, failures, check, verify, dpi_expect_scale]() {
+            [&window, failures, check, verify, dpi_expect_scale, dpi_tag]() {
           if (dpi_expect_scale > 0.0) {
             check("dpr", std::abs(window.devicePixelRatioF() - dpi_expect_scale) < 0.01);
           }
@@ -3944,19 +3982,19 @@ int main(int argc, char* argv[]) {
           window.PressFullScreenKeyForTest();
           QTimer::singleShot(
               350, &window,
-              [&window, check, verify, available, failures]() {
+              [&window, check, verify, available, failures, dpi_tag]() {
             check("fullscreen", window.IsFullScreenForTest());
             verify("fullscreen");
             window.PressEscapeKeyForTest();
             QTimer::singleShot(
                 250, &window,
-                [&window, check, verify, available, failures]() {
+                [&window, check, verify, available, failures, dpi_tag]() {
               check("exit-fullscreen", !window.IsFullScreenForTest());
               const int narrow_height =
                   std::min(500, std::max(360, available.height() - 64));
               window.resize(820, narrow_height);
               QTimer::singleShot(250, &window,
-                                 [&window, verify, failures, check]() {
+                                 [&window, verify, failures, check, dpi_tag]() {
                 verify("narrow");
                 // 3B 的两个新用例只对新壳有意义（旧壳没有时间轴面板/两条滑块，
                 // 也没有 Transport 档位）；旧壳保持 3A 的 3 相位不动。
@@ -4033,6 +4071,128 @@ int main(int argc, char* argv[]) {
                                problem.toUtf8().constData());
                 }
                 check("timeline-340-layout", tall.isEmpty());
+                auto int_value = [](const QString& text, const QString& key) {
+                  const int at = text.indexOf(key + QLatin1Char('='));
+                  if (at < 0) {
+                    return -999;
+                  }
+                  int start = at + key.size() + 1;
+                  int end = start;
+                  while (end < text.size() && text.at(end).isDigit()) {
+                    ++end;
+                  }
+                  return text.mid(start, end - start).toInt();
+                };
+                // 3C 新用例 ①：折叠检查器 44±1（LayoutProblems 的 inspector-width
+                // 分支 + rail 可见）。折叠只 hide，MarkPanel 与数据不重建。
+                window.SetInspectorCollapsedForTest(true);
+                QCoreApplication::processEvents();
+                std::fprintf(stderr, "T6.4 dpi_inspector collapsed %s\n",
+                             window.InspectorStateForTest().toUtf8().constData());
+                std::fflush(stderr);
+                QStringList collapsed_problems = window.LayoutProblemsForTest();
+                for (const QString& problem : collapsed_problems) {
+                  std::fprintf(stderr, "T6.4 dpi_problem inspector-collapsed %s\n",
+                               problem.toUtf8().constData());
+                }
+                check("inspector-collapsed-layout", collapsed_problems.isEmpty());
+                check("inspector-collapsed-state",
+                      window.InspectorCollapsedForTest() &&
+                          window.InspectorStateForTest().contains(
+                              QStringLiteral("collapsed=1")) &&
+                          window.InspectorStateForTest().contains(
+                              QStringLiteral("rail=1")));
+                const QString tag_name =
+                    dpi_tag.isEmpty() ? QStringLiteral("x") : dpi_tag;
+                check("inspector-collapsed-shot",
+                      window.grab().save(
+                          QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+                          tag_name +
+                          QStringLiteral("-inspector-collapsed.png")));
+                // 3C 新用例 ②：展开后把检查器拖到极值（560 / 220；窄窗口按
+                // “画面列 ≥420”夹取），两种宽度下布局都必须合法。
+                window.SetInspectorCollapsedForTest(false);
+                QCoreApplication::processEvents();
+                const QString tier_name = window.DensityNameForTest();
+                const int workspace_margin =
+                    tier_name == QStringLiteral("regular") ? 6 : 4;
+                const int split_total = window.width() - 2 * workspace_margin;
+                const int wide_expected = std::max(
+                    220, std::min(560, split_total - 6 - 420));
+                window.SetSplitSizesForTest(340, wide_expected);
+                QCoreApplication::processEvents();
+                const QString wide_state = window.InspectorStateForTest();
+                std::fprintf(stderr,
+                             "T6.4 dpi_inspector wide_expected=%d %s\n",
+                             wide_expected, wide_state.toUtf8().constData());
+                std::fflush(stderr);
+                QStringList wide_problems = window.LayoutProblemsForTest();
+                for (const QString& problem : wide_problems) {
+                  std::fprintf(stderr, "T6.4 dpi_problem inspector-wide %s\n",
+                               problem.toUtf8().constData());
+                }
+                check("inspector-wide-width",
+                      std::abs(int_value(window.SplitterStateForTest(),
+                                         QStringLiteral("ins")) -
+                               wide_expected) <= 2);
+                check("inspector-wide-layout", wide_problems.isEmpty());
+                check("inspector-wide-shot",
+                      window.grab().save(
+                          QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+                          tag_name + QStringLiteral("-inspector-wide.png")));
+                // 3C：三个 tab 都要能切（截图页懒建缩略图 / 信息页 11 行/
+                // 切回标记页），并各留一张截图做视觉证据。
+                window.SetInspectorTabForTest(1);
+                const QString shots_state = window.InspectorStateForTest();
+                std::fprintf(stderr, "T6.4 dpi_inspector shots %s\n",
+                             shots_state.toUtf8().constData());
+                std::fflush(stderr);
+                QStringList shots_problems = window.LayoutProblemsForTest();
+                check("inspector-shots-page",
+                      shots_state.contains(QStringLiteral("tab=shots")) &&
+                          shots_state.contains(QStringLiteral("page=1")));
+                check("inspector-shots-layout", shots_problems.isEmpty());
+                check("inspector-shots-shot",
+                      window.grab().save(
+                          QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+                          tag_name + QStringLiteral("-inspector-shots.png")));
+                window.SetInspectorTabForTest(2);
+                const QString info_state = window.InspectorStateForTest();
+                std::fprintf(stderr, "T6.4 dpi_inspector info %s\n",
+                             info_state.toUtf8().constData());
+                std::fflush(stderr);
+                QStringList info_problems = window.LayoutProblemsForTest();
+                check("inspector-info-page",
+                      info_state.contains(QStringLiteral("tab=info")) &&
+                          info_state.contains(QStringLiteral("page=2")));
+                check("inspector-info-rows",
+                      int_value(info_state, QStringLiteral("info")) > 0);
+                check("inspector-info-layout", info_problems.isEmpty());
+                check("inspector-info-shot",
+                      window.grab().save(
+                          QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+                          tag_name + QStringLiteral("-inspector-info.png")));
+                window.SetInspectorTabForTest(0);
+                window.SetSplitSizesForTest(340, 220);
+                QCoreApplication::processEvents();
+                const QString narrow_state = window.InspectorStateForTest();
+                std::fprintf(stderr, "T6.4 dpi_inspector narrow %s\n",
+                             narrow_state.toUtf8().constData());
+                std::fflush(stderr);
+                QStringList narrow_problems = window.LayoutProblemsForTest();
+                for (const QString& problem : narrow_problems) {
+                  std::fprintf(stderr, "T6.4 dpi_problem inspector-narrow %s\n",
+                               problem.toUtf8().constData());
+                }
+                check("inspector-narrow-width",
+                      std::abs(int_value(window.SplitterStateForTest(),
+                                         QStringLiteral("ins")) -
+                               220) <= 2);
+                check("inspector-narrow-layout", narrow_problems.isEmpty());
+                check("inspector-narrow-shot",
+                      window.grab().save(
+                          QDir::currentPath() + QStringLiteral("/build/t6.4-dpi-") +
+                          tag_name + QStringLiteral("-inspector-narrow.png")));
                 QCoreApplication::exit(*failures == 0 ? 0 : 1);
               });
             });

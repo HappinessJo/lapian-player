@@ -103,6 +103,36 @@ void TestNaming() {
         "基名不含非法字符");
 }
 
+// UI v2 3C：截图网格扫历史目录时要能从文件名反解帧号（产品只写这些形态）。
+void TestParseFrame() {
+  using lapian::snapshot::ParseSnapshotFrameFromName;
+  using lapian::snapshot::SnapshotFileName;
+
+  const QString base =
+      lapian::snapshot::BuildSnapshotBaseName(QStringLiteral("C:/videos/测试.mp4"),
+                                              100, 30, 1);
+  Check(ParseSnapshotFrameFromName(SnapshotFileName(base, 0)) == 100,
+        "反解序号 0 的帧号");
+  Check(ParseSnapshotFrameFromName(SnapshotFileName(base, 7)) == 100,
+        "反解带重名序号的帧号");
+  Check(ParseSnapshotFrameFromName(QStringLiteral("测试_f0_00-00-00-00.png")) == 0,
+        "反解帧 0");
+  Check(ParseSnapshotFrameFromName(QStringLiteral("测试_f1234567_11-22-33-04.png")) ==
+            1234567,
+        "反解 7 位帧号");
+  Check(ParseSnapshotFrameFromName(QStringLiteral("测试_f42_00-00-01-12.PNG")) == 42,
+        "扩展名大小写不敏感");
+  // 视频名本身带 "_f123_00-00-00-00"：取最后一段（截图基名是最后追加的）。
+  Check(ParseSnapshotFrameFromName(
+            QStringLiteral("clip_f999_00-00-00-00_f5_00-00-00-05_2.png")) == 5,
+        "取最后一段帧号");
+  Check(ParseSnapshotFrameFromName(QStringLiteral("frame.png")) == -1,
+        "非截图命名返回 -1");
+  Check(ParseSnapshotFrameFromName(QStringLiteral("测试_f12_00-00-00.png")) == -1,
+        "时间码位数不对返回 -1");
+  Check(ParseSnapshotFrameFromName(QString()) == -1, "空名返回 -1");
+}
+
 void TestDirectoryFallback() {
   using lapian::snapshot::ResolveSnapshotDirectory;
 
@@ -201,6 +231,7 @@ int main() {
   TestSanitize();
   TestTimecode();
   TestNaming();
+  TestParseFrame();
   TestDirectoryFallback();
   TestRotation();
 

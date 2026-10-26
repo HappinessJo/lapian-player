@@ -52,6 +52,12 @@ class MarkPanel : public QWidget {
   // 只更新一条标记的列表文本，不重建列表、不改变选中与滚动位置。
   void UpdateMarkText(const QString& id, const QString& label, const QString& note);
 
+  // UI v2 3C：嵌进 InspectorPanel 时收掉自己的表头/存储位置/提示（这些在新壳里
+  // 由检查器头、tab 计数与页脚承担）。默认 false —— tests/mark_panel_test.cpp
+  // 仍独立构造 MarkPanel，行为与既有一致。只改可见性与外边距，不销毁任何对象。
+  void SetEmbeddedMode(bool embedded);
+  bool embedded() const { return embedded_; }
+
   int MarkCount() const { return static_cast<int>(marks_.size()); }
   int WarningCount() const;
   QString StorageSummary() const;
@@ -86,6 +92,8 @@ class MarkPanel : public QWidget {
   QLabel* storage_label_ = nullptr;
   QLabel* warning_label_ = nullptr;
   QLabel* empty_label_ = nullptr;
+  QLabel* hint_label_ = nullptr;
+  QWidget* title_row_ = nullptr;
   QTreeWidget* tree_ = nullptr;
   QAction* delete_action_ = nullptr;
 
@@ -98,4 +106,5 @@ class MarkPanel : public QWidget {
   int warning_count_ = 0;
   QString editing_id_;
   bool committing_ = false;
+  bool embedded_ = false;
 };

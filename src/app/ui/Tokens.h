@@ -129,6 +129,7 @@ struct Tokens {
   int inspector_max = 560;
   int inspector_collapsed = 44;
   int inspector_head = 26;
+  int inspector_foot = 22;  // 页脚（存储位置）高度
   int timeline_min = 96;
   int timeline_max = 340;
   int waveform_cap = 96;  // 3B：时间轴拉高时波形封顶
@@ -169,6 +170,7 @@ inline Tokens MakeTokens(Density density) {
       t.play = 30;
       t.readout = 22;
       t.inspector_head = 24;
+      t.inspector_foot = 20;
       t.fs_readout = 22.0;
       t.fs_readout_sm = 20.0;
       t.row_zoom = 12;
@@ -187,6 +189,7 @@ inline Tokens MakeTokens(Density density) {
       t.play = 28;
       t.readout = 22;
       t.inspector_head = 22;
+      t.inspector_foot = 20;
       t.fs_readout = 22.0;
       t.fs_readout_sm = 20.0;
       t.row_zoom = 12;

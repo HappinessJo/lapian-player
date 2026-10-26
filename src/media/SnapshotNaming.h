@@ -22,6 +22,12 @@ QString FormatSnapshotTimecode(std::int64_t frame, int fps_num, int fps_den);
 QString BuildSnapshotBaseName(const QString& video_path, std::int64_t frame,
                               int fps_num, int fps_den);
 
+// UI v2 3C：从截图文件名反解帧号（纯函数，截图网格扫历史目录用）。
+// 只认 BuildSnapshotBaseName/SnapshotFileName 生成的形态：
+//   {base}_f{帧号}_{HH-MM-SS-FF}[_序号].png
+// 不匹配（含任意其他 png）返回 -1；帧号溢出 std::int64_t 也返回 -1。
+std::int64_t ParseSnapshotFrameFromName(const QString& file_name);
+
 // sequence=0 时不加序号；>0 时为 {base}_{sequence}.png。
 QString SnapshotFileName(const QString& base_name, int sequence);
 QString SnapshotFilePath(const QString& directory, const QString& base_name, int sequence);

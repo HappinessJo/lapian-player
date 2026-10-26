@@ -101,7 +101,20 @@ QMainWindow, QDialog, QMessageBox { background: @appbg; }
 #v2PlayButton:pressed { background: #4d7de0; }
 #v2PlayButton:disabled { background: @border; }
 #v2ZoomIn, #v2ZoomOut, #v2ZoomFit { color: @text_dim; }
-#v2InspectorRail { background: transparent; }
+#v2InspectorRail { background: transparent; color: @text_meta; }
+#v2InspectorHead { background: @surface2; border-bottom: 1px solid @border;
+  border-top-left-radius: 4px; border-top-right-radius: 4px; }
+#v2InspectorFooter { background: @surface2; border-top: 1px solid @border;
+  border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+#v2StoreText { color: @text_meta; }
+#v2StoreText[warning="true"] { color: @warn; }
+#v2MarkBadge, #v2ShotBadge { color: @text_mute; }
+#v2InspectorAdd, #v2InspectorExpand, #v2InspectorCollapse { color: @text_dim; }
+#v2ShotGrid { background: transparent; }
+#v2ShotEmpty { color: @text_meta; }
+#v2ShotNote { color: @text_mute; }
+#v2InfoTable { background: transparent; border: none; }
+#v2InfoTable::item { border-bottom: 1px dashed #232329; padding: 2px 8px; }
 #v2StageEmpty, #v2StageError, #v2StageLoading { background: #0c0c0e; }
 #v2EmptyTitle, #v2ErrorTitle { color: @text; }
 #v2EmptyHint, #v2ErrorReason, #v2LoadingText, #v2EmptyKbd { color: @text_meta; }

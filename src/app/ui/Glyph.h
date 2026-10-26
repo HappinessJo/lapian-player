@@ -44,6 +44,7 @@ enum class GlyphId {
   kImage,
   kCheck,
   kFilter,
+  kFolder,
 };
 
 // 以逻辑像素 size 绘制（内部按 devicePixelRatio 放大）。

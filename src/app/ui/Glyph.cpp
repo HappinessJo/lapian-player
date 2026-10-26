@@ -1,4 +1,4 @@
-﻿#include "app/ui/Glyph.h"
+#include "app/ui/Glyph.h"
 
 #include <QGuiApplication>
 #include <QIcon>
@@ -237,6 +237,12 @@ void DrawGlyph(QPainter& painter, GlyphId id, const QColor& color) {
     case GlyphId::kFilter:
       painter.drawPolygon(Poly({{2.4, 3.0}, {13.6, 3.0}, {9.2, 8.4}, {9.2, 13.0},
                                 {6.8, 11.6}, {6.8, 8.4}}));
+      break;
+    case GlyphId::kFolder:
+      painter.setPen(stroke);
+      painter.setBrush(Qt::NoBrush);
+      painter.drawPolyline(Poly({{2.2, 12.8}, {2.2, 4.0}, {6.2, 4.0}, {7.6, 5.8},
+                                 {13.8, 5.8}, {13.8, 12.8}, {2.2, 12.8}}));
       break;
   }
 }

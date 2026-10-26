@@ -231,6 +231,8 @@ qt_add_executable(lapian WIN32
   app/ui/TransportBar.cpp
   app/ui/RangeBar.h
   app/ui/RangeBar.cpp
+  app/ui/InspectorPanel.h
+  app/ui/InspectorPanel.cpp
   app/ui/PlayerShell.h
   app/ui/PlayerShell.cpp
   app/CacheSettingsDialog.cpp

@@ -14,6 +14,10 @@ class TopBar;
 class TransportBar;
 class QToolButton;
 
+namespace lapian::ui {
+class InspectorPanel;
+}
+
 // UI v2 视图根（规划 §7.1）：只做布局与区域访问器，不含业务逻辑。
 // 不持有 QAction、不读 PlaybackController/MarkStore；尺寸只由 ApplyTokens()
 // 与用户拖拽改变，resizeEvent 只做"档位判定 + 尺寸落地"。
@@ -35,8 +39,9 @@ class PlayerShell : public QWidget {
   TimelinePanel* timelinePanel() const { return timeline_panel_; }
   // 兼容 3A 之前的调用点：返回时间轴画布容器（TimelineWidget 放这里）。
   QWidget* timelineHost() const;
+  // 检查器（3C）：头三 tab + 列表/编辑区/截图网格/信息表 + 页脚存储位置。
+  lapian::ui::InspectorPanel* inspectorPanel() const { return inspector_panel_; }
   QWidget* inspectorHost() const { return inspector_host_; }
-  QWidget* inspectorContentHost() const { return inspector_content_; }
   PlayerSplitter* vSplit() const { return v_split_; }
   PlayerSplitter* hSplit() const { return h_split_; }
 
@@ -80,7 +85,6 @@ class PlayerShell : public QWidget {
  private:
   void ApplySplitSizes();
   void ApplyTimelineConstraints();
-  void UpdateInspectorToggle();
   void ApplyWorkspaceMargins();
 
   TopBar* top_bar_ = nullptr;
@@ -91,9 +95,7 @@ class PlayerShell : public QWidget {
   QWidget* video_column_ = nullptr;
   TimelinePanel* timeline_panel_ = nullptr;
   QWidget* inspector_host_ = nullptr;
-  QWidget* inspector_rail_ = nullptr;
-  QWidget* inspector_content_ = nullptr;
-  QToolButton* inspector_toggle_ = nullptr;
+  lapian::ui::InspectorPanel* inspector_panel_ = nullptr;
   PlayerSplitter* v_split_ = nullptr;
   PlayerSplitter* h_split_ = nullptr;
 

@@ -19,6 +19,9 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -32,6 +35,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardPaths>
@@ -43,6 +47,7 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVector>
 #include <QWidget>
 
 #include <algorithm>
@@ -81,6 +86,7 @@ extern "C" {
 #include "app/SnapshotService.h"
 #include "app/TimelineWidget.h"
 #include "app/ui/BannerSlot.h"
+#include "app/ui/InspectorPanel.h"
 #include "app/ui/PlayerShell.h"
 #include "app/ui/PlayerSplitter.h"
 #include "app/ui/RangeBar.h"
@@ -100,6 +106,7 @@ extern "C" {
 #include "media/OnlinePreviewDecoder.h"
 #include "media/PathProbe.h"
 #include "media/PreviewDecoder.h"
+#include "media/SnapshotNaming.h"
 #include "online/CacheManager.h"
 #include "online/CacheStore.h"
 #include "online/CredentialStore.h"
@@ -381,6 +388,8 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
             snapshot_last_fallback_ = used_fallback;
             snapshot_last_saved_frame_ = frame_index;
             snapshot_save_samples_.push_back(static_cast<double>(encode_ms));
+            // 3C：截图网格与 tab 徽标跟着本次会话的截图即时更新（扫目录，无定时器）。
+            RefreshInspectorShots();
             const QString native = QDir::toNativeSeparators(path);
             if (used_fallback) {
               statusBar()->showMessage(
@@ -749,13 +758,11 @@ void MainWindow::BuildShellUi() {
   connect(timeline_, &TimelineWidget::loopRangeChanged, this,
           &MainWindow::UpdateTimelineMeta);
 
-  // 检查器：MarkPanel 原对象（结构/objectName/信号一律不动）。
+  // 检查器（3C）：MarkPanel 原对象（结构/objectName/信号一律不动）交给
+  // InspectorPanel 的 page0；表头/存储/提示由检查器头、tab 计数与页脚承担。
   mark_panel_ = new MarkPanel(this);
-  mark_panel_->setMinimumWidth(0);
-  mark_panel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
-  if (auto* layout =
-          qobject_cast<QVBoxLayout*>(shell_->inspectorContentHost()->layout())) {
-    layout->addWidget(mark_panel_);
+  if (lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel()) {
+    inspector->AdoptMarkPanel(mark_panel_);
   }
 
   // InfoBar 继续做通知/规格/帧号的"状态源"（media::StatusNotice 的构建/择一/
@@ -825,6 +832,21 @@ void MainWindow::AdoptShellWidgets() {
         info_bar_->findChild<QWidget*>(QStringLiteral("v2FrameTotal")));
   }
   transport->AdoptVolume(volume_slider_);
+  // 3C：检查器的 `+` 绑既有“添加标记”QAction（M5 第 13 行的第二入口）；
+  // 截图格点击 → 与标记跳转相同的“先重绘 UI、再 singleShot(0) 精确解码”。
+  if (lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel()) {
+    inspector->BindAddAction(mark_action_);
+    connect(inspector, &lapian::ui::InspectorPanel::shotActivated, this,
+            [this](qint64 frame, const QString&) {
+              ActivateShot(static_cast<std::int64_t>(frame));
+            });
+    connect(inspector, &lapian::ui::InspectorPanel::tabChanged, this, [this](int tab) {
+      // 切到“截图”页时再扫目录（不在打开/拖动路径上做 IO）。
+      if (tab == static_cast<int>(lapian::ui::InspectorPanel::Tab::kShots)) {
+        RefreshInspectorShots();
+      }
+    });
+  }
   // 3B：速度文本仍由 MainWindow 给（FormatSpeed），控件换成 v2SpeedButton；
   // 点击弹 0.25–2x 菜单（[ / ] 走既有 QAction 不变）。
   transport->SetSpeedText(speed_label_ == nullptr ? QStringLiteral("1x")
@@ -972,6 +994,390 @@ void MainWindow::SyncShellChrome() {
     shell_->transport()->SetLoopEnabled(loop_.enabled());
     shell_->transport()->SetInspectorCollapsed(shell_->inspector_collapsed());
   }
+  SyncInspectorChrome();
+}
+
+void MainWindow::SyncInspectorChrome() {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return;
+  }
+  lapian::ui::InspectorPanel* inspector = shell_->inspectorPanel();
+  if (mark_panel_ != nullptr) {
+    inspector->SetMarkCount(mark_panel_->MarkCount());
+    const bool fallback = marks_ != nullptr && marks_->using_fallback();
+    inspector->SetStorageText(mark_panel_->StorageSummary(), fallback);
+  } else {
+    inspector->SetMarkCount(0);
+    inspector->SetStorageText(QStringLiteral("存储：—"), false);
+  }
+  RefreshInspectorInfo();
+}
+
+QString MainWindow::SnapshotPicturesRoot() const {
+  if (!snapshot_pictures_root_for_test_.isEmpty()) {
+    return QFileInfo(snapshot_pictures_root_for_test_).absoluteFilePath();
+  }
+  const QString env = qEnvironmentVariable("LAPIAN_SNAPSHOT_PICTURES_DIR");
+  if (!env.isEmpty()) {
+    return QFileInfo(env).absoluteFilePath();
+  }
+  QString pictures =
+      QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+  if (pictures.isEmpty()) {
+    pictures = QDir::homePath() + QStringLiteral("/Pictures");
+  }
+  return QFileInfo(pictures).absoluteFilePath();
+}
+
+void MainWindow::RefreshInspectorInfo() {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return;
+  }
+  QVector<lapian::ui::InspectorPanel::InfoRow> rows;
+  auto add = [&rows](const QString& label, const QString& value) {
+    rows.push_back(lapian::ui::InspectorPanel::InfoRow{label, value});
+  };
+  if (session_ == nullptr || !session_->IsOpen()) {
+    add(QStringLiteral("文件"), QStringLiteral("未打开"));
+    add(QStringLiteral("格式"), QStringLiteral("—"));
+    add(QStringLiteral("分辨率"), QStringLiteral("—"));
+    add(QStringLiteral("视频"), QStringLiteral("—"));
+    add(QStringLiteral("帧率"), QStringLiteral("—"));
+    add(QStringLiteral("时长"), QStringLiteral("—"));
+    add(QStringLiteral("总帧数"), QStringLiteral("—"));
+    add(QStringLiteral("音频"), QStringLiteral("—"));
+    add(QStringLiteral("旋转"), QStringLiteral("—"));
+    add(QStringLiteral("可变帧率"), QStringLiteral("—"));
+    add(QStringLiteral("路径"), QStringLiteral("—"));
+    shell_->inspectorPanel()->SetInfoRows(rows);
+    return;
+  }
+
+  const lapian::media::MediaInfo& info = session_->info();
+  const QString media_path = QString::fromStdString(info.path_utf8);
+  const QFileInfo media_file(media_path);
+  const double nominal_fps = info.video.frame_rate.ToDouble();
+  const lapian::core::FrameRate rate(info.video.frame_rate.num,
+                                     info.video.frame_rate.den);
+
+  // 文件：本地用文件名；在线用 bvid（标题可能很长，放在 tooltip 里没必要）。
+  if (online_ready_ && !online_bvid_.isEmpty()) {
+    add(QStringLiteral("文件"),
+        online_cid_ > 0
+            ? QStringLiteral("%1 · P%2").arg(online_bvid_).arg(
+                  static_cast<qlonglong>(online_cid_))
+            : online_bvid_);
+  } else {
+    add(QStringLiteral("文件"),
+        media_file.fileName().isEmpty() ? QStringLiteral("—")
+                                        : media_file.fileName());
+  }
+
+  QString format = QString::fromStdString(info.format_name);
+  if (!info.format_long_name.empty()) {
+    const QString long_name = QString::fromStdString(info.format_long_name);
+    if (!long_name.isEmpty() && long_name != format) {
+      format = long_name;
+    }
+  }
+  add(QStringLiteral("格式"), format.isEmpty() ? QStringLiteral("—") : format);
+
+  add(QStringLiteral("分辨率"),
+      info.video.width > 0 && info.video.height > 0
+          ? QStringLiteral("%1 × %2").arg(info.video.width).arg(info.video.height)
+          : QStringLiteral("—"));
+
+  QString video = QString::fromStdString(info.video.codec);
+  if (video.isEmpty()) {
+    video = QStringLiteral("—");
+  } else {
+    video = video.toUpper() + QStringLiteral(" · %1-bit").arg(info.video.bit_depth);
+    if (!info.video.pixel_format.empty()) {
+      video += QStringLiteral(" · ") + QString::fromStdString(info.video.pixel_format);
+    }
+  }
+  add(QStringLiteral("视频"), video);
+
+  // 帧率：标称（容器帧率）+ 实际（在线 playurl fps 优先，其次 average/real）。
+  QString rate_text =
+      nominal_fps > 0.0 ? QString::number(nominal_fps, 'f', 3) + QStringLiteral(" fps")
+                        : QStringLiteral("—");
+  rate_text += info.vfr.suspect
+                   ? QStringLiteral(" · VFR")
+                   : (info.vfr.checked ? QStringLiteral(" · CFR")
+                                       : QStringLiteral(" · 帧率未检测"));
+  const double actual_fps =
+      (online_ready_ && online_actual_fps_ > 0.0)
+          ? online_actual_fps_
+          : (info.video.average_frame_rate.valid()
+                 ? info.video.average_frame_rate.ToDouble()
+                 : nominal_fps);
+  if (actual_fps > 0.0 && nominal_fps > 0.0 &&
+      std::abs(actual_fps - nominal_fps) > 0.0005) {
+    rate_text += QStringLiteral(" · 实际 %1 fps")
+                     .arg(QString::number(actual_fps, 'f', 3));
+  }
+  add(QStringLiteral("帧率"), rate_text);
+
+  QString duration = QStringLiteral("—");
+  if (info.duration_us > 0 && rate.valid()) {
+    const lapian::core::TimecodeFormatter formatter(rate);
+    const lapian::core::Timecode timecode =
+        formatter.FromFrame(rate.EstimateFrameCount(info.duration_us));
+    duration = QString::fromStdString(timecode.ToString());
+    if (!info.duration_reliable) {
+      duration = QStringLiteral("≈") + duration;
+    }
+  }
+  add(QStringLiteral("时长"), duration);
+
+  // 总帧数三态：直接复用 InfoBar 持有的 TotalFrameCount（不从标签文本反解析）。
+  QString total_text = QStringLiteral("—");
+  if (info_bar_ != nullptr) {
+    const lapian::core::TotalFrameCount& total = info_bar_->TotalForTest();
+    switch (total.state()) {
+      case lapian::core::TotalFramesState::kExact:
+        total_text = QStringLiteral("%1（精确）").arg(total.value());
+        break;
+      case lapian::core::TotalFramesState::kEstimated:
+        total_text = QStringLiteral("≈%1（估算）").arg(total.value());
+        break;
+      case lapian::core::TotalFramesState::kScanning:
+        total_text = QStringLiteral("扫描中");
+        break;
+      case lapian::core::TotalFramesState::kUnknown:
+        total_text = QStringLiteral("—");
+        break;
+    }
+  }
+  add(QStringLiteral("总帧数"), total_text);
+
+  if (info.has_audio) {
+    QString audio = QString::fromStdString(info.audio.codec).toUpper();
+    if (info.audio.sample_rate > 0) {
+      audio += QStringLiteral(" · %1 kHz")
+                   .arg(QString::number(
+                       static_cast<double>(info.audio.sample_rate) / 1000.0, 'g', 3));
+    }
+    if (info.audio.channels > 0) {
+      audio += QStringLiteral(" · ") + DescribeAudioChannels(info.audio.channels);
+    }
+    add(QStringLiteral("音频"), audio);
+  } else {
+    add(QStringLiteral("音频"), QStringLiteral("无音轨"));
+  }
+
+  const int rotation = info.rotation.counterclockwise_degrees;
+  add(QStringLiteral("旋转"),
+      rotation == 0 ? QStringLiteral("0°")
+                    : QStringLiteral("%1°（display matrix）").arg(rotation));
+
+  add(QStringLiteral("可变帧率"),
+      info.vfr.suspect
+          ? QStringLiteral("是（帧号按显示帧计数）")
+          : (info.vfr.checked ? QStringLiteral("否（CFR）")
+                              : QStringLiteral("未检测")));
+
+  QString path_text = QDir::toNativeSeparators(media_path);
+  if (online_ready_) {
+    path_text = QStringLiteral("在线缓存 · ") + path_text;
+  }
+  add(QStringLiteral("路径"), path_text.isEmpty() ? QStringLiteral("—") : path_text);
+
+  shell_->inspectorPanel()->SetInfoRows(rows);
+}
+
+void MainWindow::RefreshInspectorShots() {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return;
+  }
+  QVector<lapian::ui::InspectorPanel::ShotItem> items;
+  QSet<QString> seen;
+  auto add = [&items, &seen](const QString& path, qint64 frame) {
+    if (path.isEmpty() || frame < 0) {
+      return;
+    }
+    const QFileInfo info(path);
+    if (!info.isFile()) {
+      return;
+    }
+    const QString key = info.absoluteFilePath().toLower();
+    if (seen.contains(key)) {
+      return;
+    }
+    seen.insert(key);
+    items.push_back(lapian::ui::InspectorPanel::ShotItem{QDir::toNativeSeparators(
+                                                 info.absoluteFilePath()),
+                                             frame, QString()});
+  };
+  auto scan_png_dir = [&add](const QString& directory, const QString& prefix) {
+    const QDir dir(directory);
+    if (!dir.exists()) {
+      return;
+    }
+    const QStringList files =
+        dir.entryList(QDir::Files | QDir::NoSymLinks, QDir::Name);
+    for (const QString& name : files) {
+      if (!name.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+        continue;
+      }
+      if (!prefix.isEmpty() && !name.startsWith(prefix)) {
+        continue;
+      }
+      add(dir.filePath(name),
+          static_cast<qint64>(lapian::snapshot::ParseSnapshotFrameFromName(name)));
+    }
+  };
+  auto scan_online_index = [&add](const QString& directory, const QString& prefix) {
+    const QDir dir(directory);
+    if (!dir.exists()) {
+      return false;
+    }
+    const QString index_path = dir.filePath(QStringLiteral("index.jsonl"));
+    QFile index(index_path);
+    if (!index.open(QIODevice::ReadOnly)) {
+      return false;
+    }
+    while (!index.atEnd()) {
+      const QByteArray line = index.readLine().trimmed();
+      if (line.isEmpty()) {
+        continue;
+      }
+      QJsonParseError parse_error{};
+      const QJsonDocument document = QJsonDocument::fromJson(line, &parse_error);
+      if (parse_error.error != QJsonParseError::NoError || !document.isObject()) {
+        continue;
+      }
+      const QJsonObject object = document.object();
+      const qint64 frame =
+          static_cast<qint64>(object.value(QStringLiteral("frame")).toDouble(-1.0));
+      QString path = object.value(QStringLiteral("path")).toString();
+      if (path.isEmpty()) {
+        continue;
+      }
+      if (QFileInfo(path).isRelative()) {
+        path = dir.filePath(path);
+      }
+      add(path, frame);
+    }
+    Q_UNUSED(prefix);
+    return true;
+  };
+
+  const QString pictures = SnapshotPicturesRoot();
+  if (online_ready_ && !online_bvid_.isEmpty()) {
+    const QString safe_bvid =
+        lapian::snapshot::SanitizeSnapshotBaseName(online_bvid_);
+    const QString prefix = safe_bvid + QStringLiteral("_f");
+    QString appdata_online = online_records_root_for_test_;
+    if (appdata_online.isEmpty()) {
+      QString appdata = qEnvironmentVariable("APPDATA");
+      if (appdata.isEmpty()) {
+        appdata =
+            QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+      }
+      if (appdata.isEmpty()) {
+        appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+      }
+      appdata_online =
+          QDir(appdata).filePath(QString::fromUtf8("拉片软件/online"));
+    }
+    const QString primary =
+        QDir(pictures).filePath(QStringLiteral("拉片软件/%1").arg(safe_bvid));
+    const QString fallback = QDir(appdata_online)
+                                 .filePath(QStringLiteral("snapshots/%1")
+                                               .arg(safe_bvid));
+    for (const QString& directory : {primary, fallback}) {
+      if (!scan_online_index(directory, prefix)) {
+        scan_png_dir(directory, prefix);
+      }
+    }
+  } else if (session_ != nullptr && session_->IsOpen()) {
+    const QString video_path = QString::fromStdString(session_->path_utf8());
+    const QString prefix =
+        lapian::snapshot::SanitizeSnapshotBaseName(
+            QFileInfo(video_path).completeBaseName()) +
+        QStringLiteral("_f");
+    const QString video_dir = QFileInfo(video_path).absolutePath();
+    scan_png_dir(QDir(video_dir).filePath(QStringLiteral("snapshots")), prefix);
+    scan_png_dir(QDir(pictures).filePath(QStringLiteral("拉片软件")), prefix);
+  }
+  // 本次会话刚截的图（即使目录被外部改名也先列出来；标题栏数字同源）。
+  for (const QString& path : snapshot_saved_paths_) {
+    add(path, static_cast<qint64>(lapian::snapshot::ParseSnapshotFrameFromName(
+                    QFileInfo(path).fileName())));
+  }
+
+  std::sort(items.begin(), items.end(),
+            [](const lapian::ui::InspectorPanel::ShotItem& first,
+               const lapian::ui::InspectorPanel::ShotItem& second) {
+              if (first.frame != second.frame) {
+                return first.frame < second.frame;
+              }
+              return first.path.localeAwareCompare(second.path) < 0;
+            });
+
+  if (session_ != nullptr && session_->IsOpen()) {
+    const lapian::media::VideoStreamInfo& video = session_->info().video;
+    if (video.frame_rate.valid()) {
+      for (lapian::ui::InspectorPanel::ShotItem& item : items) {
+        QString timecode = lapian::snapshot::FormatSnapshotTimecode(
+            item.frame, video.frame_rate.num, video.frame_rate.den);
+        timecode.replace(QLatin1Char('-'), QLatin1Char(':'));
+        item.timecode = timecode;
+      }
+    }
+  }
+  shell_->inspectorPanel()->SetShotItems(items);
+}
+
+void MainWindow::EnsureInspectorMarksVisible() {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return;
+  }
+  if (shell_->inspector_collapsed()) {
+    shell_->SetInspectorCollapsed(false);
+  }
+  shell_->inspectorPanel()->SetTab(lapian::ui::InspectorPanel::Tab::kMarks);
+}
+
+void MainWindow::ActivateShot(std::int64_t frame) {
+  if (session_ == nullptr || !session_->IsOpen() || timeline_ == nullptr ||
+      info_bar_ == nullptr) {
+    return;
+  }
+  const lapian::media::FrameIndex& index = session_->index();
+  if (!index.IsReady() || index.empty()) {
+    statusBar()->showMessage(
+        QStringLiteral("该截图所在帧暂不可跳转（索引未就绪）"), 3000);
+    return;
+  }
+  const std::int64_t last_frame = static_cast<std::int64_t>(index.size()) - 1;
+  const std::int64_t target = lapian::core::ClampFrame(frame, last_frame);
+  CancelPendingMarkJump();
+  const std::uint64_t generation = navigation_generation_;
+  if (preview_timer_ != nullptr && preview_timer_->isActive()) {
+    EndScrubPreview();
+  }
+  if (playback_ != nullptr) {
+    playback_->Pause();
+  }
+  // T5.2 顺序：播放头/帧号先可见，再让精确解码在下一个事件循环执行。
+  timeline_->SetCurrentFrame(target);
+  info_bar_->SetFrame(static_cast<int>(target));
+  timeline_->repaint();
+  info_bar_->repaint();
+  statusBar()->showMessage(
+      QStringLiteral("截图：第 %1 帧（跳转中）").arg(
+          static_cast<qlonglong>(target)),
+      2000);
+  QTimer::singleShot(0, this, [this, target, generation]() {
+    if (generation != navigation_generation_ || session_ == nullptr ||
+        !session_->IsOpen()) {
+      return;
+    }
+    GoToFrame(target);
+  });
 }
 
 void MainWindow::ShowShellHelp() {
@@ -1882,6 +2288,48 @@ void MainWindow::DragSplitterForTest(bool vertical, int delta) {
 
 bool MainWindow::InspectorCollapsedForTest() const {
   return shell_ != nullptr && shell_->inspector_collapsed();
+}
+
+void MainWindow::SetInspectorCollapsedForTest(bool collapsed) {
+  if (shell_ == nullptr) {
+    return;
+  }
+  shell_->SetInspectorCollapsed(collapsed);
+  // 折叠会改左右分栏（Transport 档位/画面宽），按现有路径重算一次布局。
+  UpdateDensity();
+}
+
+void MainWindow::SetInspectorTabForTest(int tab) {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return;
+  }
+  switch (tab) {
+    case 1:
+      shell_->inspectorPanel()->SetTab(
+          lapian::ui::InspectorPanel::Tab::kShots);
+      break;
+    case 2:
+      shell_->inspectorPanel()->SetTab(
+          lapian::ui::InspectorPanel::Tab::kInfo);
+      break;
+    default:
+      shell_->inspectorPanel()->SetTab(
+          lapian::ui::InspectorPanel::Tab::kMarks);
+      break;
+  }
+  // 切 tab 会改 stack 的页尺寸；让布局立即落地（截图/断言前）。
+  QCoreApplication::processEvents();
+}
+
+QString MainWindow::InspectorStateForTest() const {
+  if (shell_ == nullptr || shell_->inspectorPanel() == nullptr) {
+    return QStringLiteral("v2=0 inspector=none");
+  }
+  QString text = QStringLiteral("v2=1 host_w=%1 host_visible=%2 ")
+                     .arg(shell_->InspectorWidth())
+                     .arg(shell_->inspectorHost()->isVisible() ? 1 : 0);
+  text += shell_->inspectorPanel()->StateForTest();
+  return text;
 }
 
 QString MainWindow::FullScreenChromeForTest() const {
@@ -5424,6 +5872,10 @@ void MainWindow::OpenLocalMedia(const QString& path,
 
   // T2.9：预览解码器在索引就绪后预热（见 ApplyIndexState）；扫描中拖动禁用。
 
+  // 3C：截图网格读历史文件（本地 snapshots/ 或在线 <bvid>/index.jsonl）。
+  // 打开后扫一次；之后只在截图保存/切到截图页时再扫。
+  RefreshInspectorShots();
+
   if (startup_log_) {
     const lapian::media::MediaOpenTimings& timings = session_->last_open_timings();
     std::fprintf(stderr,
@@ -5489,6 +5941,8 @@ void MainWindow::BeginIndexScan() {
     if (timeline_ != nullptr) {
       timeline_->SetMarks({});
     }
+    // 3C：清空后 tab 徽标/页脚也归零（与 MarkPanel 同源）。
+    SyncInspectorChrome();
   }
   preview_.reset();
   if (startup_log_) {
@@ -8475,6 +8929,8 @@ void MainWindow::ActivateMark(const QString& id, std::int64_t frame) {
   if (!index.IsReady() || index.empty()) {
     return;
   }
+  // 3C：点标记跳转后要能看到选中行与编辑框；折叠/别的 tab 时先展开到“标记”。
+  EnsureInspectorMarksVisible();
   const std::int64_t last_frame = static_cast<std::int64_t>(index.size()) - 1;
   const std::int64_t target = lapian::core::ClampFrame(frame, last_frame);
 
@@ -8638,16 +9094,20 @@ void MainWindow::UpdateMarkStorageUi() {
   if (marks_ != nullptr && marks_->online()) {
     mark_panel_->SetStorage(QString::fromStdString(marks_->storage_path()), false);
     mark_panel_->SetWarnings(marks_->warnings());
+    SyncInspectorChrome();
     return;
   }
   if (online_ready_) {
     mark_panel_->SetStorage(QStringLiteral("在线会话内（记录未初始化）"), false);
     mark_panel_->SetWarnings(marks_->warnings());
+    SyncInspectorChrome();
     return;
   }
   mark_panel_->SetStorage(QString::fromStdString(marks_->storage_path()),
                           marks_->using_fallback());
   mark_panel_->SetWarnings(marks_->warnings());
+  // 3C：页脚是存储位置的唯一常显处；与 markStorage 同源（StorageSummary）。
+  SyncInspectorChrome();
 }
 
 bool MainWindow::FlushMarksBeforeSwitch() {
@@ -8853,7 +9313,12 @@ void MainWindow::DeleteMarkWithConfirmForTest(int index) {
 }
 
 bool MainWindow::FocusNoteEditorForTest() {
-  return mark_panel_ != nullptr && mark_panel_->FocusNoteEditorForTest();
+  if (mark_panel_ == nullptr) {
+    return false;
+  }
+  // 3C：折叠或不在“标记”tab 时先展开并切回，否则编辑框不可见也拿不到焦点。
+  EnsureInspectorMarksVisible();
+  return mark_panel_->FocusNoteEditorForTest();
 }
 
 bool MainWindow::CloseForTest() {
@@ -8923,6 +9388,7 @@ void MainWindow::SetSnapshotPicturesRootForTest(const QString& root) {
   if (snapshots_ != nullptr) {
     snapshots_->SetPicturesRoot(root);
   }
+  RefreshInspectorShots();
 }
 
 QString MainWindow::SnapshotStateForTest() const {

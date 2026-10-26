@@ -179,6 +179,12 @@ class MainWindow : public QMainWindow {
   void SetTimelineHeightForTest(int timeline);
   void DragSplitterForTest(bool vertical, int delta);
   bool InspectorCollapsedForTest() const;
+  // UI v2 3C：折叠/展开检查器（走与按钮相同的 PlayerShell::SetInspectorCollapsed）。
+  void SetInspectorCollapsedForTest(bool collapsed);
+  // 0=标记 / 1=截图 / 2=信息（走与 tab 点击相同的 SetTab：切换前 flush 编辑框）。
+  void SetInspectorTabForTest(int tab);
+  // 检查器状态（折叠/tab/页/计数/宽度/存储位置）——只读、无副作用，一行可断言。
+  QString InspectorStateForTest() const;
   QString FullScreenChromeForTest() const;
   QString ReadoutTextForTest() const;
   QRect ReadoutGeometryForTest() const;
@@ -769,6 +775,17 @@ class MainWindow : public QMainWindow {
   bool SaveMarks(bool show_errors);
   void RefreshMarksUi(const QString& select_id = QString());
   void UpdateMarkStorageUi();
+  // UI v2 3C：检查器（三 tab）的数据推送与联动。
+  // SyncInspectorChrome = 计数徽标 + 存储页脚 + 信息页（全部只读、无 IO）。
+  void SyncInspectorChrome();
+  // 扫历史截图（<视频目录>/snapshots 或在线 <bvid>/index.jsonl）；只在打开/截图后/切到截图页时调。
+  void RefreshInspectorShots();
+  void RefreshInspectorInfo();
+  // 折叠/非标记 tab 时先展开并切到“标记”（FocusNoteEditor / 点标记跳转用）。
+  void EnsureInspectorMarksVisible();
+  QString SnapshotPicturesRoot() const;
+  // 截图网格点击：先重绘 UI，再 singleShot(0) 精确解码（T5.2 顺序）。
+  void ActivateShot(std::int64_t frame);
   bool FlushMarksBeforeSwitch();
   bool FlushMarksOnClose();
   void ShowMarkSaveFailure(const lapian::core::SaveResult& result);

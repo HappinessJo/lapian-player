@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QColor>
 #include <QDir>
 #include <QEvent>
 #include <QFileInfo>
@@ -86,34 +87,39 @@ MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
       "#markLabelEdit, #markNoteEdit { background:#101012; color:#e8e8ec; "
       "border:1px solid #3a3a40; border-radius:3px; padding:3px 4px; "
       "selection-background-color:#3d4a6b; }"
-      "#markLabelEdit:focus, #markNoteEdit:focus { border:1px solid #5b7bd5; }"));
+      "#markLabelEdit:focus, #markNoteEdit:focus { border:1px solid #5b7bd5; }"
+      // 3C：嵌进检查器时去掉自己的边框/底色，让父面板卡片透出来。
+      "#markPanel[embedded=\"true\"] { background:transparent; border:0; }"
+      "#markPanel[embedded=\"true\"] QTreeWidget { background:transparent; }"));
 
   auto* root = new QVBoxLayout(this);
   root->setContentsMargins(10, 8, 10, 8);
   root->setSpacing(6);
 
-  auto* title_row = new QVBoxLayout();
+  title_row_ = new QWidget(this);
+  auto* title_row = new QVBoxLayout(title_row_);
+  title_row->setContentsMargins(0, 0, 0, 0);
   title_row->setSpacing(1);
   auto* title_line = new QHBoxLayout();
   title_line->setSpacing(6);
-  title_label_ = new QLabel(QStringLiteral("标记"), this);
+  title_label_ = new QLabel(QStringLiteral("标记"), title_row_);
   title_label_->setObjectName(QStringLiteral("markTitle"));
   QFont title_font = title_label_->font();
   title_font.setPointSizeF(title_font.pointSizeF() + 1.0);
   title_label_->setFont(title_font);
-  count_label_ = new QLabel(QStringLiteral("0 个"), this);
+  count_label_ = new QLabel(QStringLiteral("0 个"), title_row_);
   count_label_->setObjectName(QStringLiteral("markCount"));
   title_line->addWidget(title_label_);
   title_line->addStretch(1);
   title_line->addWidget(count_label_);
   title_row->addLayout(title_line);
 
-  storage_label_ = new QLabel(QStringLiteral("存储：—"), this);
+  storage_label_ = new QLabel(QStringLiteral("存储：—"), title_row_);
   storage_label_->setObjectName(QStringLiteral("markStorage"));
   storage_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
   storage_label_->setWordWrap(true);
   title_row->addWidget(storage_label_);
-  root->addLayout(title_row);
+  root->addWidget(title_row_);
 
   warning_label_ = new QLabel(this);
   warning_label_->setObjectName(QStringLiteral("markWarning"));
@@ -121,9 +127,9 @@ MarkPanel::MarkPanel(QWidget* parent) : QWidget(parent) {
   warning_label_->hide();
   root->addWidget(warning_label_);
 
-  auto* hint = new QLabel(QStringLiteral("Ctrl+M 添加 · Delete 删除选中"), this);
-  hint->setObjectName(QStringLiteral("markHint"));
-  root->addWidget(hint);
+  hint_label_ = new QLabel(QStringLiteral("Ctrl+M 添加 · Delete 删除选中"), this);
+  hint_label_->setObjectName(QStringLiteral("markHint"));
+  root->addWidget(hint_label_);
 
   tree_ = new QTreeWidget(this);
   tree_->setObjectName(QStringLiteral("markTree"));
@@ -365,6 +371,37 @@ void MarkPanel::UpdateMarkText(const QString& id, const QString& label,
 
 int MarkPanel::WarningCount() const { return warning_count_; }
 
+void MarkPanel::SetEmbeddedMode(bool embedded) {
+  if (embedded_ == embedded) {
+    return;
+  }
+  embedded_ = embedded;
+  // 表头/存储位置/Ctrl+M 提示由 InspectorPanel 的头、tab 计数与页脚承担；
+  // 只隐藏，不销毁（markStorage 对象仍在，StorageSummary() 仍可读）。
+  if (title_row_ != nullptr) {
+    title_row_->setVisible(!embedded);
+  }
+  if (hint_label_ != nullptr) {
+    hint_label_->setVisible(!embedded);
+  }
+  if (tree_ != nullptr && tree_->header() != nullptr) {
+    tree_->header()->setVisible(!embedded);
+    // 嵌进检查器时行首留 6px（原型 .mrow 的 8px 内边距的近似）。
+    tree_->setIndentation(embedded ? 6 : 0);
+  }
+  if (layout() != nullptr) {
+    layout()->setContentsMargins(embedded ? 0 : 10, embedded ? 0 : 8,
+                                 embedded ? 0 : 10, embedded ? 0 : 8);
+  }
+  setProperty("embedded", embedded);
+  // 属性选择器只在重新 polish 时生效：重设同一份样式表即可（只在切换时一次）。
+  setStyleSheet(styleSheet());
+  if (!marks_.empty()) {
+    Rebuild();  // 行配色/标签回退随嵌入模式变（选中 id 由 Rebuild 保留）
+  }
+  updateGeometry();
+}
+
 QString MarkPanel::StorageSummary() const { return storage_label_->text(); }
 
 void MarkPanel::Rebuild() {
@@ -374,7 +411,19 @@ void MarkPanel::Rebuild() {
   for (const lapian::core::Mark& mark : marks_) {
     auto* item = new QTreeWidgetItem(tree_);
     item->setText(0, QString::number(static_cast<qlonglong>(mark.frame)));
-    item->setTextAlignment(0, Qt::AlignRight | Qt::AlignVCenter);
+    item->setTextAlignment(0, (embedded_ ? Qt::AlignLeft : Qt::AlignRight) |
+                                   Qt::AlignVCenter);
+    if (embedded_) {
+      // 原型 .mrow .fno：帧号 accent、Consolas 600 11px、左对齐。
+      item->setForeground(0, QColor(QStringLiteral("#5b8def")));
+      QFont frame_font;
+      frame_font.setFamilies({QStringLiteral("Consolas"),
+                              QStringLiteral("Cascadia Mono")});
+      frame_font.setStyleHint(QFont::Monospace);
+      frame_font.setPixelSize(11);
+      frame_font.setWeight(QFont::DemiBold);
+      item->setFont(0, frame_font);
+    }
     UpdateItemText(item, mark);
     const QString id = QString::fromStdString(mark.id);
     item->setData(0, Qt::UserRole, id);
@@ -393,7 +442,14 @@ void MarkPanel::UpdateItemText(QTreeWidgetItem* item,
   if (item == nullptr) {
     return;
   }
-  item->setText(1, LabelText(mark));
+  // 嵌入检查器时帧号已经在第 0 列（accent），MarkStore 自动生成的"帧 N"
+  // 不再重复到标签列（用户自己写的同名标签仍显示）。独立使用 MarkPanel 时
+  // 行为不变，tests/mark_panel_test 仍断言 "帧 1"。
+  const std::string auto_label = "帧 " + std::to_string(mark.frame);
+  const bool auto_generated = mark.label.empty() || mark.label == auto_label;
+  item->setText(1, embedded_ && auto_generated
+                        ? QString()
+                        : LabelText(mark));
   item->setText(2, NoteSummary(mark.note));
   const QString full_note = QString::fromStdString(mark.note);
   item->setToolTip(2, full_note.isEmpty() ? QString() : full_note);

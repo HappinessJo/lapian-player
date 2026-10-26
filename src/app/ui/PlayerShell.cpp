@@ -5,18 +5,20 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
 
 #include "app/ui/BannerSlot.h"
+#include "app/ui/InspectorPanel.h"
 #include "app/ui/PlayerSplitter.h"
 #include "app/ui/StageStack.h"
 #include "app/ui/Theme.h"
 #include "app/ui/TimelinePanel.h"
 #include "app/ui/TopBar.h"
 #include "app/ui/TransportBar.h"
+
+using lapian::ui::InspectorPanel;
 
 namespace {
 
@@ -92,35 +94,17 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
   h_split_->setStretchFactor(0, 1);
   h_split_->setStretchFactor(1, 0);
 
-  inspector_rail_ = new QWidget(inspector_host_);
-  inspector_rail_->setObjectName(QStringLiteral("v2InspectorRail"));
-  lapian::ui::SetStyledBackground(inspector_rail_);
-  inspector_rail_->setFixedWidth(26);
-  auto* rail_layout = new QVBoxLayout(inspector_rail_);
-  rail_layout->setContentsMargins(0, 4, 0, 0);
-  rail_layout->setSpacing(4);
-  inspector_toggle_ = new QToolButton(inspector_rail_);
-  inspector_toggle_->setObjectName(QStringLiteral("v2InspectorCollapse"));
-  inspector_toggle_->setText(QStringLiteral("»"));
-  inspector_toggle_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  inspector_toggle_->setFocusPolicy(Qt::NoFocus);
-  inspector_toggle_->setAutoRaise(true);
-  inspector_toggle_->setFixedSize(24, tokens_.btn);
-  rail_layout->addWidget(inspector_toggle_, 0, Qt::AlignHCenter);
-  rail_layout->addStretch(1);
-  inspector_layout->addWidget(inspector_rail_, 0);
-
-  inspector_content_ = new QWidget(inspector_host_);
-  inspector_content_->setObjectName(QStringLiteral("v2InspectorContent"));
-  auto* content_layout = new QVBoxLayout(inspector_content_);
-  content_layout->setContentsMargins(0, 0, 0, 0);
-  content_layout->setSpacing(0);
-  inspector_layout->addWidget(inspector_content_, 1);
+  // 3C：检查器内部（三 tab + 折叠 rail + 页脚）全部由 InspectorPanel 承担；
+  // 旧 MarkPanel 原对象由 MainWindow 通过 AdoptMarkPanel() 交给它。
+  inspector_panel_ = new InspectorPanel(inspector_host_);
+  inspector_layout->addWidget(inspector_panel_, 1);
+  connect(inspector_panel_, &InspectorPanel::collapseRequested, this,
+          [this]() { SetInspectorCollapsed(true); });
+  connect(inspector_panel_, &InspectorPanel::expandRequested, this,
+          [this]() { SetInspectorCollapsed(false); });
 
   connect(timeline_panel_, &TimelinePanel::fitRequested, this,
           &PlayerShell::fitTimelineRequested);
-  connect(inspector_toggle_, &QToolButton::clicked, this,
-          [this]() { SetInspectorCollapsed(!inspector_collapsed_); });
   connect(v_split_, &PlayerSplitter::resetRequested, this,
           &PlayerShell::ResetSplitSizes);
   connect(h_split_, &PlayerSplitter::resetRequested, this,
@@ -140,7 +124,6 @@ PlayerShell::PlayerShell(QWidget* parent) : QWidget(parent) {
     inspector_user_width_ = inspector_host_->width();
   });
 
-  UpdateInspectorToggle();
   ApplyTokens();
 }
 
@@ -180,7 +163,9 @@ void PlayerShell::ApplyTokens() {
     inspector_host_->setMinimumWidth(tokens_.inspector_min);
     inspector_host_->setMaximumWidth(tokens_.inspector_max);
   }
-  inspector_toggle_->setFixedHeight(tokens_.btn);
+  if (inspector_panel_ != nullptr) {
+    inspector_panel_->ApplyTokens(tokens_);
+  }
   ApplySplitSizes();
 }
 
@@ -352,11 +337,15 @@ void PlayerShell::SetInspectorCollapsed(bool collapsed) {
     return;
   }
   inspector_collapsed_ = collapsed;
+  // 面板内部先切（折叠 = rail 44 / 展开 = 头 + stack + 页脚），再改 host 宽度；
+  // MarkPanel 原对象只 hide，不销毁（--mark-test 的计数/选中不变）。
+  if (inspector_panel_ != nullptr) {
+    inspector_panel_->SetCollapsed(collapsed);
+  }
   if (collapsed) {
     if (inspector_host_->width() > tokens_.inspector_collapsed) {
       inspector_user_width_ = inspector_host_->width();
     }
-    inspector_content_->hide();
     inspector_host_->setMinimumWidth(tokens_.inspector_collapsed);
     inspector_host_->setMaximumWidth(tokens_.inspector_collapsed);
     h_split_->SetCollapsed(true);
@@ -368,27 +357,13 @@ void PlayerShell::SetInspectorCollapsed(bool collapsed) {
   } else {
     inspector_host_->setMinimumWidth(tokens_.inspector_min);
     inspector_host_->setMaximumWidth(tokens_.inspector_max);
-    inspector_content_->show();
     h_split_->SetCollapsed(false);
     if (inspector_user_width_ < tokens_.inspector_min) {
       inspector_user_width_ = tokens_.inspector;
     }
   }
-  inspector_rail_->setFixedWidth(collapsed ? tokens_.inspector_collapsed : 26);
-  UpdateInspectorToggle();
   ApplySplitSizes();
   emit inspectorCollapsedChanged(inspector_collapsed_);
-}
-
-void PlayerShell::UpdateInspectorToggle() {
-  if (inspector_toggle_ == nullptr) {
-    return;
-  }
-  inspector_toggle_->setText(inspector_collapsed_ ? QStringLiteral("«")
-                                                  : QStringLiteral("»"));
-  inspector_toggle_->setToolTip(inspector_collapsed_
-                                    ? QStringLiteral("展开检查器")
-                                    : QStringLiteral("折叠检查器"));
 }
 
 void PlayerShell::SetFullScreenChrome(bool fullscreen) {

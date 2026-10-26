@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 
@@ -159,6 +160,24 @@ QString SnapshotFileName(const QString& base_name, int sequence) {
     return base_name + QStringLiteral(".png");
   }
   return QStringLiteral("%1_%2.png").arg(base_name).arg(sequence);
+}
+
+std::int64_t ParseSnapshotFrameFromName(const QString& file_name) {
+  // 贪婪的 ^.* 让 "_f<数字>_<时间码>" 匹配到**最后**一处，避免视频名里
+  // 恰好带 "_f123_00-00-00-00" 时解析错位置。
+  static const QRegularExpression pattern(
+      QStringLiteral(R"(^.*_f(\d{1,19})_\d{2}-\d{2}-\d{2}-\d{2}(?:_\d+)?\.png$)"),
+      QRegularExpression::CaseInsensitiveOption);
+  const QRegularExpressionMatch match = pattern.match(file_name);
+  if (!match.hasMatch()) {
+    return -1;
+  }
+  bool ok = false;
+  const qlonglong frame = match.captured(1).toLongLong(&ok);
+  if (!ok || frame < 0) {
+    return -1;
+  }
+  return static_cast<std::int64_t>(frame);
 }
 
 QString SnapshotFilePath(const QString& directory, const QString& base_name, int sequence) {
