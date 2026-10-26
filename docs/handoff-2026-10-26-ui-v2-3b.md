@@ -305,6 +305,9 @@ $exe = '.\build\release\bin\lapian.exe'; $sp = 'build\ui-v2-gates\settings-v2'
 
 ## 11. 3C 入口（已经留好的缝）
 
+**本阶段的开工提示词已入库**：[next-session-prompt-ui-v2-3c.md](next-session-prompt-ui-v2-3c.md)
+（可直接复制给新会话；含 3C 要做的 6 步、门禁清单、11 条事实附录）。
+
 - **Transport**：`SetSpeedText`（文本唯一出口）、`SetTimecodeCommit`（提交回调）、`SetBufferState`、
   `SetFullScreenActive`、`TierStateForTest`；左右容器 `leftHost()/readoutHost()/rightHost()` 仍在，加控件不用改布局。
 - **时间轴**：`TimelinePanel::AdoptTimeline()` 是画布唯一入口；两条滑块 `viewBar()/workBar()` 可直接加
