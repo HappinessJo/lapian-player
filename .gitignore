@@ -30,3 +30,10 @@ desktop.ini
 # 测试产物：坏 sidecar（RobustTestRunner 等写在工作目录）
 /.lapian.json
 *.lapian.json
+
+# 工作区 A/B 记录（按视频写在视频旁边）
+*.lapian-workrange.json
+
+# Python 缓存
+__pycache__/
+*.pyc
