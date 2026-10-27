@@ -47,12 +47,15 @@ void SetStateProperty(QWidget* widget, const char* state) {
 }
 
 // D3：缓存挡位下拉的 itemData（顺序与文案固定，见计划 §3.3）。
+// P2：新增首项“默认（自动 / 512MiB）”，修掉默认值显示成“高级自定义”。
+// 新值取 5，不重排既有 0–4（旧断言/持久化语义不变）。
 enum class PreviewPreset : int {
   kLowMemory = 0,    // 省内存（720P / 128MiB）
   kBalanced = 1,     // 均衡（1080P / 256MiB）
   kRecommended = 2,  // 推荐（1080P / 512MiB）
   kLong = 3,         // 长拖（1080P / 1GiB）
   kCustom = 4,       // 高级自定义（不改分辨率）
+  kDefault = 5,      // 默认（自动 / 512MiB）
 };
 
 // 16:9 估计帧高（偶数，与 OnlinePreviewDecoder 的估算一致）。
@@ -86,6 +89,12 @@ QString PreviewResolutionLabel(lapian::core::PreviewResolution resolution) {
 // (分辨率, 缓存) → 挡位：只有完全匹配预设才算预设档，否则显示高级自定义。
 PreviewPreset DerivePreviewPreset(lapian::core::PreviewResolution resolution,
                                   int cache_mb) {
+  // P2：auto + 512 就是“默认”（用户默认设置/恢复推荐），优先于其它档；
+  // 1080P + 512 仍归“推荐”，不被默认项抢匹配。
+  if (cache_mb == lapian::core::kPreviewCacheDefaultMb &&
+      resolution == lapian::core::PreviewResolution::kAuto) {
+    return PreviewPreset::kDefault;
+  }
   if (cache_mb == lapian::core::kPreviewCacheMinMb720p &&
       resolution == lapian::core::PreviewResolution::k720p) {
     return PreviewPreset::kLowMemory;
@@ -285,6 +294,9 @@ void CacheSettingsDialog::BuildUi() {
   preview_cache_combo_ = new QComboBox(preview_group);
   preview_cache_combo_->setObjectName(QStringLiteral("previewCacheCombo"));
   preview_cache_combo_->addItem(
+      QStringLiteral("默认（自动 / 512MiB）"),
+      static_cast<int>(PreviewPreset::kDefault));
+  preview_cache_combo_->addItem(
       QStringLiteral("省内存（720P / 128MiB）"),
       static_cast<int>(PreviewPreset::kLowMemory));
   preview_cache_combo_->addItem(
@@ -318,6 +330,13 @@ void CacheSettingsDialog::BuildUi() {
   preview_custom_row->addWidget(preview_cache_spin_);
   preview_custom_row->addStretch(1);
   preview_layout->addLayout(preview_custom_row);
+
+  // P2：常显“可设范围 / 本机按可用内存 25% 最多 X MiB / 多实例叠加”。
+  // 随分辨率与可用内存刷新（见 UpdatePreviewUi）。
+  preview_range_label_ = new QLabel(preview_group);
+  preview_range_label_->setObjectName(QStringLiteral("previewRangeLabel"));
+  preview_range_label_->setWordWrap(true);
+  preview_layout->addWidget(preview_range_label_);
 
   auto* preview_estimate_row = new QHBoxLayout();
   preview_estimate_label_ = new QLabel(preview_group);
@@ -776,6 +795,9 @@ void CacheSettingsDialog::UpdatePreviewUi() {
   }
   // 预设档显示预设值但禁用；只有“高级自定义”允许编辑 spin。
   preview_cache_spin_->setEnabled(shown == PreviewPreset::kCustom);
+  if (preview_range_label_ != nullptr) {
+    preview_range_label_->setText(PreviewRangeText());
+  }
   if (preview_estimate_label_ != nullptr) {
     preview_estimate_label_->setText(PreviewEstimateText());
   }
@@ -836,6 +858,11 @@ void CacheSettingsDialog::OnPreviewPresetChanged() {
   preview_lifted_ = false;
   preview_limited_by_memory_ = false;
   switch (preset) {
+    case PreviewPreset::kDefault:
+      preview_custom_mode_ = false;
+      preview_resolution_ = lapian::core::PreviewResolution::kAuto;
+      preview_cache_mb_ = lapian::core::kPreviewCacheDefaultMb;
+      break;
     case PreviewPreset::kLowMemory:
       preview_custom_mode_ = false;
       preview_resolution_ = lapian::core::PreviewResolution::k720p;
@@ -927,6 +954,31 @@ QString CacheSettingsDialog::PreviewHintText() const {
   return hints.join(QLatin1Char('\n'));
 }
 
+QString CacheSettingsDialog::PreviewRangeText() const {
+  // P2：“本机最多”= 绝对上限再按当前档位下限与可用内存 25% 夹取；可用内存
+  // 未知（<=0）时不夹（显示绝对上限）。25% 低于下限时 Clamp 保下限并报告，
+  // 文案附“（下限优先）”，与保存时的夹取语义一致。
+  const int machine_cap = lapian::core::ClampPreviewCacheMb(
+      lapian::core::kPreviewCacheMaxMb, preview_resolution_,
+      preview_available_memory_mb_, nullptr);
+  const int min_mb =
+      lapian::core::PreviewCacheMinMbForResolution(preview_resolution_);
+  const bool floor_wins = preview_available_memory_mb_ > 0 &&
+                          preview_available_memory_mb_ / 4 < min_mb;
+  QString text =
+      QStringLiteral("可设 %1–%2 MiB；1080P / 自动最低 %3 MiB；"
+                     "本机按可用内存 25% 最多 %4 MiB")
+          .arg(lapian::core::kPreviewCacheMinMb720p)
+          .arg(lapian::core::kPreviewCacheMaxMb)
+          .arg(lapian::core::kPreviewCacheMinMb1080p)
+          .arg(machine_cap);
+  if (floor_wins) {
+    text += QStringLiteral("（下限优先）");
+  }
+  text += QStringLiteral("\n每个窗口独立占用，同时开多个窗口会叠加");
+  return text;
+}
+
 bool CacheSettingsDialog::PreviewHintIsWarning() const {
   if (preview_lifted_ || preview_limited_by_memory_) {
     return true;
@@ -959,6 +1011,16 @@ QString CacheSettingsDialog::PreviewEstimateTextForTest() const {
 QString CacheSettingsDialog::PreviewHintTextForTest() const {
   return preview_hint_label_ == nullptr ? QString()
                                         : preview_hint_label_->text();
+}
+
+QString CacheSettingsDialog::PreviewRangeTextForTest() const {
+  return preview_range_label_ == nullptr ? QString()
+                                         : preview_range_label_->text();
+}
+
+QString CacheSettingsDialog::PreviewPresetTextForTest() const {
+  return preview_cache_combo_ == nullptr ? QString()
+                                         : preview_cache_combo_->currentText();
 }
 
 void CacheSettingsDialog::SetPreviewResolutionForTest(

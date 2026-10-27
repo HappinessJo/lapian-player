@@ -953,30 +953,26 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                 .arg(preview_dialog.minimumSizeHint().width())
                 .arg(preview_dialog.minimumSizeHint().height()));
     // D3b：高 DPI 下窗口必须夹到可用屏幕 90%；自然地 resize(sizeHint()) 也不超。
+    // P2：同一判断复用于 4096 值（ui-preview-dialog-fits-4096）。
+    auto dialog_fits_screen = [](const QString& text) {
+      const QRegularExpression re(QStringLiteral(
+          "w=(\\d+) h=(\\d+) avail_w=(\\d+) avail_h=(\\d+)"));
+      const QRegularExpressionMatch match = re.match(text);
+      if (!match.hasMatch()) {
+        return false;
+      }
+      const int w = match.captured(1).toInt();
+      const int h = match.captured(2).toInt();
+      const int avail_w = match.captured(3).toInt();
+      const int avail_h = match.captured(4).toInt();
+      return avail_w > 0 && avail_h > 0 && w <= avail_w * 9 / 10 + 1 &&
+             h <= avail_h * 9 / 10 + 1;
+    };
     preview_dialog.resize(preview_dialog.sizeHint());
     QCoreApplication::processEvents();
     const QString dialog_size = preview_dialog.DialogSizeForTest();
-    const QRegularExpression dialog_size_re(
-        QStringLiteral("w=(\\d+) h=(\\d+) avail_w=(\\d+) avail_h=(\\d+)"));
-    const QRegularExpressionMatch dialog_size_match =
-        dialog_size_re.match(dialog_size);
-    const int dialog_w = dialog_size_match.hasMatch()
-                             ? dialog_size_match.captured(1).toInt()
-                             : -1;
-    const int dialog_h = dialog_size_match.hasMatch()
-                             ? dialog_size_match.captured(2).toInt()
-                             : -1;
-    const int dialog_avail_w = dialog_size_match.hasMatch()
-                                   ? dialog_size_match.captured(3).toInt()
-                                   : -1;
-    const int dialog_avail_h = dialog_size_match.hasMatch()
-                                   ? dialog_size_match.captured(4).toInt()
-                                   : -1;
     Check(QStringLiteral("ui-preview-dialog-fits"),
-          dialog_avail_w > 0 && dialog_avail_h > 0 &&
-              dialog_w <= dialog_avail_w * 9 / 10 + 1 &&
-              dialog_h <= dialog_avail_h * 9 / 10 + 1,
-          dialog_size);
+          dialog_fits_screen(dialog_size), dialog_size);
     PrintKV("ui_dialog_size", dialog_size);
     const QString dialog_shot_path =
         qEnvironmentVariable("LAPIAN_UI_DIALOG_SHOT");
@@ -1026,8 +1022,8 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
               preview_cache_spin != nullptr);
     if (preview_resolution_combo != nullptr &&
         preview_preset_combo != nullptr && preview_cache_spin != nullptr) {
-      // 2) 4 个预设挡位：同时改分辨率与缓存值。
-      preview_preset_combo->setCurrentIndex(0);
+      // 2) 5 个预设挡位（含 P2 首项“默认”）：同时改分辨率与缓存值。
+      preview_preset_combo->setCurrentIndex(1);
       Check(QStringLiteral("ui-preview-preset-low"),
             preview_dialog.PreviewResolutionForTest() ==
                     lapian::core::PreviewResolution::k720p &&
@@ -1037,7 +1033,7 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                     preview_dialog.PreviewResolutionForTest()))
                 .arg(preview_dialog.PreviewCacheMbForTest()));
       PrintKV("preview_preset_low", preview_values_text());
-      preview_preset_combo->setCurrentIndex(1);
+      preview_preset_combo->setCurrentIndex(2);
       Check(QStringLiteral("ui-preview-preset-balanced"),
             preview_dialog.PreviewResolutionForTest() ==
                     lapian::core::PreviewResolution::k1080p &&
@@ -1047,7 +1043,7 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                     preview_dialog.PreviewResolutionForTest()))
                 .arg(preview_dialog.PreviewCacheMbForTest()));
       PrintKV("preview_preset_balanced", preview_values_text());
-      preview_preset_combo->setCurrentIndex(2);
+      preview_preset_combo->setCurrentIndex(3);
       Check(QStringLiteral("ui-preview-preset-recommended"),
             preview_dialog.PreviewResolutionForTest() ==
                     lapian::core::PreviewResolution::k1080p &&
@@ -1057,7 +1053,7 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                     preview_dialog.PreviewResolutionForTest()))
                 .arg(preview_dialog.PreviewCacheMbForTest()));
       PrintKV("preview_preset_recommended", preview_values_text());
-      preview_preset_combo->setCurrentIndex(3);
+      preview_preset_combo->setCurrentIndex(4);
       Check(QStringLiteral("ui-preview-preset-long"),
             preview_dialog.PreviewResolutionForTest() ==
                     lapian::core::PreviewResolution::k1080p &&
@@ -1069,7 +1065,7 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
       PrintKV("preview_preset_long", preview_values_text());
 
       // 3) 高级自定义：不改分辨率，spin 可用。
-      preview_preset_combo->setCurrentIndex(4);
+      preview_preset_combo->setCurrentIndex(5);
       preview_cache_spin->setValue(300);
       Check(QStringLiteral("ui-preview-custom"),
             preview_dialog.PreviewResolutionForTest() ==
@@ -1133,15 +1129,20 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                 .arg(preview_dialog.PreviewHintTextForTest(), low_error));
       PrintKV("preview_720_low_hint", preview_dialog.PreviewHintTextForTest());
 
-      // 6) 自定义上限：spin 4096 → 2048。
+      // 6) 自定义上限：spin 范围随 kPreviewCacheMaxMb（128–4096），可用内存
+      // 未知时 4096 原样保留、可交给保存（保存侧还会按真实可用内存再夹）。
+      preview_dialog.SetPreviewContext(0, 0, 0);
       preview_cache_spin->setValue(4096);
-      Check(QStringLiteral("ui-preview-max-2048"),
-            preview_cache_spin->value() == 2048 &&
-                preview_dialog.PreviewCacheMbForTest() == 2048,
-            QStringLiteral("spin=%1 mb=%2")
+      Check(QStringLiteral("ui-preview-max-4096"),
+            preview_cache_spin->maximum() ==
+                    lapian::core::kPreviewCacheMaxMb &&
+                preview_cache_spin->value() == 4096 &&
+                preview_dialog.PreviewCacheMbForTest() == 4096,
+            QStringLiteral("spin_max=%1 spin=%2 mb=%3")
+                .arg(preview_cache_spin->maximum())
                 .arg(preview_cache_spin->value())
                 .arg(preview_dialog.PreviewCacheMbForTest()));
-      PrintKV("preview_max_2048", preview_values_text());
+      PrintKV("preview_max_4096", preview_values_text());
 
       // 7) 可用内存 25%：1024MB → 上限 256MiB。
       preview_dialog.SetPreviewContext(0, 0, 1024);
@@ -1225,7 +1226,7 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
       preview_dialog.SetSessionActive(false);
 
       // 12) 长拖预设保存：一次 Save 写 1080P/1024，且 v1/cache 键不被冲掉。
-      preview_preset_combo->setCurrentIndex(3);
+      preview_preset_combo->setCurrentIndex(4);
       QString persist_error;
       const bool persisted = preview_dialog.ApplyForTest(&persist_error);
       lapian::core::SettingsLoadResult reloaded;
@@ -1339,6 +1340,233 @@ int RunOnlineCacheManageTest(const OnlineCacheManageTestOptions& options) {
                 .arg(preview_dialog.PreviewCacheMbForTest())
                 .arg(no_lift_error));
       PrintKV("preview_720p_no_lift", preview_values_text());
+
+      // 16) P2：4096 保存/重载、范围文案、默认预设项、4 DPI 可达。
+      // 产品 ApplyCacheSettings 写盘前会用“真实可用内存 25%”再夹一次（对话框
+      // 已按 SetPreviewContext 的上下文夹过），所以这里的落盘期望值用同一
+      // 公式算，不把本机内存水位写死进断言；对话框交给保存的值仍是 4096。
+      MEMORYSTATUSEX p2_memory{};
+      p2_memory.dwLength = sizeof(p2_memory);
+      int p2_available_mb = 0;
+      if (GlobalMemoryStatusEx(&p2_memory) != FALSE) {
+        p2_available_mb = static_cast<int>(std::min<unsigned long long>(
+            p2_memory.ullAvailPhys / (1024ull * 1024ull), 2147483647ull));
+      }
+      const int p2_machine_cap_1080p = lapian::core::ClampPreviewCacheMb(
+          lapian::core::kPreviewCacheMaxMb,
+          lapian::core::PreviewResolution::k1080p, p2_available_mb, nullptr);
+      PrintKV("preview_machine_memory",
+              QStringLiteral("available_mb=%1 machine_cap_1080p_mb=%2")
+                  .arg(p2_available_mb)
+                  .arg(p2_machine_cap_1080p));
+
+      // 16a) 4096 保存：对话框按 4096 交给 apply；产品写盘再按本机 25% 夹取。
+      preview_dialog.SetPreviewContext(0, 0, 0);
+      preview_dialog.SetPreviewResolutionForTest(
+          lapian::core::PreviewResolution::k1080p);
+      preview_dialog.SetPreviewCacheMbForTest(
+          lapian::core::kPreviewCacheMaxMb);
+      QString max_error;
+      const bool max_saved = preview_dialog.ApplyForTest(&max_error);
+      lapian::core::SettingsLoadResult reloaded_4096;
+      {
+        SettingsStore check_settings(preview_settings_root);
+        reloaded_4096 = check_settings.Load();
+      }
+      Check(QStringLiteral("ui-preview-max-4096-persists"),
+            max_saved && applied_cache_mb == 4096 &&
+                reloaded_4096.status ==
+                    lapian::core::SettingsLoadStatus::kLoaded &&
+                reloaded_4096.settings.preview_resolution ==
+                    lapian::core::PreviewResolution::k1080p &&
+                reloaded_4096.settings.preview_cache_mb ==
+                    p2_machine_cap_1080p,
+            QStringLiteral("saved=%1 applied=%2 loaded=%3 avail_mb=%4 "
+                           "machine_cap=%5 err=%6")
+                .arg(max_saved ? 1 : 0)
+                .arg(applied_cache_mb)
+                .arg(reloaded_4096.settings.preview_cache_mb)
+                .arg(p2_available_mb)
+                .arg(p2_machine_cap_1080p)
+                .arg(max_error));
+      PrintKV("preview_max_4096_persisted",
+              QStringLiteral("applied=%1 loaded=%2 avail_mb=%3 "
+                             "machine_cap=%4")
+                  .arg(applied_cache_mb)
+                  .arg(reloaded_4096.settings.preview_cache_mb)
+                  .arg(p2_available_mb)
+                  .arg(p2_machine_cap_1080p));
+
+      // 16b) 4096 + 可用 8192MB → 保存前夹到 2048（25%），提示含 25%。
+      preview_dialog.SetPreviewContext(0, 0, 8192);
+      preview_dialog.SetPreviewResolutionForTest(
+          lapian::core::PreviewResolution::k1080p);
+      preview_dialog.SetPreviewCacheMbForTest(
+          lapian::core::kPreviewCacheMaxMb);
+      QString clamp_error;
+      const bool clamp_saved = preview_dialog.ApplyForTest(&clamp_error);
+      lapian::core::SettingsLoadResult reloaded_clamped;
+      {
+        SettingsStore check_settings(preview_settings_root);
+        reloaded_clamped = check_settings.Load();
+      }
+      Check(QStringLiteral("ui-preview-4096-memory-clamp"),
+            clamp_saved && applied_cache_mb == 2048 &&
+                preview_dialog.PreviewCacheMbForTest() == 2048 &&
+                reloaded_clamped.settings.preview_cache_mb == 2048 &&
+                preview_dialog.PreviewHintTextForTest().contains(
+                    QStringLiteral("25%")),
+            QStringLiteral("saved=%1 applied=%2 mb=%3 loaded=%4 hint=%5 "
+                           "err=%6")
+                .arg(clamp_saved ? 1 : 0)
+                .arg(applied_cache_mb)
+                .arg(preview_dialog.PreviewCacheMbForTest())
+                .arg(reloaded_clamped.settings.preview_cache_mb)
+                .arg(preview_dialog.PreviewHintTextForTest(), clamp_error));
+      PrintKV("preview_4096_memory_clamp", preview_values_text());
+      PrintKV("preview_4096_memory_hint",
+              preview_dialog.PreviewHintTextForTest());
+
+      // 16c) SettingsStore 层 4096 往返（可用内存未知时解析不再夹取），
+      // 同时给“重开对话框”提供落盘 4096 的输入；本段最后一次写盘即 4096。
+      lapian::core::AppSettings p2_settings_4096;
+      {
+        SettingsStore check_settings(preview_settings_root);
+        p2_settings_4096 = check_settings.Load().settings;
+      }
+      p2_settings_4096.preview_resolution =
+          lapian::core::PreviewResolution::k1080p;
+      p2_settings_4096.preview_cache_mb =
+          lapian::core::kPreviewCacheMaxMb;
+      bool p2_saved_4096 = false;
+      lapian::core::SettingsLoadResult p2_loaded_4096;
+      {
+        SettingsStore check_settings(preview_settings_root);
+        p2_saved_4096 = check_settings.Save(p2_settings_4096);
+        p2_loaded_4096 = check_settings.Load();
+      }
+      Check(QStringLiteral("ui-preview-settings-4096-roundtrip"),
+            p2_saved_4096 &&
+                p2_loaded_4096.settings.preview_resolution ==
+                    lapian::core::PreviewResolution::k1080p &&
+                p2_loaded_4096.settings.preview_cache_mb ==
+                    lapian::core::kPreviewCacheMaxMb,
+            QStringLiteral("saved=%1 res=%2 mb=%3")
+                .arg(p2_saved_4096 ? 1 : 0)
+                .arg(static_cast<int>(
+                    p2_loaded_4096.settings.preview_resolution))
+                .arg(p2_loaded_4096.settings.preview_cache_mb));
+      PrintKV("preview_settings_4096",
+              QStringLiteral("settings=%1 preview_resolution=%2 "
+                             "preview_cache_mb=%3")
+                  .arg(preview_settings_root,
+                       lapian::core::PreviewResolutionKey(
+                           p2_loaded_4096.settings.preview_resolution))
+                  .arg(p2_loaded_4096.settings.preview_cache_mb));
+
+      // 16d) 重开对话框（读回落盘的 1080P/4096）：spin 4096、预设高级自定义。
+      preview_dialog.SetPreviewContext(0, 0, 0);
+      preview_dialog.SetPreviewSettings(
+          p2_loaded_4096.settings.preview_resolution,
+          p2_loaded_4096.settings.preview_cache_mb);
+      Check(QStringLiteral("ui-preview-4096-reload"),
+            preview_cache_spin->value() == 4096 &&
+                preview_dialog.PreviewCacheMbForTest() == 4096 &&
+                preview_dialog.PreviewPresetTextForTest().contains(
+                    QStringLiteral("高级自定义")),
+            QStringLiteral("spin=%1 mb=%2 preset=%3")
+                .arg(preview_cache_spin->value())
+                .arg(preview_dialog.PreviewCacheMbForTest())
+                .arg(preview_dialog.PreviewPresetTextForTest()));
+      PrintKV("preview_4096_reload", preview_values_text());
+      PrintKV("preview_4096_reload_preset",
+              preview_dialog.PreviewPresetTextForTest());
+
+      // 16e) 常显范围/本机上限/多实例提示（8192MB → 2048；未知 → 4096）。
+      preview_dialog.SetPreviewContext(0, 0, 8192);
+      const QString range_8192 = preview_dialog.PreviewRangeTextForTest();
+      // 极小内存（512MB → 25%=128 低于 1080P/自动下限 256）保下限并标注。
+      preview_dialog.SetPreviewContext(0, 0, 512);
+      const QString range_floor = preview_dialog.PreviewRangeTextForTest();
+      preview_dialog.SetPreviewContext(0, 0, 0);
+      const QString range_unknown =
+          preview_dialog.PreviewRangeTextForTest();
+      Check(QStringLiteral("ui-preview-range-text"),
+            range_unknown.contains(QStringLiteral("128")) &&
+                range_unknown.contains(QStringLiteral("4096")) &&
+                range_unknown.contains(QStringLiteral("本机")) &&
+                range_unknown.contains(QStringLiteral("25%")),
+            range_unknown);
+      Check(QStringLiteral("ui-preview-range-machine-cap"),
+            range_8192.contains(QStringLiteral("最多 2048 MiB")) &&
+                range_floor.contains(QStringLiteral("最多 256 MiB")) &&
+                range_floor.contains(QStringLiteral("下限优先")),
+            QStringLiteral("range_8192=[%1] range_floor=[%2]")
+                .arg(range_8192, range_floor));
+      Check(QStringLiteral("ui-preview-range-unknown-mem"),
+            range_unknown.contains(QStringLiteral("最多 4096 MiB")),
+            range_unknown);
+      Check(QStringLiteral("ui-preview-range-multi-instance"),
+            range_unknown.contains(QStringLiteral("多个窗口")),
+            range_unknown);
+      PrintKV("preview_range_unknown", range_unknown);
+      PrintKV("preview_range_8192", range_8192);
+
+      // 16f) 默认预设：auto+512 显示“默认”；1080P+512 仍是“推荐”。
+      preview_dialog.SetPreviewSettings(
+          lapian::core::PreviewResolution::kAuto,
+          lapian::core::kPreviewCacheDefaultMb);
+      const QString preset_default =
+          preview_dialog.PreviewPresetTextForTest();
+      Check(QStringLiteral("ui-preview-default-preset"),
+            preset_default.contains(QStringLiteral("默认")) &&
+                !preset_default.contains(QStringLiteral("高级自定义")),
+            preset_default);
+      preview_dialog.SetPreviewSettings(
+          lapian::core::PreviewResolution::k1080p,
+          lapian::core::kPreviewCacheDefaultMb);
+      const QString preset_recommended =
+          preview_dialog.PreviewPresetTextForTest();
+      Check(QStringLiteral("ui-preview-default-vs-recommended"),
+            preset_recommended.contains(QStringLiteral("推荐")) &&
+                !preset_recommended.contains(QStringLiteral("默认")),
+            preset_recommended);
+      PrintKV("preview_preset_default", preset_default);
+      PrintKV("preview_preset_1080_512", preset_recommended);
+
+      // 16g) 选中首项“默认” → auto + 512。
+      const int default_index = preview_preset_combo->findText(
+          QStringLiteral("默认（自动 / 512MiB）"));
+      if (default_index >= 0) {
+        preview_preset_combo->setCurrentIndex(default_index);
+      }
+      Check(QStringLiteral("ui-preview-default-selects-auto-512"),
+            default_index == 0 &&
+                preview_dialog.PreviewResolutionForTest() ==
+                    lapian::core::PreviewResolution::kAuto &&
+                preview_dialog.PreviewCacheMbForTest() ==
+                    lapian::core::kPreviewCacheDefaultMb &&
+                preview_dialog.PreviewPresetTextForTest().contains(
+                    QStringLiteral("默认")),
+            QStringLiteral("index=%1 res=%2 mb=%3 preset=%4")
+                .arg(default_index)
+                .arg(static_cast<int>(
+                    preview_dialog.PreviewResolutionForTest()))
+                .arg(preview_dialog.PreviewCacheMbForTest())
+                .arg(preview_dialog.PreviewPresetTextForTest()));
+      PrintKV("preview_default_preset_selected", preview_values_text());
+
+      // 16h) 4 DPI：4096 值下窗口仍夹到可用屏幕 90%（超出交给滚动区）。
+      preview_dialog.SetPreviewContext(0, 0, 0);
+      preview_dialog.SetPreviewSettings(
+          lapian::core::PreviewResolution::k1080p,
+          lapian::core::kPreviewCacheMaxMb);
+      preview_dialog.resize(preview_dialog.sizeHint());
+      QCoreApplication::processEvents();
+      const QString dialog_size_4096 = preview_dialog.DialogSizeForTest();
+      Check(QStringLiteral("ui-preview-dialog-fits-4096"),
+            dialog_fits_screen(dialog_size_4096), dialog_size_4096);
+      PrintKV("ui_dialog_size_4096", dialog_size_4096);
     }
     preview_state = g_failures == failures_before ? QStringLiteral("pass")
                                                   : QStringLiteral("fail");

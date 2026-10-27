@@ -94,6 +94,9 @@ class CacheSettingsDialog : public QDialog {
   int PreviewCacheMbForTest() const;
   QString PreviewEstimateTextForTest() const;
   QString PreviewHintTextForTest() const;
+  // P2：常显“可设范围 / 本机实际上限 / 多实例”文案与预设下拉当前文本。
+  QString PreviewRangeTextForTest() const;
+  QString PreviewPresetTextForTest() const;
   void SetPreviewResolutionForTest(
       lapian::core::PreviewResolution resolution);
   void SetPreviewCacheMbForTest(int mb);
@@ -134,6 +137,9 @@ class CacheSettingsDialog : public QDialog {
   int PreviewMaxSide() const;
   QString PreviewEstimateText() const;
   QString PreviewHintText() const;
+  // P2：范围文案里的“本机最多 X MiB”= ClampPreviewCacheMb(上限, 当前档,
+  // 可用内存)，可用内存未知（<=0）时不夹取；25% 低于下限时附“（下限优先）”。
+  QString PreviewRangeText() const;
   bool PreviewHintIsWarning() const;
   bool PreviewCustomPresetSelected() const;
 
@@ -172,6 +178,7 @@ class CacheSettingsDialog : public QDialog {
   QComboBox* preview_resolution_combo_ = nullptr;
   QComboBox* preview_cache_combo_ = nullptr;
   QSpinBox* preview_cache_spin_ = nullptr;
+  QLabel* preview_range_label_ = nullptr;
   QLabel* preview_estimate_label_ = nullptr;
   QLabel* preview_hint_label_ = nullptr;
   QPushButton* preview_restore_button_ = nullptr;
