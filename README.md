@@ -98,8 +98,7 @@ MAD / PV 的功力常常就在 **1–3 帧**之间：切点早一帧还是晚一
 依赖不入库，全部由脚本拉取/构建（见 [docs/deps.md](docs/deps.md)）：
 
 ```powershell
-# 发布前把 <your-name> 换成实际 GitHub 用户名
-git clone https://github.com/<your-name>/lapian-player.git
+git clone https://github.com/HappinessJo/lapian-player.git
 cd lapian-player
 
 powershell -ExecutionPolicy Bypass -File scripts\fetch-cmake.ps1
