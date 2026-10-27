@@ -1,4 +1,4 @@
-﻿拉片软件 — Windows 帧级参考片审阅器
+拉片软件 — Windows 帧级参考片审阅器
 =====================================
 
 运行
@@ -54,6 +54,7 @@ Windows 10 21H2+ / Windows 11 x64。
 
 许可
 ----
-licenses\ 内包含 LGPL-2.1、LGPL-3.0、GPL-3.0 全文、THIRD-PARTY-NOTICES.md
-与 SOURCE-OFFER.md，另有本隐私说明 PRIVACY.txt。Qt 与 FFmpeg 均为动态链接，
+licenses\ 内包含 LGPL-2.1、LGPL-3.0、GPL-3.0（Qt 双许可备选）全文、THIRD-PARTY-NOTICES.md
+与 SOURCE-OFFER.md，另有本隐私说明 PRIVACY.txt。本项目自身以 MIT 发布（见 LICENSE），
+第三方组件仍按各自许可；Qt 与 FFmpeg 均为动态链接，
 可用同名 DLL 替换；本项目未修改其源码，源码获取方式见 SOURCE-OFFER.md。

@@ -6,7 +6,7 @@
 
 本地逐帧 · B 站在线播放与拖动预览 · A-B 循环 · 标记 / 备注 / 截图
 
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)](#系统要求)
 [![C++](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](#从源码构建)
 [![Qt](https://img.shields.io/badge/Qt-6.8.3-41CD52.svg)](#从源码构建)
@@ -200,6 +200,10 @@ licenses      GPL / LGPL / 第三方许可证与源码获取说明
 
 ## 许可证
 
-以 **GPL-3.0** 发布，见 [LICENSE](LICENSE)。
-第三方组件（Qt LGPL-3.0、FFmpeg LGPL-2.1+、SoundTouch LGPL-2.1、qrcodegen MIT）的许可证与源码获取方式见
-[licenses/THIRD-PARTY-NOTICES.md](licenses/THIRD-PARTY-NOTICES.md) 与 [licenses/SOURCE-OFFER.md](licenses/SOURCE-OFFER.md)。
+以 **MIT** 发布，见 [LICENSE](LICENSE)。
+你可以自由使用、修改、商用、闭源再分发，只需保留版权声明与许可文本。
+
+> 历史版本：v0.1.0 及更早发布时为 GPL-3.0；自本版本起改为 MIT（已发布版本的 GPL 授权无法撤回）。
+
+第三方组件（Qt LGPL-3.0、FFmpeg LGPL-2.1+、SoundTouch LGPL-2.1、qrcodegen MIT）仍按各自许可；
+分发二进制时请保留 `licenses/` 与 `licenses/SOURCE-OFFER.md`。
