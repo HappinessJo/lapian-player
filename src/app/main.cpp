@@ -923,6 +923,10 @@ int main(int argc, char* argv[]) {
   bool online_drag_long_span_gate = false;
   // --drag-samples 是否显式给出；未给出时 P3 按 60×秒 自动给目标数（60Hz）。
   bool online_drag_samples_explicit = false;
+  // --drag-backward-samples 是否显式给出；--long-span-gate 且未给出时自动置
+  // “反向与正向同目标数/同跨度”（等价 --drag-backward-full），避免漏参数时
+  // 反向只跑 30 个目标让 3 条 long_span 检查假失败。
+  bool online_drag_backward_samples_explicit = false;
   // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
   bool scrub_space_test = false;
   // P1 热修：真实在线会话中保存缓存目录（两阶段），不中断播放。
@@ -1018,6 +1022,7 @@ int main(int argc, char* argv[]) {
     if (arguments[i] == QStringLiteral("--drag-backward-samples")) {
       if (i + 1 < arguments.size()) {
         online_drag_backward_samples = arguments[i + 1].toInt();
+        online_drag_backward_samples_explicit = true;
         arguments.removeAt(i + 1);
       }
       arguments.removeAt(i);
@@ -1521,6 +1526,13 @@ int main(int argc, char* argv[]) {
     }
     if (online_drag_samples > 3600) {
       online_drag_samples = 3600;
+    }
+    if (online_drag_long_span_gate &&
+        !online_drag_backward_samples_explicit) {
+      // P3 收尾（test-only）：长跨度门要求“反向与正向同目标数 + 同跨度”。
+      // 未显式给 --drag-backward-samples 时自动置等价 --drag-backward-full；
+      // 显式给了不同值则尊重用户，由 long_span_same_target_rate 判 fail。
+      online_drag_backward_samples = -1;
     }
     if (online_drag_backward_samples < 0) {
       // --drag-backward-full / 负值：反向与正向同目标数（同跨度对测）。

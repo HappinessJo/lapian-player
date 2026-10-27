@@ -2624,7 +2624,8 @@ void OnlineDragPreviewTestRunner::Run() {
             "preview_frames=%13 limit=%14 coverage_pct=%15 "
             "span_coverage_pct=%16 preview_peak=%17 peak_limit=%18 "
             "cache_mb=%19 max_side=%20 preview_w=%21 preview_h=%22 "
-            "fallback=%23 exact=%24 playurl=%25 dash=%26")
+            "fallback=%23 exact=%24 playurl=%25 dash=%26 "
+            "backward_span=%27")
             .arg(ls_mode)
             .arg(ls_span_frames)
             .arg(ls_samples)
@@ -2652,9 +2653,38 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(ls_fallback)
             .arg(ls_exact ? 1 : 0)
             .arg(ls_playurl)
-            .arg(ls_dash);
+            .arg(ls_dash)
+            .arg(backward.span_frames);
     if (options_.long_span_gate) {
-      // 长跨度门（7 条；只在 --long-span-gate 时判定，1s/2s 既有判据一行未改）。
+      // P3 收尾：长跨度门的第一条是“同目标率 + 同跨度”。漏 --drag-backward-full
+      // 时反向只跑默认 30 个目标（span=±30），presented/fps 比值会以 ~0.025
+      // 假失败；这里显式判 fail 并写 gate=inactive，禁止静默当通过。
+      // 正常路径：main.cpp 在 --long-span-gate 且未显式给 --drag-backward-samples
+      // 时自动置同目标数，所以本检查应为 ok=1。
+      const qint64 ls_backward_span_abs =
+          backward.span_frames < 0 ? -backward.span_frames
+                                   : backward.span_frames;
+      const bool ls_same_target_rate =
+          backward.samples == forward.samples &&
+          ls_backward_span_abs == forward.span_frames;
+      Check("long_span_same_target_rate", ls_same_target_rate,
+            ls_same_target_rate
+                ? QStringLiteral("forward_samples=%1 backward_samples=%2 "
+                                 "forward_span=%3 backward_span=%4")
+                      .arg(forward.samples)
+                      .arg(backward.samples)
+                      .arg(forward.span_frames)
+                      .arg(backward.span_frames)
+                : QStringLiteral("gate=inactive forward_samples=%1 "
+                                 "backward_samples=%2 forward_span=%3 "
+                                 "backward_span=%4 hint=omit_"
+                                 "--drag-backward-samples_or_use_"
+                                 "--drag-backward-full")
+                      .arg(forward.samples)
+                      .arg(backward.samples)
+                      .arg(forward.span_frames)
+                      .arg(backward.span_frames));
+      // 长跨度门（其余 7 条；只在 --long-span-gate 时判定，1s/2s 既有判据一行未改）。
       Check("long_span_reverse_presented_ratio_ge_0_9",
             ls_presented_ratio >= 0.9, ls_numbers);
       Check("long_span_reverse_fps_ratio_ge_0_9", ls_fps_ratio >= 0.9,

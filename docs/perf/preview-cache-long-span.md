@@ -20,12 +20,16 @@
   88.5–88.6% 的 4GiB 预算（peak 3621.9–3624.8MiB），并覆盖 101.8% 的
   1200 帧跨度**。正/反向 `presented` 1140–1180 / 1200（95.0–98.3%）、
   `fps_active` 57.2–59.2 → **20s 被 4GiB 完整覆盖，没有出现“解码吞吐填不满”**。
-- **两个门格 3 次全部通过**（每格 3 次 × 7 条 = **21/21**）：
-  - **10s@2048**：正 582/58.58、反 593/59.69，比 **1.021/1.021**；peak 1839.1MiB
-    ≤ 2064MiB；`preview_frames/limit=620/690`（89.9%）；`close=79ms`。
-  - **20s@4096**：正 1149/57.63、反 1158/58.19，比 **1.009/1.010**；peak
-    3624.8MiB ≤ 4112MiB；`preview_frames/limit=1222/1380`（88.6%）；
-    `close=151ms`。
+- **两个门格 3 次全部通过**（每格 3 次 × 8 条 = **24/24**；第 8 条
+  `long_span_same_target_rate` 是收尾新增的“反向必须与正向同目标数/同跨度”前置检查）：
+  - **10s@2048**：正 584/58.79、反 595/59.99，比 **1.021/1.021**（三次 1.015–1.024）；
+    peak 1839.1MiB ≤ 2064MiB；`preview_frames/limit=620/690`（89.9%）；`close=63ms`。
+  - **20s@4096**：正 1175/58.94、反 1192/59.85，比 **1.014/1.014**（三次 1.011–1.017）；
+    peak 3624.8MiB ≤ 4112MiB；`preview_frames/limit=1222/1380`（88.6%）；
+    `close=145ms`。
+  - 两格**只用 `--long-span-gate`（不带 `--drag-backward-full`）**复跑：
+    `backward_samples == samples`（600/1200），`long_span_same_target_rate ok=1`，
+    每轮 **36 checks / 0 fail**。
 - **1s/2s 不退化（对照格）**：1s 512/4096 正 55/58.89、反 55/58.89（比 1.000–1.018），
   正向相对 C9 包基线 57.75/58.95 在 **±5% 内**；2s/512 比 **0.965–0.974
   ≥ 0.9**（未到 C9 的 1.009–1.018，见 §5.2 的同机 A/B：C9 二进制现在也只有
@@ -40,9 +44,9 @@
   4GiB 档峰值最高 **4,292,352,000B（4093.5MiB，余量 18.5MiB）**；
   4096 是**上限不是预分配**（只有长跨度才真吃到）。
 - **关闭释放耗时**（围绕 `StopPreviewForTest()`，只记录）：1s **9–10ms**、2s
-  **16–18ms**、10s **79–90ms**、20s@2048 136–188ms、20s@4096 **151–155ms**、
+  **16–18ms**、10s **62–90ms**、20s@2048 136–188ms、20s@4096 **139–149ms**、
   **40s@4096 331–395ms（> 200ms，按计划 §5 记为 gap）**。
-- **回归**：`ctest` **38/38**（65.71s）；`--loop-test --file media\测试.mp4`
+- **回归**：`ctest` **38/38**（收尾后 66.48s）；`--loop-test --file media\测试.mp4`
   **41/0**（L1 未受影响）；`--key-test` **77/0**；`--drag-test` P4
   **64.3 / 64.4fps**、P6 p95 **28.6 / 15.3ms**（P7/P8/P9 全 pass）；
   **Medium 副本 5 格复验全过**（§7.3）。
@@ -54,8 +58,8 @@
 | 文件 | 改动 |
 |---|---|
 | `src/app/OnlineDragPreviewTestRunner.h` | `OnlineDragPreviewTestOptions` 新增 `bool long_span_gate`（test-only） |
-| `src/app/OnlineDragPreviewTestRunner.cpp` | `Run()` 里新增长跨度采集/判定/关闭计时：`long_span_record`、`preview_close_ms=`、汇总行追加 `long_span=…`；仅在 `--long-span-gate` 时跑 7 条 `long_span_*` 检查 |
-| `src/app/main.cpp` | 前置参数环（不进主 else-if 链，避免 C1061）解析 `--long-span-gate`；`--drag-seconds` 上限 10→60（test-only）；未显式给 `--drag-samples` 时按 **60×秒** 自动给目标数（60Hz 口径）；拖动预览/parity 探针的 `--timeout-ms` 上限 120000→300000（其它在线探针仍 120000）；`options.long_span_gate` 传递 |
+| `src/app/OnlineDragPreviewTestRunner.cpp` | `Run()` 里新增长跨度采集/判定/关闭计时：`long_span_record`、`preview_close_ms=`、汇总行追加 `long_span=…`；仅在 `--long-span-gate` 时跑 **8 条** `long_span_*` 检查（含收尾新增的 `long_span_same_target_rate`） |
+| `src/app/main.cpp` | 前置参数环（不进主 else-if 链，避免 C1061）解析 `--long-span-gate`；`--drag-seconds` 上限 10→60（test-only）；未显式给 `--drag-samples` 时按 **60×秒** 自动给目标数（60Hz 口径）；**`--long-span-gate` 且未显式给 `--drag-backward-samples` 时自动置“反向与正向同目标数/同跨度”**（等价 `--drag-backward-full`）；拖动预览/parity 探针的 `--timeout-ms` 上限 120000→300000（其它在线探针仍 120000）；`options.long_span_gate` 传递 |
 | `docs/perf/preview-cache-long-span.md` | 本文 |
 
 ### 1.1 新增 test-only 参数与口径
@@ -67,13 +71,20 @@
   - 目标数 = **60×S**（60Hz；未显式给 `--drag-samples` 时自动 60×S，1s 仍 60）；
   - 跨度 = **60×S 帧**（`fps×2×S`，30fps 素材下 S 秒目标 = 2S 秒内容）；
   - 单程时长 = S×1000ms；正、反各一遍。
+- **反向目标数自动补齐（收尾）**：`--long-span-gate` 且用户未显式给
+  `--drag-backward-samples` 时，main.cpp 自动置“反向与正向同目标数/同跨度”
+  （等价 `--drag-backward-full`）。显式给了不同值则尊重用户，但
+  `long_span_same_target_rate` 会判 **fail**（detail 带 `gate=inactive`），
+  不会静默当通过。**原因**：漏 `--drag-backward-full` 时反向只跑默认 30 个目标
+  （`backward_samples=30`、`backward_span=±30`），3 条比值检查会以 ~0.025 假失败。
 - 不复用 `--online-drag-parity-test`：长跨度全部走 T8.6.1b 的真实窗口拖动探针
   （`--online-drag-preview-test --drag-cache-hit`），只加诊断/门，不改其既有检查。
 
-### 1.2 `long_span` 检查（7 条，仅 `--long-span-gate`）
+### 1.2 `long_span` 检查（8 条，仅 `--long-span-gate`）
 
 | 检查名 | 判据 |
 |---|---|
+| `long_span_same_target_rate` | 反向与正向**同目标数 + 同跨度**（`backward_samples == forward_samples && abs(backward_span) == forward_span`）；不满足判 fail，detail 写 `gate=inactive` 与两个值 |
 | `long_span_reverse_presented_ratio_ge_0_9` | 反 presented / 正 presented ≥ 0.9 |
 | `long_span_reverse_fps_ratio_ge_0_9` | 反 fps_active / 正 fps_active ≥ 0.9 |
 | `long_span_both_fps_active_ge_30` | 正、反 fps_active 都 ≥ 30 |
@@ -82,7 +93,7 @@
 | `long_span_exact_landing` | 正、反都 `exact_frame=1` 且 `exact_pts=1` |
 | `long_span_playurl_dash_zero` | cache-hit 时 `playurl=dash=0`（growing 只记录） |
 
-诊断行（每格必打，含 record 格）：
+诊断行（每格必打，含 record 格；含 `backward_span`）：
 
 ```
 long_span_record mode=cache_hit span_frames=… samples=… backward_samples=… duration_ms=…
@@ -91,7 +102,7 @@ long_span_record mode=cache_hit span_frames=… samples=… backward_samples=…
   preview_frames=… limit=… coverage_pct=… span_coverage_pct=…
   preview_peak=… peak_limit=… cache_mb=… max_side=…
   preview_w=… preview_h=… fallback=… exact=… playurl=… dash=…
-  preview_close_ms=… gate=0|1
+  backward_span=… preview_close_ms=… gate=0|1
 preview_close_ms=… preview_frames_before_close=… preview_peak_before_close=… drag_seconds=…
 ```
 
@@ -117,9 +128,10 @@ online_drag_preview_result checks=… failures=… verdict=… <preview stats>
 
 ## 2. 环境与方法
 
-- 构建：`cmake --build build\release --config Release --target lapian`（增量 10.9s）；
-  产品 exe `build\release\bin\lapian.exe` **3,753,472B**、SHA256
-  `611BAB286BF3C877D26B79F682CF02C79FF1541C3E869D78CE2BCC11FE92428C`。
+- 构建：`cmake --build build\release --config Release --target lapian`（增量 10.9s / 收尾 11.9s）；
+  产品 exe `build\release\bin\lapian.exe` **3,753,984B**、SHA256
+  `84F017B57ECC30212728229357382DEE295BF53C51D67BB84F492234ADF0AC21`（收尾后；
+  收尾前 3,753,472B / `611BAB28…`，差异只在 test-only 参数默认与一条新检查）。
 - 夹具（**只读源，绝不写入**）：`build\pm-b-fresh\cache`
   （`BV1BMnv6jE5S / 42915922022`，1080P 1920×1080@30、111s、`80-7` 完整 DASH，
   `data.mp4` 31,057,770B）。每个 tag **先复制**到 `build\p3\<tag>\cache`。
@@ -129,7 +141,9 @@ online_drag_preview_result checks=… failures=… verdict=… <preview stats>
   取日志；`--timeout-ms 300000`（拖动预览探针上限，其它探针仍 120000）。
 - 次数：1s/2s/10s/20s 每格 **3 次**、40s **2 次**（计划 §3 允许），共 **29 次矩阵运行**；
   另做 6 次同机 A/B（§5.2）、5 次 Medium 副本（§7.3）、1 次 720P 对照、1 次
-  “不给 `--drag-samples` 自动 60×秒”验证、1 次 growing 1s 冒烟（§7.2），共 **43 次**。
+  “不给 `--drag-samples` 自动 60×秒”验证、1 次 growing 1s 冒烟（§7.2）、
+  **收尾后 6 次“只带 `--long-span-gate`”门格复跑 + 1 次负向（显式
+  `--drag-backward-samples 30`）+ 2 次 Medium 门格复跑**，共 **52 次**。
 - 真实窗口 + 真实缓存文件；不注入假数据。cache-hit 全程 0 网络（见 `playurl/dash=0`）。
 
 命令模板（1080P cache-hit；门格加 `--long-span-gate`；40s 用 `--drag-seconds 40
@@ -182,49 +196,67 @@ Start-Process -Wait -FilePath build\release\bin\lapian.exe -ArgumentList @(
 
 ---
 
-## 4. 门格数据（`--long-span-gate`，每格 3 次 × 7 条）
+## 4. 门格数据（`--long-span-gate`，每格 3 次 × 8 条）
 
 判据（与计划 §4 一致，未放宽）：反 presented ≥0.9×正、反 fps_active ≥0.9×正、
 双方 fps_active ≥30、`peak ≤ 配置+16MiB`、`fallback=0`、exact 1/1、
-cache-hit `playurl=dash=0`。
+cache-hit `playurl=dash=0`；**前置条件：反向与正向同目标数 + 同跨度**
+（`long_span_same_target_rate`，收尾新增）。
 
-### 4.1 10s@2048 — **gate，3/3 通过（21/21 条）**
+> 口径说明：下表是**收尾后**的复跑——命令**只带 `--long-span-gate`、不带
+> `--drag-backward-full`**，由 main.cpp 自动补齐反向目标数，因此同时验证了
+> “漏参数不会再假失败”。每轮 `checks=36 failures=0`（28 项既有 + 8 项 long_span）。
+> 收尾前带 `--drag-backward-full` 的 3 次运行是 `7/7`、`35 checks`，比值同样
+> 1.021/1.021（10s）与 1.009/1.010（20s），日志保留在 `build\p3\p3-10s-2048-*` /
+> `build\p3\p3-20s-4096-*`。
+
+### 4.1 10s@2048 — **gate，3/3 通过（24/24 条）**
 
 | # | 正 presented / fps | 反 presented / fps | pres 比 | fps 比 | floor30 | peak MiB | frames/limit | span cov | close | 结果 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| r1 | 581 / 58.47 | 593 / 59.69 | 1.021 | 1.021 | 1 | 1839.1 | 620/690（89.9%） | 103.3% | 79ms | 7/7 |
-| r2 | 582 / 58.58 | 594 / 59.90 | 1.021 | 1.023 | 1 | 1839.1 | 620/690 | 103.3% | 79ms | 7/7 |
-| r3 | 585 / 58.87 | 593 / 59.68 | 1.014 | 1.014 | 1 | 1839.1 | 620/690 | 103.3% | 83ms | 7/7 |
-| 中位 | 582 / 58.58 | 593 / 59.69 | **1.021** | **1.021** | 1 | 1839.1 | 620/690 | 103.3% | **79ms** | **pass** |
+| r1 | 585 / 58.87 | 594 / 59.79 | 1.015 | 1.016 | 1 | 1839.1 | 620/690（89.9%） | 103.3% | 64ms | 8/8 |
+| r2 | 581 / 58.48 | 595 / 59.99 | 1.024 | 1.026 | 1 | 1839.1 | 620/690 | 103.3% | 62ms | 8/8 |
+| r3 | 584 / 58.79 | 596 / 59.98 | 1.021 | 1.020 | 1 | 1839.1 | 620/690 | 103.3% | 63ms | 8/8 |
+| 中位 | 584 / 58.79 | 595 / 59.99 | **1.021** | **1.021** | 1 | 1839.1 | 620/690 | 103.3% | **63ms** | **pass** |
 
+- `backward_samples=forward_samples=600`、`backward_span=-600`、
+  `long_span_same_target_rate ok=1`（每轮）。
 - `preview_w×h=1920×1080`、`fallback=0`、`exact=1`、`playurl=dash=0`（每轮）。
 - 峰值 1,928,448,000B（1839.1MiB）≤ 2,164,260,864B（2064MiB），余量 224.9MiB。
-- 每轮 `checks=35 failures=0`（28 项既有 + 7 项 long_span）。
 
-### 4.2 20s@4096 — **gate，3/3 通过（21/21 条）**
+### 4.2 20s@4096 — **gate，3/3 通过（24/24 条）**
 
 | # | 正 presented / fps | 反 presented / fps | pres 比 | fps 比 | floor30 | peak MiB | frames/limit | span cov | close | 结果 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| r1 | 1169 / 58.64 | 1180 / 59.20 | 1.009 | 1.010 | 1 | 3621.9 | 1221/1380（88.5%） | 101.8% | 151ms | 7/7 |
-| r2 | 1140 / 57.19 | 1158 / 58.19 | 1.016 | 1.017 | 1 | 3624.8 | 1222/1380（88.6%） | 101.8% | 155ms | 7/7 |
-| r3 | 1149 / 57.63 | 1156 / 58.09 | 1.006 | 1.008 | 1 | 3624.8 | 1222/1380 | 101.8% | 151ms | 7/7 |
-| 中位 | 1149 / 57.63 | 1158 / 58.19 | **1.009** | **1.010** | 1 | 3624.8 | 1222/1380 | 101.8% | **151ms** | **pass** |
+| r1 | 1176 / 58.99 | 1192 / 59.85 | 1.014 | 1.015 | 1 | 3624.8 | 1222/1380（88.6%） | 101.8% | 139ms | 8/8 |
+| r2 | 1173 / 58.83 | 1193 / 59.85 | 1.017 | 1.017 | 1 | 3624.8 | 1222/1380 | 101.8% | 149ms | 8/8 |
+| r3 | 1175 / 58.94 | 1188 / 59.60 | 1.011 | 1.011 | 1 | 3621.9 | 1221/1380（88.5%） | 101.8% | 145ms | 8/8 |
+| 中位 | 1175 / 58.94 | 1192 / 59.85 | **1.014** | **1.014** | 1 | 3624.8 | 1222/1380 | 101.8% | **145ms** | **pass** |
 
+- `backward_samples=forward_samples=1200`、`backward_span=-1200`、
+  `long_span_same_target_rate ok=1`（每轮）。
 - 峰值 3,800,908,800B（3624.8MiB）≤ 4,311,744,512B（4112MiB），余量 487.2MiB。
 - `fallback=0`、`exact=1`、`playurl=dash=0`、`preview_w×h=1920×1080`（每轮）。
-- 每轮 `checks=35 failures=0`。
 
-### 4.3 门格检查逐条（29 次运行内 42 条 long_span check 全 ok）
+### 4.3 门格检查逐条（6 次收尾复跑内 48 条 long_span check 全 ok）
 
 | 检查 | 10s@2048（3 次） | 20s@4096（3 次） |
 |---|---|---|
-| `long_span_reverse_presented_ratio_ge_0_9` | 1.021 / 1.021 / 1.014 → ok×3 | 1.009 / 1.016 / 1.006 → ok×3 |
-| `long_span_reverse_fps_ratio_ge_0_9` | 1.021 / 1.023 / 1.014 → ok×3 | 1.010 / 1.017 / 1.008 → ok×3 |
-| `long_span_both_fps_active_ge_30` | 58.47–59.90 → ok×3 | 57.19–59.20 → ok×3 |
+| `long_span_same_target_rate` | 600 vs 600 / span ±600 → ok×3 | 1200 vs 1200 / span ±1200 → ok×3 |
+| `long_span_reverse_presented_ratio_ge_0_9` | 1.015 / 1.024 / 1.021 → ok×3 | 1.014 / 1.017 / 1.011 → ok×3 |
+| `long_span_reverse_fps_ratio_ge_0_9` | 1.016 / 1.026 / 1.020 → ok×3 | 1.015 / 1.017 / 1.011 → ok×3 |
+| `long_span_both_fps_active_ge_30` | 58.48–59.99 → ok×3 | 58.83–59.85 → ok×3 |
 | `long_span_peak_le_config_budget` | 1839.1 ≤ 2064MiB → ok×3 | 3621.9–3624.8 ≤ 4112MiB → ok×3 |
 | `long_span_fallback_zero` | 0 → ok×3 | 0 → ok×3 |
 | `long_span_exact_landing` | 1/1 → ok×3 | 1/1 → ok×3 |
 | `long_span_playurl_dash_zero` | 0/0 → ok×3 | 0/0 → ok×3 |
+
+**负向验证（证明“显式不同值不会被静默当通过”）**：10s@2048 + `--long-span-gate`
++ **显式** `--drag-backward-samples 30`（1 次）→
+`long_span_same_target_rate ok=0 detail=gate=inactive forward_samples=600
+backward_samples=30 forward_span=600 backward_span=-600`，另有 3 条比值/floor 检查
+也 ok=0，**`checks=36 failures=4 verdict=fail`、exit=1**；反向 presented 29、
+fps_active 3.11、比 0.050/0.053（这正是漏参数时的假失败值，收尾后由自动补齐避免）。
 
 ---
 
@@ -312,13 +344,13 @@ cache-hit `playurl=dash=0`。
 | 1s@512 / 1s@4096 | 81 | **9–10 / 10** | 与预算无关（只缓存 81 帧） |
 | 2s@512 / 2s@4096 | 136 | **16–17 / 16–18** | |
 | 10s@1024 | 345 | **79–90** | |
-| 10s@2048 / 10s@4096 | 620 | **79–83 / 80–87** | |
+| 10s@2048 / 10s@4096 | 620 | **62–64**（收尾复跑）/ **80–87** | |
 | 20s@2048 | 690 | **136–188** | |
-| 20s@4096 | 1222 | **151–155** | < 200ms |
+| 20s@4096 | 1222 | **139–149**（收尾复跑；收尾前 151–155） | < 200ms |
 | 40s@4096 | 1380 | **331–395** | **> 200ms → gap（§8 第 2 条）** |
 
 - 释放耗时随帧数增长（1s 10ms → 40s 331–395ms），4GiB 满缓存关闭约 **0.33–0.40s**；
-  计划 §5 的口径是“>200ms 记为缺口”，故 40s 记 gap，20s（151–155ms）不算。
+  计划 §5 的口径是“>200ms 记为缺口”，故 40s 记 gap，20s（139–149ms）不算。
 - 该测量在长拖结束后立刻进行（预览器仍 Pause 且缓存保留），随后短拖/关窗路径
   会重建预览器；1s/2s 的既有 28 项检查未因此失败。
 
@@ -330,8 +362,8 @@ cache-hit `playurl=dash=0`。
 
 | 项 | 结果 | 备注 |
 |---|---|---|
-| `cmake --build build\release --config Release --target lapian` | 成功（10.9s） | 只有 `main.cpp` / `OnlineDragPreviewTestRunner.cpp` 重编 |
-| `ctest --test-dir build\release -C Release` | **38/38 pass**（65.71s） | `TEMP/TMP=E:\拉片软件开发\.deps\tmp`、Qt `bin` 在 PATH |
+| `cmake --build build\release --config Release --target lapian` | 成功（收尾后 11.9s） | 只有 `main.cpp` / `OnlineDragPreviewTestRunner.cpp` 重编 |
+| `ctest --test-dir build\release -C Release` | **38/38 pass**（收尾后 66.48s） | `TEMP/TMP=E:\拉片软件开发\.deps\tmp`、Qt `bin` 在 PATH |
 
 ### 7.2 既有探针（`media\测试.mp4`）
 
@@ -344,20 +376,23 @@ cache-hit `playurl=dash=0`。
 
 ### 7.3 Medium 副本复验
 
-`dist\*` → `%LOCALAPPDATA%\Programs\lapian-preview`，再用
+`dist\*` → `%LOCALAPPDATA%\Programs\lapian-preview`，再用收尾后的
 `build\release\bin\lapian.exe` 覆盖（**Medium exe SHA256 与 build 一致**：
-`611BAB28…FE92428C`、3,753,472B）。从该副本重跑 5 格（**不写共享夹具**，
+`84F017B5…ADF0AC21`、3,753,984B）。从该副本重跑 5 格（**不写共享夹具**，
 仍复制到 `build\p3\medium-*`）：
 
 | 场景 | 正 presented / fps | 反 presented / fps | 比 | frames/limit | peak MiB | close | 结果 |
 |---|---:|---:|---:|---:|---:|---:|---|
 | 1s@512 | 55 / 58.89 | 56 / 59.89 | 1.018 / 1.017 | 81/172 | 240.3 | 8ms | 28/0 pass |
 | 2s@512 | 115 / 59.49 | 109 / 57.37 | 0.948 / 0.964 | 136/172 | 403.4 | 13ms | 28/0 pass |
-| 10s@2048 **gate** | 570 / 57.38 | 578 / 58.28 | 1.014 / 1.016 | 620/690 | 1839.1 | 62ms | 35/0，7/7 gate |
-| 20s@4096 **gate** | 1148 / 57.59 | 1162 / 58.39 | 1.012 / 1.014 | 1221/1380 | 3624.8 | 134ms | 35/0，7/7 gate |
+| 10s@2048 **gate** | 588 / 59.18 | 595 / 59.90 | 1.012 / 1.012 | 620/690 | 1839.1 | 65ms | **36/0，8/8 gate** |
+| 20s@4096 **gate** | 1173 / 58.84 | 1189 / 59.64 | 1.014 / 1.014 | 1222/1380 | 3624.8 | 151ms | **36/0，8/8 gate** |
 | 40s@4096 记录 | 2293 / 57.42 | 2169 / 54.34 | 0.946 / 0.946 | 1380/1380 | 4093.5 | 324ms | 28/0（record，不写通过） |
 
 结论：Medium 副本与 build 目录同 hash、同结论；未出现“只有 build 目录能过”。
+1s/2s/40s 三行沿用同一代码路径的收尾前 build（`611BAB28…`）结果；10s/20s 两个
+gate 行与 §4 一样用**收尾后** exe（`84F017B5…`、3,753,984B，Medium 与 build 同
+hash）复跑，均为 36/0、8/8（含 `long_span_same_target_rate ok=1`）。
 
 ---
 
@@ -370,7 +405,7 @@ cache-hit `playurl=dash=0`。
    “4GiB 的收益在 40s 受**容量**限制”，而不是计划 §5 预设的“解码吞吐限制”。
    （20s 探索格两个覆盖率都 ≥80%，没有出现该限制。）
 2. **关闭释放 4GiB 超 200ms**：40s@4096 `preview_close_ms=331–395ms`（20s 为
-   151–155ms）。只记录；按计划 §5 记为 gap，不是门。
+   139–149ms）。只记录；按计划 §5 记为 gap，不是门。
 3. **2s/512 比 C9 低 3.5–5.3 个百分点**（本轮 0.965–0.974 vs C9 1.009–1.018）：
    仍在 ≥0.9 门内；同机 A/B 显示 **C9 自己的二进制现在也只有 0.973–0.982**，
    属环境/会话漂移；如实写“未达 C9 发布值”，不写成 P3 回归也不写成完全一致。
@@ -391,6 +426,10 @@ cache-hit `playurl=dash=0`。
    原因是**跨度帧数少于预算**（1s/2s）或**预算帧数少于跨度**（10s@1024 /
    20s@2048 / 40s@4096），不是解码吞吐限制（presented 57–98%）。
    这些格只记录，不写通过/覆盖。
+10. **收尾前的“漏 `--drag-backward-full` 假失败”陷阱已修**（本轮收尾）：
+    `--long-span-gate` 现在会自动补齐反向目标数；即使显式给了不同值，也会由
+    `long_span_same_target_rate` 判 fail（`gate=inactive`），不会静默通过。
+    负向验证见 §4.3（`checks=36 failures=4 verdict=fail`）。
 
 ---
 
@@ -399,20 +438,23 @@ cache-hit `playurl=dash=0`。
 | 验收项 | 结果 |
 |---|---|
 | 探索格 20s@4096：预算覆盖 / 跨度覆盖 | **88.5–88.6% / 101.8%**（均 ≥80%，20s 算覆盖） |
-| 10s@2048 长跨度门（反向比、fps 比、双方 ≥30、peak、fallback、exact、0 网络） | **pass**，3/3 次 × 7/7 条 |
-| 20s@4096 长跨度门（同上） | **pass**，3/3 次 × 7/7 条 |
+| 10s@2048 长跨度门（同目标率 + 反向比、fps 比、双方 ≥30、peak、fallback、exact、0 网络） | **pass**，3/3 次 × **8/8** 条（36/0/轮） |
+| 20s@4096 长跨度门（同上） | **pass**，3/3 次 × **8/8** 条（36/0/轮） |
+| 显式反向目标数不匹配（负向验证） | **fail（按设计）**：`gate=inactive`、`checks=36 failures=4 verdict=fail`，不静默通过 |
 | 40s@4096 | **record，不写通过**（span 覆盖 57.5% <80%，容量限制） |
 | 1s/512、1s/4096 对照不退化 | **pass**（比 1.000–1.018，正向 fps 58.82–58.95 在 C9 57.75/58.95 的 ±5% 内） |
 | 2s/512 对照 ≥0.9 | **pass**（0.965–0.974；未达 C9 1.009–1.018，已给同机 A/B 解释） |
 | 2s@4096 / 10s@1024 / 10s@4096 / 20s@2048 / 40s@4096 | **record**（0.917–1.003），不写通过 |
 | 内存 `peak ≤ 配置+16MiB`、`fallback=0`、4GiB 不 OOM/不崩 | **pass**（29/29；最高 4093.5MiB，余量 18.5MiB） |
-| 关闭释放 4GiB 记录 | **20s 151–155ms；40s 331–395ms（>200ms gap）** |
+| 关闭释放 4GiB 记录 | **20s 139–149ms；40s 331–395ms（>200ms gap）** |
 | 回归 ctest 38/38、loop 41/0、key 77/0、drag P4/P6、Medium 5 格 | **pass** |
 | 未改产品/阈值/1s 2s 判据/`online_drag_forward_backward_parity` | **是**（§1.3） |
 
 **P3 结论：长跨度探针与诊断已落地；两个计划门格（10s@2GiB、20s@4GiB）全过，
 20s 由 4GiB 完整覆盖；1s/2s 对照无方向性退化（2s 比值下降已用同机 A/B 归因环境）；
-40s 只记录并明确“4GiB 覆盖不了 40s（容量限制）”，未写通过。失败/缺口按 §8 如实保留。**
+40s 只记录并明确“4GiB 覆盖不了 40s（容量限制）”，未写通过。收尾后长跨度门强制
+“同目标率 + 同跨度”（自动补齐 + 显式检查），漏参数不会再假失败或静默通过。
+失败/缺口按 §8 如实保留。**
 
 ---
 
@@ -425,6 +467,9 @@ cache-hit `playurl=dash=0`。
   `p3-2s-4096-r{1,2,3}`、`p3-10s-1024-r{1,2,3}`、`p3-10s-2048-r{1,2,3}`（gate）、
   `p3-10s-4096-r{1,2,3}`、`p3-20s-2048-r{1,2,3}`、`p3-20s-4096-r{1,2,3}`（gate）、
   `p3-40s-4096-r{1,2}`。
+- 收尾复跑：`build\p3\fix-10s-2048-r{1,2,3}`、`build\p3\fix-20s-4096-r{1,2,3}`
+  （**只带 `--long-span-gate`，不带 `--drag-backward-full`**）、
+  `build\p3\fix-negative-explicit-30`（显式 `--drag-backward-samples 30` → fail）。
 - 附加：`build\p3\ab-2s512-{c9,p3}-r{1,2,3}`（§5.2 A/B）、
   `build\p3\medium-{1s,2s,10s,20s,40s}-*`（§7.3）、`build\p3\720p-1s-512-r1`、
   `build\p3\auto-samples-2s`（不给 `--drag-samples` 时 `samples=120` 验证）、
