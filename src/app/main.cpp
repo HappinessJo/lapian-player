@@ -2666,12 +2666,122 @@ int main(int argc, char* argv[]) {
             log_state("online-resumed");
             check("loop-online-resume", window.IsPlayingForTest());
           });
-          schedule(10000, [&window, check, finish]() {
+          schedule(10000, [&window, check]() {
             std::fprintf(stderr, "T4.2 loop_online loop_disabled=%d\n",
                          window.LoopDisabledCountForTest());
             std::fflush(stderr);
             check("loop-online-no-loop-disabled",
                   window.LoopDisabledCountForTest() == 0);
+          });
+
+          // ---- W1（2026-10-27）：在线缓存命中按 bvid+cid 记住工作区 A/B ----
+          auto w1_online_field = [](const QString& state, const char* key) {
+            const QString prefix = QString::fromLatin1(key) + QLatin1Char('=');
+            for (const QString& token : state.split(QLatin1Char(' '))) {
+              if (token.startsWith(prefix)) {
+                return token.mid(prefix.size());
+              }
+            }
+            return QString();
+          };
+          auto w1_online_log = [&window](const char* step) {
+            std::fprintf(stderr, "W1 workrange_online %s %s\n", step,
+                         window.WorkRangeStateForTest().toUtf8().constData());
+            std::fflush(stderr);
+          };
+          auto w1_online_frames = std::make_shared<int>(0);
+          schedule(10500, [&window, check, w1_online_field, w1_online_log,
+                           w1_online_frames, bvid = online_m1_bvid,
+                           cid = online_m1_cid]() {
+            window.SetWorkRangeForTest(100, 160);
+            window.FlushWorkRangeForTest();
+            w1_online_log("saved");
+            const QString state = window.WorkRangeStateForTest();
+            *w1_online_frames = w1_online_field(state, "frames").toInt();
+            const QString path = w1_online_field(state, "path");
+            const QString expected_name =
+                QStringLiteral("%1-%2.lapian-workrange.json")
+                    .arg(bvid)
+                    .arg(cid);
+            std::fprintf(stderr,
+                         "W1 workrange_online_saved has_record=%s a=%s b=%s "
+                         "path=%s exists=%d playurl=%d dash=%d\n",
+                         w1_online_field(state, "has_record")
+                             .toUtf8()
+                             .constData(),
+                         w1_online_field(state, "a").toUtf8().constData(),
+                         w1_online_field(state, "b").toUtf8().constData(),
+                         path.toUtf8().constData(),
+                         QFileInfo::exists(path) ? 1 : 0,
+                         window.OnlinePlayUrlRequestsForTest(),
+                         window.OnlineDashRequestsForTest());
+            std::fflush(stderr);
+            check("workrange-online-saved",
+                  w1_online_field(state, "has_record") ==
+                          QStringLiteral("1") &&
+                      w1_online_field(state, "a") == QStringLiteral("100") &&
+                      w1_online_field(state, "b") == QStringLiteral("160"));
+            check("workrange-online-path",
+                  path.endsWith(expected_name) && QFileInfo::exists(path));
+            // 本会话循环仍开着（L1 相位开的）；重启后应回到“循环关”，证明开关不落盘。
+            check("workrange-online-loop-on-before",
+                  window.LoopStateForTest().contains(QStringLiteral("loop=1")));
+            check("workrange-online-no-network-saved",
+                  window.OnlinePlayUrlRequestsForTest() == 0 &&
+                      window.OnlineDashRequestsForTest() == 0);
+            // 新会话：重新开始同一个缓存命中视频。
+            window.StartOnlineCacheHitForTest(bvid, cid);
+          });
+          schedule(11500, [&window, check, w1_online_field, w1_online_log,
+                           w1_online_frames, bvid = online_m1_bvid,
+                           cid = online_m1_cid, finish]() {
+            const bool ready = window.WaitForOnlineReadyForTest(15000);
+            const int wait_frames = std::max(200, *w1_online_frames);
+            const bool index_ok =
+                ready && window.WaitForOnlineIndexFramesForTest(wait_frames,
+                                                                12000);
+            // 恢复只在索引覆盖到记录帧数（或完整）后发生；再给一个事件循环。
+            if (index_ok) {
+              QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            }
+            w1_online_log("reloaded");
+            const QString state = window.WorkRangeStateForTest();
+            const QString path = w1_online_field(state, "path");
+            std::fprintf(stderr,
+                         "W1 workrange_online_reload ready=%d cache_hit=%d "
+                         "index=%d frames=%d has_record=%s a=%s b=%s loop=%s "
+                         "playurl=%d dash=%d path=%s\n",
+                         ready ? 1 : 0, window.OnlineCacheHitForTest() ? 1 : 0,
+                         index_ok ? 1 : 0, window.OnlineIndexFramesForTest(),
+                         w1_online_field(state, "has_record")
+                             .toUtf8()
+                             .constData(),
+                         w1_online_field(state, "a").toUtf8().constData(),
+                         w1_online_field(state, "b").toUtf8().constData(),
+                         window.LoopStateForTest().toUtf8().constData(),
+                         window.OnlinePlayUrlRequestsForTest(),
+                         window.OnlineDashRequestsForTest(),
+                         path.toUtf8().constData());
+            std::fflush(stderr);
+            check("workrange-online-save-reload-ready", ready && index_ok);
+            check("workrange-online-save-reload-a",
+                  w1_online_field(state, "a") == QStringLiteral("100"));
+            check("workrange-online-save-reload-b",
+                  w1_online_field(state, "b") == QStringLiteral("160"));
+            check("workrange-online-save-reload-record",
+                  w1_online_field(state, "has_record") == QStringLiteral("1"));
+            check("workrange-online-save-reload-loop-off",
+                  window.LoopStateForTest().contains(QStringLiteral("loop=0")) &&
+                      window.LoopStateForTest().contains(
+                          QStringLiteral("has_in=1")));
+            check("workrange-online-no-network",
+                  window.OnlinePlayUrlRequestsForTest() == 0 &&
+                      window.OnlineDashRequestsForTest() == 0);
+            std::fprintf(stderr,
+                         "W1 workrange_online final bvid=%s cid=%lld\n",
+                         bvid.toUtf8().constData(),
+                         static_cast<long long>(cid));
+            std::fflush(stderr);
             finish();
           });
           return;
@@ -2952,9 +3062,305 @@ int main(int argc, char* argv[]) {
           window.SetLoopSeekDeniedForTest(false);
           window.PressSpaceKeyForTest();  // 暂停
         });
-        schedule(36000, [&window, check, log_state, finish]() {
+        schedule(36000, [&window, check, log_state]() {
           log_state("gate-paused");
           check("loop-gate-paused", !window.IsPlayingForTest());
+        });
+
+        // ---- W1（2026-10-27）：工作区 A/B 按视频记忆（本地 sidecar） ----
+        auto w1_field = [](const QString& state, const char* key) {
+          const QString prefix = QString::fromLatin1(key) + QLatin1Char('=');
+          for (const QString& token : state.split(QLatin1Char(' '))) {
+            if (token.startsWith(prefix)) {
+              return token.mid(prefix.size());
+            }
+          }
+          return QString();
+        };
+        auto w1_log = [&window](const char* step) {
+          std::fprintf(stderr, "W1 workrange %s %s\n", step,
+                       window.WorkRangeStateForTest().toUtf8().constData());
+          std::fflush(stderr);
+        };
+        auto w1_write_json = [](const QString& path, const QJsonObject& object) {
+          QFile file(path);
+          if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return false;
+          }
+          const QByteArray bytes =
+              QJsonDocument(object).toJson(QJsonDocument::Indented);
+          const bool ok = file.write(bytes) == bytes.size();
+          file.close();
+          return ok;
+        };
+        auto w1_read_json = [](const QString& path) {
+          QFile file(path);
+          if (!file.open(QIODevice::ReadOnly)) {
+            return QJsonObject();
+          }
+          return QJsonDocument::fromJson(file.readAll()).object();
+        };
+        auto w1_saves_before = std::make_shared<int>(0);
+        auto w1_frames = std::make_shared<qint64>(0);
+
+        // workrange-full-range-default：无记录 → A/B 为全片两头、循环关。
+        schedule(36500, [&window, w1_log, file_path]() {
+          window.ClearWorkRangeForTest();  // 清掉前面 F4 相位留下的记录
+          w1_log("reset");
+          window.OpenFile(file_path);  // 重开同一视频 = 新会话
+        });
+        schedule(37400, [&window, check, w1_field, w1_log, w1_frames]() {
+          w1_log("default-open");
+          const QString state = window.WorkRangeStateForTest();
+          *w1_frames = w1_field(state, "frames").toLongLong();
+          const QString path = w1_field(state, "path");
+          std::fprintf(stderr,
+                       "W1 workrange_default has_record=%s a=%s b=%s frames=%lld "
+                       "loop_state=%s exists=%d\n",
+                       w1_field(state, "has_record").toUtf8().constData(),
+                       w1_field(state, "a").toUtf8().constData(),
+                       w1_field(state, "b").toUtf8().constData(),
+                       static_cast<long long>(*w1_frames),
+                       window.LoopStateForTest().toUtf8().constData(),
+                       QFileInfo::exists(path) ? 1 : 0);
+          std::fflush(stderr);
+          check("workrange-full-range-default-record",
+                w1_field(state, "has_record") == QStringLiteral("0"));
+          check("workrange-full-range-default-a",
+                w1_field(state, "a") == QStringLiteral("0"));
+          check("workrange-full-range-default-b",
+                w1_field(state, "b") == QString::number(*w1_frames - 1));
+          check("workrange-full-range-default-loop-off",
+                window.LoopStateForTest().contains(QStringLiteral("has_in=0")) &&
+                    window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+          check("workrange-full-range-default-no-file", !QFileInfo::exists(path));
+          // 设为 A=100/B=160 并显式 flush。
+          window.SetWorkRangeForTest(100, 160);
+          window.FlushWorkRangeForTest();
+        });
+        schedule(38100,
+                 [&window, check, w1_field, w1_log, w1_saves_before,
+                  w1_read_json, file_path]() {
+          w1_log("saved");
+          const QString state = window.WorkRangeStateForTest();
+          const QString path = w1_field(state, "path");
+          std::fprintf(stderr,
+                       "W1 workrange_saved a=%s b=%s has_record=%s saves=%s "
+                       "path=%s exists=%d\n",
+                       w1_field(state, "a").toUtf8().constData(),
+                       w1_field(state, "b").toUtf8().constData(),
+                       w1_field(state, "has_record").toUtf8().constData(),
+                       w1_field(state, "saves").toUtf8().constData(),
+                       path.toUtf8().constData(),
+                       QFileInfo::exists(path) ? 1 : 0);
+          std::fflush(stderr);
+          *w1_saves_before = window.WorkRangeSaveCountForTest();
+          check("workrange-save-state",
+                w1_field(state, "has_record") == QStringLiteral("1") &&
+                    w1_field(state, "a") == QStringLiteral("100") &&
+                    w1_field(state, "b") == QStringLiteral("160"));
+          check("workrange-save-file", QFileInfo::exists(path));
+          check("workrange-save-json",
+                w1_read_json(path).value(QStringLiteral("in")).toInteger() == 100 &&
+                    w1_read_json(path).value(QStringLiteral("out")).toInteger() ==
+                        160);
+          window.OpenFile(file_path);  // 关闭再打开同一视频
+        });
+        schedule(39000,
+                 [&window, check, w1_field, w1_log, w1_saves_before]() {
+                   w1_log("reloaded");
+                   const QString state = window.WorkRangeStateForTest();
+                   const QString loop_state = window.LoopStateForTest();
+                   std::fprintf(stderr,
+                                "W1 workrange_reloaded a=%s b=%s has_record=%s "
+                                "loop_state=%s status=%s\n",
+                                w1_field(state, "a").toUtf8().constData(),
+                                w1_field(state, "b").toUtf8().constData(),
+                                w1_field(state, "has_record").toUtf8().constData(),
+                                loop_state.toUtf8().constData(),
+                                window.StatusMessageForTest().toUtf8().constData());
+                   std::fflush(stderr);
+                   check("workrange-save-reload-a",
+                         w1_field(state, "a") == QStringLiteral("100"));
+                   check("workrange-save-reload-b",
+                         w1_field(state, "b") == QStringLiteral("160"));
+                   check("workrange-save-reload-record",
+                         w1_field(state, "has_record") == QStringLiteral("1"));
+                   check("workrange-save-reload-loop-off",
+                         loop_state.contains(QStringLiteral("loop=0")) &&
+                             loop_state.contains(QStringLiteral("has_in=1")));
+                   *w1_saves_before = window.WorkRangeSaveCountForTest();
+                   // 连续 5 次改 A/B，不手动 flush：500ms 防抖只应写 1 次。
+                   for (int i = 0; i < 5; ++i) {
+                     window.SetWorkRangeForTest(101 + i, 161 + i);
+                   }
+                 });
+        schedule(39750,
+                 [&window, check, w1_field, w1_log, w1_saves_before,
+                  w1_read_json, w1_write_json, file_path]() {
+          w1_log("debounce");
+          const QString state = window.WorkRangeStateForTest();
+          const int saves = window.WorkRangeSaveCountForTest();
+          std::fprintf(stderr,
+                       "W1 workrange_debounce saves=%d baseline=%d delta=%d "
+                       "a=%s b=%s\n",
+                       saves, *w1_saves_before, saves - *w1_saves_before,
+                       w1_field(state, "a").toUtf8().constData(),
+                       w1_field(state, "b").toUtf8().constData());
+          std::fflush(stderr);
+          const QString path = w1_field(state, "path");
+          const QJsonObject json = w1_read_json(path);
+          check("workrange-debounce-save-count",
+                saves - *w1_saves_before == 1);
+          check("workrange-debounce-last-range",
+                w1_field(state, "a") == QStringLiteral("105") &&
+                    w1_field(state, "b") == QStringLiteral("165"));
+          check("workrange-debounce-json",
+                json.value(QStringLiteral("in")).toInteger() == 105 &&
+                    json.value(QStringLiteral("out")).toInteger() == 165);
+          // 指纹不符：先写错 size。
+          QJsonObject tampered = json;
+          tampered.insert(QStringLiteral("size"),
+                          json.value(QStringLiteral("size")).toInteger() + 7);
+          check("workrange-fingerprint-write-size",
+                w1_write_json(path, tampered));
+          window.OpenFile(file_path);
+        });
+        schedule(40500,
+                 [&window, check, w1_field, w1_log, w1_frames,
+                  w1_write_json, w1_read_json, file_path]() {
+                   w1_log("bad-size");
+                   const QString state = window.WorkRangeStateForTest();
+                   std::fprintf(stderr, "W1 workrange_bad_size %s\n",
+                                state.toUtf8().constData());
+                   std::fflush(stderr);
+                   check("workrange-fingerprint-mismatch-size",
+                         w1_field(state, "has_record") == QStringLiteral("0") &&
+                             w1_field(state, "a") == QStringLiteral("0") &&
+                             w1_field(state, "b") ==
+                                 QString::number(*w1_frames - 1));
+                   // 再写错 mtime（差 60s > 2000ms）。
+                   const QString path = w1_field(state, "path");
+                   QJsonObject tampered = w1_read_json(path);
+                   tampered.insert(QStringLiteral("size"),
+                                   tampered.value(QStringLiteral("size"))
+                                           .toInteger() -
+                                       7);
+                   tampered.insert(
+                       QStringLiteral("mtime_ms"),
+                       tampered.value(QStringLiteral("mtime_ms")).toInteger() -
+                           60'000);
+                   check("workrange-fingerprint-write-mtime",
+                         w1_write_json(path, tampered));
+                   window.OpenFile(file_path);
+                 });
+        schedule(41400, [&window, check, w1_field, w1_log, w1_frames]() {
+          w1_log("bad-mtime");
+          const QString state = window.WorkRangeStateForTest();
+          std::fprintf(stderr, "W1 workrange_bad_mtime %s\n",
+                       state.toUtf8().constData());
+          std::fflush(stderr);
+          check("workrange-fingerprint-mismatch-mtime",
+                w1_field(state, "has_record") == QStringLiteral("0") &&
+                    w1_field(state, "a") == QStringLiteral("0") &&
+                    w1_field(state, "b") == QString::number(*w1_frames - 1));
+          // 恢复 A/B 后走 Shift+L（清除）路径：文件应被删除。
+          window.SetWorkRangeForTest(120, 180);
+          window.FlushWorkRangeForTest();
+        });
+        schedule(42200, [&window, check, w1_field, w1_log]() {
+          w1_log("clear-ready");
+          const QString state = window.WorkRangeStateForTest();
+          check("workrange-clear-saved",
+                w1_field(state, "has_record") == QStringLiteral("1") &&
+                    QFileInfo::exists(w1_field(state, "path")));
+          window.ClearLoopForTest();  // Shift+L
+        });
+        schedule(42800, [&window, check, w1_field, w1_log, file_path]() {
+          w1_log("cleared");
+          const QString state = window.WorkRangeStateForTest();
+          const QString path = w1_field(state, "path");
+          std::fprintf(stderr,
+                       "W1 workrange_cleared exists=%d loop_state=%s status=%s\n",
+                       QFileInfo::exists(path) ? 1 : 0,
+                       window.LoopStateForTest().toUtf8().constData(),
+                       window.StatusMessageForTest().toUtf8().constData());
+          std::fflush(stderr);
+          check("workrange-clear-removes", !QFileInfo::exists(path));
+          check("workrange-clear-loop-off",
+                window.LoopStateForTest().contains(QStringLiteral("has_in=0")) &&
+                    window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+          window.OpenFile(file_path);
+        });
+        schedule(43700,
+                 [&window, check, w1_field, w1_log, w1_frames, file_b]() {
+                   w1_log("cleared-reload");
+                   const QString state = window.WorkRangeStateForTest();
+                   std::fprintf(stderr, "W1 workrange_cleared_reload %s\n",
+                                state.toUtf8().constData());
+                   std::fflush(stderr);
+                   check("workrange-clear-reload-full-range",
+                         w1_field(state, "has_record") == QStringLiteral("0") &&
+                             w1_field(state, "a") == QStringLiteral("0") &&
+                             w1_field(state, "b") ==
+                                 QString::number(*w1_frames - 1));
+                   check("workrange-clear-reload-loop-off",
+                         window.LoopStateForTest().contains(
+                             QStringLiteral("has_in=0")));
+                   if (!file_b.isEmpty()) {
+                     // F8-A4“换视频不串”：A 存 50..90 后打开 B再回来。
+                     window.SetWorkRangeForTest(50, 90);
+                     window.FlushWorkRangeForTest();
+                     window.OpenFile(file_b);
+                   }
+                 });
+        auto w1_b_range = std::make_shared<std::pair<qint64, qint64>>(0, 0);
+        schedule(44400, [&window, check, w1_field, w1_log, w1_b_range, file_b,
+                         file_path, finish]() {
+          if (file_b.isEmpty()) {
+            finish();
+            return;
+          }
+          w1_log("other-video-opened");
+          const QString state = window.WorkRangeStateForTest();
+          check("workrange-switch-video-b-default",
+                w1_field(state, "has_record") == QStringLiteral("0"));
+          // B 自己存一个区间（按 B 的帧数取 1/4..1/2），再回到 A 验证 A 仍是 50..90。
+          const qint64 frames = w1_field(state, "frames").toLongLong();
+          const qint64 b_in = std::max<qint64>(1, frames / 4);
+          const qint64 b_out = std::max<qint64>(b_in, frames / 2);
+          *w1_b_range = {b_in, b_out};
+          window.ClearWorkRangeForTest();
+          window.SetWorkRangeForTest(static_cast<int>(b_in),
+                                     static_cast<int>(b_out));
+          window.FlushWorkRangeForTest();
+          window.OpenFile(file_path);
+        });
+        schedule(45200, [&window, check, w1_field, w1_log, file_b, file_path]() {
+          if (file_b.isEmpty()) {
+            return;
+          }
+          w1_log("back-to-a");
+          const QString state = window.WorkRangeStateForTest();
+          check("workrange-switch-video-a-kept",
+                w1_field(state, "has_record") == QStringLiteral("1") &&
+                    w1_field(state, "a") == QStringLiteral("50") &&
+                    w1_field(state, "b") == QStringLiteral("90"));
+          window.OpenFile(file_b);
+        });
+        schedule(46000, [&window, check, w1_field, w1_log, w1_b_range, file_b,
+                         finish]() {
+          if (file_b.isEmpty()) {
+            return;
+          }
+          w1_log("other-video-reload");
+          const QString state = window.WorkRangeStateForTest();
+          check("workrange-switch-video-b-kept",
+                w1_field(state, "has_record") == QStringLiteral("1") &&
+                    w1_field(state, "a") ==
+                        QString::number(w1_b_range->first) &&
+                    w1_field(state, "b") ==
+                        QString::number(w1_b_range->second));
           finish();
         });
       }

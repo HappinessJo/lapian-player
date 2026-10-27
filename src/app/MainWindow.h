@@ -320,6 +320,13 @@ class MainWindow : public QMainWindow {
   void SetLoopSeekDeniedForTest(bool denied);
   int LoopDisabledCountForTest() const;
   int PlaybackEndCountForTest() const;
+  // W1（2026-10-27）：工作区 A/B 按视频记忆的只读状态与测试入口。
+  // 状态串：a/b/frames/has_record/saves/path（另附 online/dirty/loaded 诊断键）。
+  QString WorkRangeStateForTest() const;
+  int WorkRangeSaveCountForTest() const { return work_range_save_count_; }
+  void FlushWorkRangeForTest();
+  void SetWorkRangeForTest(int in, int out);
+  void ClearWorkRangeForTest();
   // T5.2 自动化验证入口：与 Ctrl+M / 侧栏点击 / 删除确认后的路径一致；
   // 删除入口跳过确认对话框，确认逻辑仍由 UI 路径覆盖。
   void AddMarkForTest();
@@ -846,6 +853,19 @@ class MainWindow : public QMainWindow {
   void ApplyLoopToggle();
   void ApplyLoopClear();
   void SyncLoopUi();
+  // W1（2026-10-27，spec §3.8 / F8-A4）：工作区 A/B 按视频记忆。
+  // 只存 A/B（循环开关仍只在本次会话内保持）；A/B 变化 500ms 单次防抖落盘，
+  // 切视频/关会话/关窗/测试钩子显式 flush；失败静默（LAPIAN_WORKRANGE_LOG）。
+  void MaybeRestoreWorkRange();
+  void EnsureWorkRangeStore();
+  void OnWorkRangeChanged();
+  void ScheduleWorkRangeSave();
+  bool FlushWorkRange();
+  void ResetWorkRangeState();
+  bool RemoveStoredWorkRange();
+  std::int64_t CurrentWorkRangeFrames() const;
+  // 当前会话的工作区身份：local:<path> / online:<bvid>-<cid>；切换身份时重开 store。
+  QString WorkRangeOwner() const;
   void ShowScrubTarget(std::int64_t frame);
   void StopPreview();
   // DP-1：预览解码器借用的 D3D11 设备必须与 GfxWidget 当前设备一致；
@@ -1018,6 +1038,14 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<lapian::core::SettingsStore> settings_store_;
   std::unique_ptr<SnapshotService> snapshots_;
   lapian::core::LoopRange loop_;
+  // W1：工作区 A/B 按视频记忆（本地 sidecar / 在线记录目录）。
+  std::unique_ptr<lapian::core::WorkRangeStore> work_range_;
+  QTimer* work_range_save_timer_ = nullptr;
+  bool work_range_loaded_ = false;
+  bool work_range_dirty_ = false;
+  int work_range_save_count_ = 0;
+  QString work_range_last_path_;
+  QString work_range_owner_;
   QTimer* preview_timer_ = nullptr;
   QTimer* step_repeat_timer_ = nullptr;
   QTimer* settings_save_timer_ = nullptr;

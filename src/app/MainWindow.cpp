@@ -2443,6 +2443,8 @@ QString MainWindow::TimelineBarGeometryForTest() const {
 }
 
 void MainWindow::ShowEmptyState() {
+  // W1：进入空态会清掉 loop_，先把工作区 A/B 落盘（没有脏值时为 no-op）。
+  FlushWorkRange();
   if (online_mode_ || online_) {
     ShutdownOnlineSession(false);
   }
@@ -3586,6 +3588,12 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   StopPreview();
   preview_.reset();
   CancelIndexBuild();
+  // W1：同视频换档（同 bvid+cid 且是清晰度切换）保留内存里的 A/B；新打开
+  // （含再次打开同一视频）从“循环关”开始，并按 bvid+cid 恢复磁盘记录。
+  const bool same_online_video =
+      !online_bvid_.isEmpty() && online_bvid_ == info.request.bvid &&
+      online_cid_ == info.request.cid;
+  const bool quality_switch = same_online_video && online_switch_pending_;
   if (cache_fill_timer_ != nullptr) {
     cache_fill_timer_->stop();
   }
@@ -3673,6 +3681,14 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
   online_step_ = OnlineStepState{};
   online_seek_target_ = -1;
   online_status_detail_.clear();
+
+  // W1：新在线视频/重新打开从“循环：关”开始，工作区 A/B 由索引就绪后的
+  // MaybeRestore 按 bvid+cid 恢复一次；清晰度切换保留当前 A/B（不重新恢复）。
+  if (!quality_switch) {
+    loop_.Clear();
+    SyncLoopUi();
+    ResetWorkRangeState();
+  }
 
   const lapian::media::MediaInfo& media = session_->info();
   const lapian::media::DecodedFrameInfo& frame = session_->first_frame();
@@ -4949,6 +4965,8 @@ void MainWindow::ShutdownOnlineSession(bool finalize_if_complete) {
   if (!online_ && !online_mode_) {
     return;
   }
+  // W1：关会话（切文件/切档/关窗）前把工作区 A/B 落盘；失败不阻塞会话收尾。
+  FlushWorkRange();
   // P0：关会话/切文件不继承待播意图。
   online_pending_play_ = false;
   CancelOnlinePreviewWarm();
@@ -5907,6 +5925,8 @@ void MainWindow::OpenLocalMedia(const QString& path,
   if (!FlushMarksBeforeSwitch()) {
     return;
   }
+  // W1：确认要换会话后再把旧视频的工作区 A/B 落盘（打开失败时旧会话保留）。
+  FlushWorkRange();
   if (timeline_ != nullptr) {
     // 先把旧波形的回调摘掉，避免 session 替换后绘制到悬空的 FrameIndex。
     timeline_->ClearWaveform();
@@ -6033,6 +6053,8 @@ void MainWindow::OpenLocalMedia(const QString& path,
   // 新文件从“循环：关”开始；A/B 需要索引，扫描中由 SyncLoopUi 禁用。
   loop_.Clear();
   SyncLoopUi();
+  // W1：工作区 A/B 按视频记忆——每次换会话重置，等索引就绪后恢复一次。
+  ResetWorkRangeState();
 
   // T7.1：索引已就绪（同步模式）→ 直接启用导航/标记/预览；
   // 同步模式下索引失败也不再重试，直接进入“无索引”状态；异步模式才扫描。
@@ -6371,6 +6393,9 @@ void MainWindow::ApplyIndexState() {
     SetTotalForUi(ready ? session_->index().Total() : ContainerTotal());
   }
   SyncLoopUi();
+  // W1（2026-10-27）：索引就绪且可编辑 A/B 后恢复一次本视频的工作区记录；
+  // 增长中的在线会话要等索引覆盖到记录帧数（或完整）才恢复，避免把 B clamp 短。
+  MaybeRestoreWorkRange();
   LoadMarksForCurrentSession();
   if (online_mode_ && online_cache_hit_) {
     // A：缓存命中必须用缓存里的真实 data.mp4；索引每增长一次都会走到这里，
@@ -7260,6 +7285,7 @@ void MainWindow::ApplyLoopIn() {
       break;
   }
   SyncLoopUi();
+  OnWorkRangeChanged();
 }
 
 void MainWindow::ApplyLoopOut() {
@@ -7286,6 +7312,7 @@ void MainWindow::ApplyLoopOut() {
       break;
   }
   SyncLoopUi();
+  OnWorkRangeChanged();
 }
 
 void MainWindow::ApplyLoopToggle() {
@@ -7325,6 +7352,8 @@ void MainWindow::ApplyLoopClear() {
   const bool had_range = loop_.has_in() || loop_.has_out();
   loop_.Clear();
   SyncLoopUi();
+  // W1：Shift+L / 双击工作区 = 清除 A/B 也清除本视频记录（下次打开 = 全片）。
+  RemoveStoredWorkRange();
   statusBar()->showMessage(had_range ? QStringLiteral("已清除 A/B，循环关闭")
                                      : QStringLiteral("没有 A/B 可清除"),
                            2500);
@@ -7365,6 +7394,7 @@ void MainWindow::ApplyWorkBarIn(std::int64_t frame) {
   // 走既有 LoopRange 语义：A 晚于当前 B 时清除 B 并关循环（不静默交换）。
   loop_.SetIn(frame);
   SyncLoopUi();
+  OnWorkRangeChanged();
 }
 
 void MainWindow::ApplyWorkBarOut(std::int64_t frame) {
@@ -7378,6 +7408,7 @@ void MainWindow::ApplyWorkBarOut(std::int64_t frame) {
   // B < A 时 LoopRange 拒绝，区间保持不变（F4-A8）。
   loop_.SetOut(std::max(frame, loop_.in()));
   SyncLoopUi();
+  OnWorkRangeChanged();
 }
 
 void MainWindow::ApplyWorkBarPan(std::int64_t in, std::int64_t out) {
@@ -7397,6 +7428,7 @@ void MainWindow::ApplyWorkBarPan(std::int64_t in, std::int64_t out) {
     loop_.Toggle();
   }
   SyncLoopUi();
+  OnWorkRangeChanged();
 }
 
 void MainWindow::ApplyWorkBarClear() {
@@ -7452,6 +7484,260 @@ void MainWindow::SetLoopSeekDeniedForTest(bool denied) {
 int MainWindow::LoopDisabledCountForTest() const { return loop_disabled_count_; }
 
 int MainWindow::PlaybackEndCountForTest() const { return playback_end_count_; }
+
+// ------------------------------------------------------- W1 工作区 A/B 记忆
+
+std::int64_t MainWindow::CurrentWorkRangeFrames() const {
+  if (session_ == nullptr) {
+    return 0;
+  }
+  if (session_->HasIndex()) {
+    return static_cast<std::int64_t>(session_->index().size());
+  }
+  const lapian::core::TotalFrameCount total = ContainerTotal();
+  if (total.has_value() && total.value() > 0) {
+    return total.value();
+  }
+  return 0;
+}
+
+QString MainWindow::WorkRangeOwner() const {
+  if (session_ == nullptr) {
+    return QString();
+  }
+  if (online_ready_) {
+    if (online_bvid_.isEmpty() || online_cid_ <= 0) {
+      return QString();
+    }
+    return QStringLiteral("online:%1-%2").arg(online_bvid_).arg(online_cid_);
+  }
+  return QStringLiteral("local:") + QString::fromStdString(session_->path_utf8());
+}
+
+void MainWindow::EnsureWorkRangeStore() {
+  const QString owner = WorkRangeOwner();
+  if (owner.isEmpty()) {
+    return;
+  }
+  if (work_range_ != nullptr && work_range_owner_ != owner) {
+    // 身份变了（例如在线 → 本地 → 在线）：旧 store 不能再复用，换新记录。
+    ResetWorkRangeState();
+  }
+  if (work_range_ != nullptr) {
+    return;
+  }
+  if (online_ready_) {
+    if (online_bvid_.isEmpty() || online_cid_ <= 0) {
+      return;
+    }
+    const QByteArray bvid = online_bvid_.toUtf8();
+    const QByteArray records_root = OnlineRecordsRoot().toUtf8();
+    work_range_ = std::make_unique<lapian::core::WorkRangeStore>(
+        lapian::core::WorkRangeStore::OpenOnline(
+            std::string(bvid.constData(), static_cast<std::size_t>(bvid.size())),
+            online_cid_,
+            std::string(records_root.constData(),
+                        static_cast<std::size_t>(records_root.size()))));
+  } else {
+    lapian::core::MarkStoreOptions options;
+    if (!mark_appdata_root_for_test_.isEmpty()) {
+      options.appdata_marks_dir = mark_appdata_root_for_test_.toUtf8().toStdString();
+    }
+    work_range_ = std::make_unique<lapian::core::WorkRangeStore>(
+        lapian::core::WorkRangeStore::Open(session_->path_utf8(), options));
+  }
+  work_range_owner_ = owner;
+  if (work_range_ != nullptr && !work_range_->path().empty()) {
+    work_range_last_path_ = QString::fromStdString(work_range_->path());
+  }
+}
+
+void MainWindow::MaybeRestoreWorkRange() {
+  if (work_range_loaded_ || session_ == nullptr || !CanEditLoop()) {
+    return;
+  }
+  if (WorkRangeOwner().isEmpty()) {
+    return;
+  }
+  EnsureWorkRangeStore();
+  if (work_range_ == nullptr) {
+    return;
+  }
+  if (work_range_dirty_) {
+    // 用户在本会话里已经先改过 A/B：不拿旧记录覆盖。
+    work_range_loaded_ = true;
+    return;
+  }
+  if (!work_range_->has_record()) {
+    work_range_loaded_ = true;
+    return;
+  }
+  const std::int64_t frames = CurrentWorkRangeFrames();
+  if (frames <= 0) {
+    return;
+  }
+  // 首次在线/增长会话：索引还没覆盖到保存时的帧数就先不恢复，否则会把 B
+  // clamp 到“尚未下载完”的较短索引上，且本会话只恢复一次。
+  if (online_ready_ && !online_index_complete_ &&
+      frames < work_range_->stored_frames()) {
+    return;
+  }
+  lapian::core::WorkRange restored;
+  if (!work_range_->Restore(frames, &restored)) {
+    work_range_loaded_ = true;
+    return;
+  }
+  work_range_loaded_ = true;
+  // 全片（0..frames-1）等价于“无记录”：保持 A/B 未设置，不提示。
+  if (restored.in <= 0 && restored.out >= frames - 1) {
+    return;
+  }
+  loop_.SetIn(restored.in);
+  loop_.SetOut(restored.out);
+  SyncLoopUi();
+  statusBar()->showMessage(
+      QStringLiteral("已恢复上次工作区 A=%1 B=%2（循环关）")
+          .arg(static_cast<qlonglong>(restored.in))
+          .arg(static_cast<qlonglong>(restored.out)),
+      5000);
+}
+
+void MainWindow::ScheduleWorkRangeSave() {
+  if (work_range_save_timer_ == nullptr) {
+    work_range_save_timer_ = new QTimer(this);
+    work_range_save_timer_->setSingleShot(true);
+    connect(work_range_save_timer_, &QTimer::timeout, this,
+            [this]() { FlushWorkRange(); });
+  }
+  // 500ms 单次防抖：拖手柄时只保留最后一次；重复 start 会重置计时。
+  work_range_save_timer_->start(500);
+}
+
+void MainWindow::OnWorkRangeChanged() {
+  if (session_ == nullptr || !CanEditLoop()) {
+    return;
+  }
+  work_range_dirty_ = true;
+  ScheduleWorkRangeSave();
+}
+
+bool MainWindow::FlushWorkRange() {
+  if (work_range_save_timer_ != nullptr) {
+    work_range_save_timer_->stop();
+  }
+  if (!work_range_dirty_) {
+    return true;
+  }
+  work_range_dirty_ = false;
+  if (session_ == nullptr) {
+    return true;
+  }
+  EnsureWorkRangeStore();
+  if (work_range_ == nullptr || !work_range_->valid()) {
+    return false;
+  }
+  std::string path;
+  std::string error;
+  bool ok = false;
+  if (loop_.complete()) {
+    ok = work_range_->Save({loop_.in(), loop_.out()}, CurrentWorkRangeFrames(),
+                           &path, &error);
+    if (ok) {
+      ++work_range_save_count_;
+    }
+  } else {
+    // A/B 不完整（例如 A 晚于旧 B 把 B 清掉）时删掉旧记录，避免下次恢复过期 B。
+    ok = work_range_->Remove(&error);
+  }
+  if (!path.empty()) {
+    work_range_last_path_ = QString::fromStdString(path);
+  }
+  if (!ok && qEnvironmentVariableIsSet("LAPIAN_WORKRANGE_LOG")) {
+    std::fprintf(stderr,
+                 "W1 workrange_flush_failed path=%s error=%s complete=%d\n",
+                 work_range_last_path_.toUtf8().constData(), error.c_str(),
+                 loop_.complete() ? 1 : 0);
+    std::fflush(stderr);
+  }
+  return ok;
+}
+
+void MainWindow::ResetWorkRangeState() {
+  if (work_range_save_timer_ != nullptr) {
+    work_range_save_timer_->stop();
+  }
+  work_range_.reset();
+  work_range_loaded_ = false;
+  work_range_dirty_ = false;
+  work_range_last_path_.clear();
+  work_range_owner_.clear();
+}
+
+bool MainWindow::RemoveStoredWorkRange() {
+  if (work_range_save_timer_ != nullptr) {
+    work_range_save_timer_->stop();
+  }
+  work_range_dirty_ = false;
+  if (session_ == nullptr) {
+    return true;
+  }
+  EnsureWorkRangeStore();
+  if (work_range_ == nullptr || !work_range_->valid()) {
+    return false;
+  }
+  std::string error;
+  const bool ok = work_range_->Remove(&error);
+  if (!ok && qEnvironmentVariableIsSet("LAPIAN_WORKRANGE_LOG")) {
+    std::fprintf(stderr, "W1 workrange_remove_failed path=%s error=%s\n",
+                 work_range_last_path_.toUtf8().constData(), error.c_str());
+    std::fflush(stderr);
+  }
+  return ok;
+}
+
+QString MainWindow::WorkRangeStateForTest() const {
+  const std::int64_t frames = CurrentWorkRangeFrames();
+  const std::int64_t a = loop_.has_in() ? loop_.in() : 0;
+  const std::int64_t b =
+      loop_.has_out() ? loop_.out() : (frames > 0 ? frames - 1 : 0);
+  QString path = work_range_last_path_;
+  if (work_range_ != nullptr && !work_range_->path().empty()) {
+    path = QString::fromStdString(work_range_->path());
+  }
+  return QStringLiteral(
+             "a=%1 b=%2 frames=%3 has_record=%4 saves=%5 path=%6 online=%7 "
+             "dirty=%8 loaded=%9")
+      .arg(static_cast<qlonglong>(a))
+      .arg(static_cast<qlonglong>(b))
+      .arg(static_cast<qlonglong>(frames))
+      .arg(work_range_ != nullptr && work_range_->has_record() ? 1 : 0)
+      .arg(work_range_save_count_)
+      .arg(path)
+      .arg(online_ready_ ? 1 : 0)
+      .arg(work_range_dirty_ ? 1 : 0)
+      .arg(work_range_loaded_ ? 1 : 0);
+}
+
+void MainWindow::FlushWorkRangeForTest() { FlushWorkRange(); }
+
+void MainWindow::SetWorkRangeForTest(int in, int out) {
+  if (!CanEditLoop()) {
+    return;
+  }
+  const std::int64_t frames = CurrentWorkRangeFrames();
+  if (frames <= 0) {
+    return;
+  }
+  const std::int64_t last = frames - 1;
+  const std::int64_t a = std::clamp<std::int64_t>(in, 0, last);
+  const std::int64_t b = std::clamp<std::int64_t>(out, a, last);
+  loop_.SetIn(a);
+  loop_.SetOut(b);
+  SyncLoopUi();
+  OnWorkRangeChanged();
+}
+
+void MainWindow::ClearWorkRangeForTest() { RemoveStoredWorkRange(); }
 
 QString MainWindow::LoopPlaybackStateForTest() const {
   bool audio_clock = false;
@@ -9404,6 +9690,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
   // T6.3：先把音量/波形落盘；它独立于截图/标记的等待链，失败也不阻止关窗。
   FlushSettings();
   close_mark("settings");
+  // W1：关窗前把工作区 A/B 落盘；失败只按 LAPIAN_WORKRANGE_LOG 记录，不阻止关窗。
+  FlushWorkRange();
+  close_mark("workrange");
   CancelPendingMarkJump();
   // 关窗前把已按下的截图任务写完，避免用户以为存了却丢文件。
   if (snapshots_ != nullptr) {
