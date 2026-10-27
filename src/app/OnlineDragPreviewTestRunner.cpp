@@ -2567,6 +2567,147 @@ void OnlineDragPreviewTestRunner::Run() {
     }
   }
 
+  // P3（2026-10-27，test-only）：长跨度探针（--drag-seconds > 1 与/或
+  // --long-span-gate）。口径：目标数 = 60×S（60Hz）、跨度 = fps×2×S 帧
+  // （30fps 素材下 = 60×S 帧 = 2S 秒内容）。
+  // 所有指标只读，且必须在 StopPreviewForTest() 之前取：
+  //   coverage_pct      = preview_frames / cached_frame_limit（4GiB 预算填了多少）
+  //   span_coverage_pct = preview_frames / span_frames（拖动跨度被缓存覆盖多少）
+  // 未开 --long-span-gate 时只打 long_span_record，不做任何判定（不写“通过”）。
+  QString long_span_summary;
+  {
+    const QHash<QString, QString> ls_tokens =
+        ParsePreviewConfigTokens(window_->OnlinePreviewConfigForTest());
+    const qint64 ls_cache_bytes =
+        ls_tokens.value(QStringLiteral("cache_bytes")).toLongLong();
+    const qint64 ls_cache_mb =
+        ls_tokens.value(QStringLiteral("cache_mb")).toLongLong();
+    const qint64 ls_limit =
+        ls_tokens.value(QStringLiteral("frames")).toLongLong();
+    const qint64 ls_fallback =
+        ls_tokens.value(QStringLiteral("fallback")).toLongLong();
+    const int ls_width = ls_tokens.value(QStringLiteral("width")).toInt();
+    const int ls_height = ls_tokens.value(QStringLiteral("height")).toInt();
+    const qint64 ls_peak =
+        static_cast<qint64>(window_->OnlinePreviewCachePeakBytesForTest());
+    const int ls_frames = window_->OnlinePreviewCachedFramesForTest();
+    const qint64 ls_peak_limit = ls_cache_bytes + 16LL * 1024LL * 1024LL;
+    const qint64 ls_span_frames = forward.span_frames;
+    const int ls_samples = forward.samples;
+    const int ls_backward_samples = backward.samples;
+    const double ls_forward_presented =
+        static_cast<double>(std::max(1, forward.presented));
+    const double ls_forward_fps = std::max(0.01, forward.fps_active);
+    const double ls_presented_ratio =
+        static_cast<double>(backward.presented) / ls_forward_presented;
+    const double ls_fps_ratio = backward.fps_active / ls_forward_fps;
+    const double ls_coverage_pct =
+        ls_limit > 0 ? 100.0 * static_cast<double>(ls_frames) /
+                           static_cast<double>(ls_limit)
+                     : 0.0;
+    const double ls_span_coverage_pct =
+        ls_span_frames > 0 ? 100.0 * static_cast<double>(ls_frames) /
+                                 static_cast<double>(ls_span_frames)
+                           : 0.0;
+    const bool ls_exact = forward.exact_frame && forward.exact_pts &&
+                          backward.exact_frame && backward.exact_pts;
+    const int ls_playurl = window_->OnlinePlayUrlRequestsForTest();
+    const int ls_dash = window_->OnlineDashRequestsForTest();
+    const QString ls_mode = options_.cache_hit_only ? QStringLiteral("cache_hit")
+                                                    : QStringLiteral("growing");
+    const QString ls_numbers =
+        QStringLiteral(
+            "mode=%1 span_frames=%2 samples=%3 backward_samples=%4 "
+            "duration_ms=%5 forward_presented=%6 backward_presented=%7 "
+            "presented_ratio=%8 forward_fps_active=%9 "
+            "backward_fps_active=%10 fps_ratio=%11 fps_floor_30=%12 "
+            "preview_frames=%13 limit=%14 coverage_pct=%15 "
+            "span_coverage_pct=%16 preview_peak=%17 peak_limit=%18 "
+            "cache_mb=%19 max_side=%20 preview_w=%21 preview_h=%22 "
+            "fallback=%23 exact=%24 playurl=%25 dash=%26")
+            .arg(ls_mode)
+            .arg(ls_span_frames)
+            .arg(ls_samples)
+            .arg(ls_backward_samples)
+            .arg(options_.drag_seconds * 1000)
+            .arg(forward.presented)
+            .arg(backward.presented)
+            .arg(QString::number(ls_presented_ratio, 'f', 3))
+            .arg(QString::number(forward.fps_active, 'f', 2))
+            .arg(QString::number(backward.fps_active, 'f', 2))
+            .arg(QString::number(ls_fps_ratio, 'f', 3))
+            .arg((forward.fps_active >= 30.0 && backward.fps_active >= 30.0)
+                     ? 1
+                     : 0)
+            .arg(ls_frames)
+            .arg(ls_limit)
+            .arg(QString::number(ls_coverage_pct, 'f', 1))
+            .arg(QString::number(ls_span_coverage_pct, 'f', 1))
+            .arg(ls_peak)
+            .arg(ls_peak_limit)
+            .arg(ls_cache_mb)
+            .arg(ls_tokens.value(QStringLiteral("max_side")))
+            .arg(ls_width)
+            .arg(ls_height)
+            .arg(ls_fallback)
+            .arg(ls_exact ? 1 : 0)
+            .arg(ls_playurl)
+            .arg(ls_dash);
+    if (options_.long_span_gate) {
+      // 长跨度门（7 条；只在 --long-span-gate 时判定，1s/2s 既有判据一行未改）。
+      Check("long_span_reverse_presented_ratio_ge_0_9",
+            ls_presented_ratio >= 0.9, ls_numbers);
+      Check("long_span_reverse_fps_ratio_ge_0_9", ls_fps_ratio >= 0.9,
+            ls_numbers);
+      Check("long_span_both_fps_active_ge_30",
+            forward.fps_active >= 30.0 && backward.fps_active >= 30.0,
+            ls_numbers);
+      Check("long_span_peak_le_config_budget", ls_peak <= ls_peak_limit,
+            QStringLiteral("preview_peak=%1 peak_limit=%2 cache_mb=%3 %4")
+                .arg(ls_peak)
+                .arg(ls_peak_limit)
+                .arg(ls_cache_mb)
+                .arg(ls_numbers));
+      Check("long_span_fallback_zero", ls_fallback == 0, ls_numbers);
+      Check("long_span_exact_landing", ls_exact, ls_numbers);
+      // cache-hit 专用：长跨度拖动期间不允许走 playurl/dash（否则不是“本地
+      // 缓存命中”的结论）。growing 时本条只按“无额外请求”记录——不计入
+      // 门（growing 本来就要请求 playurl）。
+      Check("long_span_playurl_dash_zero",
+            options_.cache_hit_only ? (ls_playurl == 0 && ls_dash == 0) : true,
+            ls_numbers);
+    }
+    // 关闭释放耗时：围绕 StopPreviewForTest() 计时（此时缓存已被本次拖动填到
+    // 峰值），只记录，不判定。让后面的短拖/关窗路径重建预览器。
+    QElapsedTimer ls_close_timer;
+    ls_close_timer.start();
+    window_->StopPreviewForTest();
+    const qint64 ls_close_ms = ls_close_timer.elapsed();
+    Print(QStringLiteral(
+              "preview_close_ms=%1 preview_frames_before_close=%2 "
+              "preview_peak_before_close=%3 drag_seconds=%4")
+              .arg(ls_close_ms)
+              .arg(ls_frames)
+              .arg(ls_peak)
+              .arg(options_.drag_seconds));
+    Print(QStringLiteral("long_span_record %1 preview_close_ms=%2 gate=%3")
+              .arg(ls_numbers)
+              .arg(ls_close_ms)
+              .arg(options_.long_span_gate ? 1 : 0));
+    long_span_summary =
+        QStringLiteral(
+            "long_span=%1 span_frames=%2 samples=%3 coverage_pct=%4 "
+            "preview_frames=%5 limit=%6 peak=%7 preview_close_ms=%8")
+            .arg(options_.long_span_gate || options_.drag_seconds > 1 ? 1 : 0)
+            .arg(ls_span_frames)
+            .arg(ls_samples)
+            .arg(QString::number(ls_coverage_pct, 'f', 1))
+            .arg(ls_frames)
+            .arg(ls_limit)
+            .arg(ls_peak)
+            .arg(ls_close_ms);
+  }
+
   if (!options_.cache_hit_only) {
     RunUncachedPass();
   } else {
@@ -2587,12 +2728,13 @@ void OnlineDragPreviewTestRunner::Run() {
             .arg(heartbeat_max_ms_)
             .arg(heartbeat_over_200_));
   Print(QStringLiteral(
-            "online_drag_preview_result checks=%1 failures=%2 verdict=%3 %4")
+            "online_drag_preview_result checks=%1 failures=%2 verdict=%3 %4 %5")
             .arg(checks_)
             .arg(failures_)
             .arg(failures_ == 0 ? QStringLiteral("pass")
                                 : QStringLiteral("fail"))
-            .arg(drag_config_stats));
+            .arg(drag_config_stats)
+            .arg(long_span_summary));
   QCoreApplication::exit(failures_ == 0 ? 0 : 1);
 }
 

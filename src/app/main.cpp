@@ -918,6 +918,11 @@ int main(int argc, char* argv[]) {
   int online_drag_wait_ms = 0;
   // D4（test-only）：拖动预览视觉证据目录（--preview-dump-dir）。
   QString preview_dump_dir_arg;
+  // P3（2026-10-27，test-only）：长跨度门开关（--long-span-gate）。在进入主
+  // else-if 链之前摘出，避免给已接近 MSVC C1061 上限的主链再加分支。
+  bool online_drag_long_span_gate = false;
+  // --drag-samples 是否显式给出；未给出时 P3 按 60×秒 自动给目标数（60Hz）。
+  bool online_drag_samples_explicit = false;
   // P0 热修：拖动松手后立刻按 Space（在线增长会话 20 轮；本地变体只作对照）。
   bool scrub_space_test = false;
   // P1 热修：真实在线会话中保存缓存目录（两阶段），不中断播放。
@@ -1043,6 +1048,10 @@ int main(int argc, char* argv[]) {
       preview_dump_dir_arg = arguments[i + 1];
       arguments.removeAt(i + 1);
       arguments.removeAt(i);
+    } else if (arguments[i] == QStringLiteral("--long-span-gate")) {
+      // P3（test-only）：长跨度门；不进主 else-if 链（C1061）。
+      online_drag_long_span_gate = true;
+      arguments.removeAt(i);
     } else {
       ++i;
     }
@@ -1140,6 +1149,7 @@ int main(int argc, char* argv[]) {
                i + 1 < arguments.size()) {
       drag_samples = arguments[++i].toInt();
       online_drag_samples = drag_samples;
+      online_drag_samples_explicit = true;
     } else if (arguments[i] == QStringLiteral("--drag-tag") &&
                i + 1 < arguments.size()) {
       drag_tag = arguments[++i];
@@ -1436,8 +1446,12 @@ int main(int argc, char* argv[]) {
     if (online_m1_timeout_ms < 3000) {
       online_m1_timeout_ms = 3000;
     }
-    if (online_m1_timeout_ms > 120000) {
-      online_m1_timeout_ms = 120000;
+    // P3（test-only）：长跨度格（20s/40s）单次等待上限放到 300s；只放宽拖动
+    // 预览探针的等待，其它在线探针仍按 120s 收口。
+    const int online_timeout_cap =
+        (online_drag_preview_test || online_drag_parity_test) ? 300000 : 120000;
+    if (online_m1_timeout_ms > online_timeout_cap) {
+      online_m1_timeout_ms = online_timeout_cap;
     }
     if (online_m1_tag.isEmpty()) {
       online_m1_tag = online_m1_bvid;
@@ -1493,14 +1507,20 @@ int main(int argc, char* argv[]) {
     if (online_drag_seconds < 1) {
       online_drag_seconds = 1;
     }
-    if (online_drag_seconds > 10) {
-      online_drag_seconds = 10;
+    if (online_drag_seconds > 60) {
+      // P3（test-only）：长跨度格最长 40s（60×S 帧、60×S 个目标）；上限留 60s。
+      online_drag_seconds = 60;
+    }
+    if (!online_drag_samples_explicit) {
+      // P3：探针口径 = 60S 个目标、跨度 60S 帧、60Hz；30fps 素材下 S 秒目标
+      // 等于 2S 秒内容（fps×2×S 帧）。1s 仍是 60（与旧口径完全一致）。
+      online_drag_samples = online_drag_seconds * 60;
     }
     if (online_drag_samples < 10) {
       online_drag_samples = 10;
     }
-    if (online_drag_samples > 240) {
-      online_drag_samples = 240;
+    if (online_drag_samples > 3600) {
+      online_drag_samples = 3600;
     }
     if (online_drag_backward_samples < 0) {
       // --drag-backward-full / 负值：反向与正向同目标数（同跨度对测）。
@@ -2244,6 +2264,7 @@ int main(int argc, char* argv[]) {
     options.cache_hit_only = online_drag_cache_hit;
     options.drag_wait_ms = online_drag_wait_ms;
     options.preview_dump_dir = preview_dump_dir_arg;
+    options.long_span_gate = online_drag_long_span_gate;
     options.throttle_bytes_per_sec = online_m1_throttle_bps;
     options.parity = online_drag_parity_test;
     options.local_only = local_drag_parity_test;

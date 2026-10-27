@@ -54,6 +54,10 @@ struct OnlineDragPreviewTestOptions {
   // D4（test-only）：把正向拖动结束后“离最终目标最近的已缓存帧”dump 成
   // preview_<w>x<h>_f<frame>.nv12，并在 stderr 打 preview_sharpness 行。
   QString preview_dump_dir;
+  // P3（2026-10-27，test-only）：长跨度门（--long-span-gate）。只给门格用；
+  // 未开启时探针仍打 long_span_record（只记录，不判定），也不写“通过”。
+  // 不改 1s/2s 既有判据与 online_drag_forward_backward_parity 逻辑。
+  bool long_span_gate = false;
 };
 
 // T8.6.1b 真实窗口探针：在线增长会话拖动预览。
