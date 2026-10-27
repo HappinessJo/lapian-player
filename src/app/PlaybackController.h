@@ -42,6 +42,13 @@ class PlaybackController : public QObject {
   // TryResumeFromBuffering；不把未缓存读塞进 UI 线程。
   using DecodeGate = std::function<bool(std::int64_t next_frame, std::string* reason)>;
   void SetDecodeGate(DecodeGate gate);
+  // L1：循环跳转预检。返回 false 时不做同步 seek，直接关循环 + 提示（不 Finish、
+  // 不 reachedEnd），把“在线 A 未缓存”的长等待降级成可见提示。
+  using LoopSeekGate = std::function<bool(std::int64_t frame)>;
+  void SetLoopSeekGate(LoopSeekGate gate);
+  // L1 test-only：注入 n 次循环跳转失败，验证“只关循环、不废播放”。
+  void SetFailLoopSeeksForTest(int n) { fail_loop_seeks_for_test_ = n; }
+  int LoopDisabledCountForTest() const { return loop_disabled_count_; }
   // T8.6：在线播放时，音频时钟失速（数据前沿阻塞）也作为缓冲耗尽处理。
   void SetBufferOnAudioStall(bool enabled) { buffer_on_audio_stall_ = enabled; }
   void TryResumeFromBuffering();
@@ -68,6 +75,8 @@ class PlaybackController : public QObject {
   void loopJumped(qint64 frame, double media_seconds);
   // T8.6：缓冲耗尽（true）/恢复（false）；MainWindow 负责提示与暂停音频。
   void bufferingChanged(bool buffering, int frame, const QString& reason);
+  // L1：循环跳转失败/预检拦截时只关循环、保持播放；reason 是给用户看的提示。
+  void loopDisabled(const QString& reason);
 
  private slots:
   void Tick();
@@ -81,6 +90,11 @@ class PlaybackController : public QObject {
   // seek 到指定帧并立即呈现；用于循环跳转/定帧回到 A，不改变 playing_。
   bool SeekToFrameInternal(std::int64_t frame);
   bool JumpToLoopStart(std::int64_t trigger_frame);
+  // L1：循环跳转失败达到上限/预检拦截时只关循环——不 Finish()、不发 reachedEnd，
+  // 保持 playing_ 与时钟，从当前（B）位置继续播。
+  void DisableLoopAfterFailures();
+  void DisableLoop(const QString& reason, const char* diagnostic,
+                   std::int64_t trigger_frame);
 
   lapian::media::MediaSession* session_ = nullptr;
   lapian::audio::AudioEngine* audio_ = nullptr;
@@ -100,6 +114,9 @@ class PlaybackController : public QObject {
   bool buffering_ = false;
   bool buffer_on_audio_stall_ = false;
   DecodeGate decode_gate_;
+  LoopSeekGate loop_seek_gate_;
+  int fail_loop_seeks_for_test_ = 0;
+  int loop_disabled_count_ = 0;
   bool loop_enabled_ = false;
   std::int64_t loop_in_ = 0;
   std::int64_t loop_out_ = 0;

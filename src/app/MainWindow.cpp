@@ -413,6 +413,20 @@ MainWindow::MainWindow(QWidget* parent, const QString& settings_root,
           &MainWindow::OnPlaybackStateChanged);
   connect(playback_.get(), &PlaybackController::reachedEnd, this, &MainWindow::OnPlaybackEnded);
   connect(playback_.get(), &PlaybackController::loopJumped, this, &MainWindow::OnLoopJumped);
+  connect(playback_.get(), &PlaybackController::loopDisabled, this,
+          &MainWindow::OnLoopDisabled);
+  // L1（C）：循环跳转预检。本地/完整缓存会话保持既有同步 seek；只有在线增长
+  // 会话且 A 不在“已缓存/稳定前缀”内时返回 false（OnlineFrameCached 已含
+  // 关键帧 span + published 余量判定），避免把未缓存读阻塞在 UI 线程。
+  playback_->SetLoopSeekGate([this](std::int64_t frame) {
+    if (loop_seek_denied_for_test_) {
+      return false;
+    }
+    if (session_ == nullptr || !session_->IsOpen() || !session_->IsGrowing()) {
+      return true;
+    }
+    return OnlineFrameCached(frame);
+  });
   connect(playback_.get(), &PlaybackController::bufferingChanged, this,
           [this](bool buffering, int frame, const QString& reason) {
             if (buffering) {
@@ -2858,6 +2872,13 @@ void MainWindow::EnsureOnlineSession() {
       [this](const lapian::app::OnlineQualityCatalog& info) {
         ApplyOnlineQuality(info);
       });
+}
+
+bool MainWindow::StartOnlineCacheHitForTest(const QString& bvid, qint64 cid) {
+  lapian::app::OnlineRequest request;
+  request.bvid = bvid;
+  request.cid = cid;
+  return StartOnlineSession(request);
 }
 
 bool MainWindow::StartOnlineSession(const lapian::app::OnlineRequest& request) {
@@ -7279,12 +7300,18 @@ void MainWindow::ApplyLoopToggle() {
   }
   SyncLoopUi();
   if (loop_.enabled()) {
+    if (loop_.is_single_frame()) {
+      // L1（D）：A=B 定帧必须有可见提示（UI v2 已隐藏 loop_label_）。
+      statusBar()->showMessage(
+          QStringLiteral("A=B 定帧（L 关闭 / PgDn 离开） · 帧 %1")
+              .arg(static_cast<qlonglong>(loop_.in())),
+          4000);
+      return;
+    }
     const QString range =
-        loop_.is_single_frame()
-            ? QStringLiteral("A=B=%1").arg(static_cast<qlonglong>(loop_.in()))
-            : QStringLiteral("A=%1 B=%2")
-                  .arg(static_cast<qlonglong>(loop_.in()))
-                  .arg(static_cast<qlonglong>(loop_.out()));
+        QStringLiteral("A=%1 B=%2")
+            .arg(static_cast<qlonglong>(loop_.in()))
+            .arg(static_cast<qlonglong>(loop_.out()));
     statusBar()->showMessage(QStringLiteral("循环开启：") + range, 3000);
   } else {
     statusBar()->showMessage(QStringLiteral("循环关闭"), 2500);
@@ -7403,6 +7430,28 @@ void MainWindow::TogglePlaybackForTest() { TogglePlayback(); }
 int MainWindow::LoopJumpCountForTest() const {
   return playback_ == nullptr ? 0 : playback_->LoopJumpCountForTest();
 }
+
+bool MainWindow::PlayActionEnabledForTest() const {
+  return play_action_ != nullptr && play_action_->isEnabled();
+}
+
+QString MainWindow::PlayActionTextForTest() const {
+  return play_action_ != nullptr ? play_action_->text() : QString();
+}
+
+void MainWindow::SetFailLoopSeeksForTest(int n) {
+  if (playback_ != nullptr) {
+    playback_->SetFailLoopSeeksForTest(n);
+  }
+}
+
+void MainWindow::SetLoopSeekDeniedForTest(bool denied) {
+  loop_seek_denied_for_test_ = denied;
+}
+
+int MainWindow::LoopDisabledCountForTest() const { return loop_disabled_count_; }
+
+int MainWindow::PlaybackEndCountForTest() const { return playback_end_count_; }
 
 QString MainWindow::LoopPlaybackStateForTest() const {
   bool audio_clock = false;
@@ -8775,7 +8824,20 @@ void MainWindow::PressFullScreenKeyForTest() { SendKeyForTest(Qt::Key_F); }
 
 void MainWindow::PressEscapeKeyForTest() { SendKeyForTest(Qt::Key_Escape); }
 
-void MainWindow::PressSpaceKeyForTest() { SendKeyForTest(Qt::Key_Space); }
+void MainWindow::PressSpaceKeyForTest() {
+  // L1：非交互自动化会话里，在线对话框关闭后主窗口可能拿不到激活/焦点
+  // （QApplication::focusWidget() == nullptr），Space 会落到 MainWindow 而不进入
+  // 任何播放路径（QAction 的 WindowShortcut 也要求窗口激活）。这里直接把事件
+  // 送到画面控件——等价用户把焦点放在画面上按 Space；只影响 test-only 入口。
+  QWidget* target = QApplication::focusWidget();
+  if (target == nullptr) {
+    target = gfx_ != nullptr ? static_cast<QWidget*>(gfx_) : this;
+  }
+  QKeyEvent press(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+  QApplication::sendEvent(target, &press);
+  QKeyEvent release(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
+  QApplication::sendEvent(target, &release);
+}
 
 void MainWindow::FocusVideoForTest() {
   if (gfx_ != nullptr) {
@@ -9221,10 +9283,12 @@ void MainWindow::OnPlaybackStateChanged(bool playing) {
   play_action_->setText(playing ? QStringLiteral("暂停") : QStringLiteral("播放"));
   const bool frozen = playing && playback_ != nullptr && playback_->frozen();
   if (frozen) {
+    // L1（D）：A=B 定帧原来只有 loop_label_ 能看出来（UI v2 已隐藏），用户观感
+    // 就是“卡死”。这里给出可见语义：怎么进、怎么退。
     statusBar()->showMessage(
-        QStringLiteral("定帧：A=B=%1（画面保持、音频静音）")
+        QStringLiteral("A=B 定帧（L 关闭 / PgDn 离开） · 帧 %1（画面保持、音频静音）")
             .arg(static_cast<qlonglong>(current_frame_)),
-        3000);
+        4000);
   } else {
     statusBar()->showMessage(playing ? QStringLiteral("播放中") : QStringLiteral("已暂停"),
                              2000);
@@ -9266,11 +9330,32 @@ void MainWindow::OnLoopJumped(qint64 frame, double media_seconds) {
 
 void MainWindow::OnPlaybackEnded() {
   play_action_->setText(QStringLiteral("播放"));
-  play_action_->setEnabled(false);
+  ++playback_end_count_;
+  // L1（A）：结束态只是“没有在播”，不是“不能播”。会话仍打开时保持 Space /
+  // 播放按钮可用；重播由 PlaybackController::Play() 处理（循环开→回 A，
+  // 循环关→回第 0 帧）。禁用播放会让 Space 永久失效，只能重开文件。
+  play_action_->setEnabled(session_ != nullptr && session_->IsOpen());
   if (audio_) {
     audio_->Pause();
   }
-  statusBar()->showMessage(QStringLiteral("播放结束"), 5000);
+  statusBar()->showMessage(QStringLiteral("播放结束（Space 从头播放）"), 5000);
+}
+
+void MainWindow::OnLoopDisabled(const QString& reason) {
+  // L1（B/C）：循环跳转失败/预检拦截只关循环，不改变播放状态（不 Finish）。
+  ++loop_disabled_count_;
+  if (loop_.enabled()) {
+    loop_.Toggle();
+  }
+  SyncLoopUi();
+  statusBar()->showMessage(reason, 6000);
+  if (qEnvironmentVariableIsSet("LAPIAN_LOOP_LOG")) {
+    std::fprintf(stderr, "T4.2 loop_disabled_ui playing=%d frame=%lld count=%d reason=%s\n",
+                 playback_ != nullptr && playback_->IsPlaying() ? 1 : 0,
+                 static_cast<long long>(current_frame_), loop_disabled_count_,
+                 reason.toUtf8().constData());
+    std::fflush(stderr);
+  }
 }
 
 void MainWindow::ShowOpenError(const QString& message) {

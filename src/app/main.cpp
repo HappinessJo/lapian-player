@@ -837,6 +837,8 @@ int main(int argc, char* argv[]) {
   bool step_test = false;
   bool ab_test = false;
   bool loop_test = false;
+  // L1：--loop-test 只跑在线缓存命中 3 轮相位（需要 --bvid/--cid/--online-cache-root）。
+  bool loop_online_cache_hit = false;
   // T7.2.1：B=末帧回归（A=last-20，B=last），确认不会停在 B。
   bool loop_end_test = false;
   bool mark_test = false;
@@ -1389,8 +1391,27 @@ int main(int argc, char* argv[]) {
   if (arguments.contains(QStringLiteral("--cache-switch-online-test"))) {
     cache_switch_test = true;
   }
+  if (arguments.contains(QStringLiteral("--loop-online-cache-hit"))) {
+    loop_online_cache_hit = true;
+  }
   if ((scrub_space_test || cache_switch_test) && !online_m1_bvid.isEmpty()) {
     online_drag_preview_test = true;
+  }
+  if (loop_online_cache_hit) {
+    bool cid_ok = false;
+    online_m1_cid = online_m1_cid_text.toLongLong(&cid_ok);
+    if (!cid_ok) {
+      online_m1_cid = 0;
+    }
+    if (online_m1_bvid.isEmpty() || online_m1_cid <= 0) {
+      std::fprintf(stderr,
+                   "loop_online_fail reason=missing_bvid_cid usage=--loop-test "
+                   "--loop-online-cache-hit --bvid BV... --cid 123 "
+                   "--online-cache-root <dir>\n");
+      std::fflush(stderr);
+      return 2;
+    }
+    qputenv("LAPIAN_ONLINE_LOG", "1");
   }
 
   if (online_m1_test || online_offline_test || online_longpress_test ||
@@ -1855,6 +1876,33 @@ int main(int argc, char* argv[]) {
     QDir().mkpath(online_records_root);
     window.SetOnlineRecordsRootForTest(online_records_root);
   }
+  // L1：--loop-test 的在线缓存命中相位——缓存根由 --online-cache-root 指定（通常是
+  // 夹具 / 已下载目录的副本）；记录/截图用独立根，不写 AppData。
+  if (loop_test && loop_online_cache_hit) {
+    if (online_m1_cache_root.isEmpty()) {
+      online_m1_cache_root =
+          QDir::currentPath() + QStringLiteral("/build/L1/cache");
+    }
+    online_m1_cache_root = QFileInfo(online_m1_cache_root).absoluteFilePath();
+    QDir().mkpath(online_m1_cache_root);
+    window.SetOnlineCacheRootForTest(online_m1_cache_root);
+    if (online_m1_pictures.isEmpty()) {
+      online_m1_pictures =
+          QDir::currentPath() + QStringLiteral("/build/L1/pictures");
+    }
+    online_m1_pictures = QFileInfo(online_m1_pictures).absoluteFilePath();
+    QDir(online_m1_pictures).removeRecursively();
+    QDir().mkpath(online_m1_pictures);
+    window.SetSnapshotPicturesRootForTest(online_m1_pictures);
+    if (online_records_root.isEmpty()) {
+      online_records_root =
+          QDir::currentPath() + QStringLiteral("/build/L1/records");
+    }
+    online_records_root = QFileInfo(online_records_root).absoluteFilePath();
+    QDir(online_records_root).removeRecursively();
+    QDir().mkpath(online_records_root);
+    window.SetOnlineRecordsRootForTest(online_records_root);
+  }
   // T8.13：故障探针全部注入，不需要真实 BV/凭据，但必须用独立根（不碰 AppData）。
   if (online_fault_test) {
     const QString fault_root =
@@ -2275,8 +2323,10 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  if ((!file_path.isEmpty() || (dpi_test && dpi_empty)) && !memory_test &&
-      !drag_test && !robust_test && !gop_boundary_test && !ui_shots_test) {
+  if ((!file_path.isEmpty() || (dpi_test && dpi_empty) ||
+       (loop_test && loop_online_cache_hit)) &&
+      !memory_test && !drag_test && !robust_test && !gop_boundary_test &&
+      !ui_shots_test) {
     QTimer::singleShot(0, &window, [&window, &app, file_path, file_b, goto_text, auto_play,
                                     step_test, ab_test, loop_test, loop_end_test,
                                     mark_test, note_test, readout_edit_test,
@@ -2289,7 +2339,9 @@ int main(int argc, char* argv[]) {
                                     snapshot_pictures_root, playback_rate,
                                     has_playback_rate, process_start, startup_test,
                                     index_test, startup_log, startup_ms, log_startup,
-                                    log_startup_at, timeline_height]() {
+                                    log_startup_at, timeline_height,
+                                    loop_online_cache_hit, online_m1_bvid,
+                                    online_m1_cid]() {
       if (startup_log) {
         std::fprintf(stderr, "T7.1 startup stage=open_begin t_ms=%.2f\n",
                      startup_ms(std::chrono::steady_clock::now()));
@@ -2479,6 +2531,118 @@ int main(int argc, char* argv[]) {
                        step, state.constData());
           std::fflush(stderr);
         };
+        auto failures = std::make_shared<int>(0);
+        auto check = [failures](const char* name, bool ok) {
+          if (!ok) {
+            ++(*failures);
+          }
+          std::fprintf(stderr, "T4.2 loop_check %s ok=%d\n", name, ok ? 1 : 0);
+          std::fflush(stderr);
+        };
+        auto finish = [&app, failures]() {
+          std::fprintf(stderr, "T4.2 loop_test_summary failures=%d\n", *failures);
+          std::fflush(stderr);
+          QCoreApplication::exit(*failures == 0 ? 0 : 1);
+        };
+        // L1（2026-10-27）：在线缓存命中相位。只跑这个相位：
+        // 打开缓存命中会话 → A/B 播 3 轮 → 帧号前进、播放始终可用、无「播放结束」。
+        if (loop_online_cache_hit) {
+          auto online_ready = std::make_shared<bool>(false);
+          auto prev_jumps = std::make_shared<int>(-1);
+          auto end_baseline = std::make_shared<int>(-1);
+          schedule(300, [&window, bvid = online_m1_bvid, cid = online_m1_cid]() {
+            const bool started = window.StartOnlineCacheHitForTest(bvid, cid);
+            std::fprintf(stderr, "T4.2 loop_online start=%d bvid=%s cid=%lld\n",
+                         started ? 1 : 0, bvid.toUtf8().constData(),
+                         static_cast<long long>(cid));
+            std::fflush(stderr);
+          });
+          schedule(1500, [&window, check, log_state, online_ready]() {
+            const bool ready = window.WaitForOnlineReadyForTest(15000);
+            const bool index_ok =
+                ready && window.WaitForOnlineIndexFramesForTest(200, 12000);
+            *online_ready = ready && index_ok;
+            std::fprintf(stderr,
+                         "T4.2 loop_online ready=%d cache_hit=%d index=%d "
+                         "frames=%d\n",
+                         ready ? 1 : 0, window.OnlineCacheHitForTest() ? 1 : 0,
+                         index_ok ? 1 : 0, window.OnlineIndexFramesForTest());
+            std::fflush(stderr);
+            check("loop-online-cache-hit", ready && window.OnlineCacheHitForTest());
+            check("loop-online-index-ready", index_ok);
+            if (!*online_ready) {
+              return;
+            }
+            window.GoToInputForTest(QStringLiteral("100"));
+            window.SetLoopInForTest();
+            window.GoToInputForTest(QStringLiteral("160"));
+            window.SetLoopOutForTest();
+            window.ToggleLoopForTest();
+            window.GoToInputForTest(QStringLiteral("100"));
+            window.StartPlaybackForTest();
+            log_state("online-loop-start");
+          });
+          auto sample = [&window, check, log_state, online_ready, prev_jumps,
+                         end_baseline](const char* tag, bool require_jumps) {
+            if (!*online_ready) {
+              return;
+            }
+            if (*end_baseline < 0) {
+              *end_baseline = window.PlaybackEndCountForTest();
+            }
+            const qint64 frame = window.CurrentFrameForTest();
+            const int jumps = window.LoopJumpCountForTest();
+            log_state(tag);
+            std::fprintf(stderr,
+                         "T4.2 loop_online_probe %s frame=%lld jumps=%d "
+                         "play_enabled=%d playing=%d end_count=%d loop=%s\n",
+                         tag, static_cast<long long>(frame), jumps,
+                         window.PlayActionEnabledForTest() ? 1 : 0,
+                         window.IsPlayingForTest() ? 1 : 0,
+                         window.PlaybackEndCountForTest(),
+                         window.LoopStateForTest().toUtf8().constData());
+            std::fflush(stderr);
+            check("loop-online-playing", window.IsPlayingForTest());
+            check("loop-online-play-enabled", window.PlayActionEnabledForTest());
+            check("loop-online-no-reached-end",
+                  window.PlaybackEndCountForTest() == *end_baseline);
+            check("loop-online-frame-in-range", frame >= 100 && frame <= 160);
+            if (*prev_jumps >= 0) {
+              check("loop-online-jumps-advance", jumps > *prev_jumps);
+            }
+            if (require_jumps) {
+              check("loop-online-3-rounds", jumps >= 3);
+              check("loop-online-loop-on",
+                    window.LoopStateForTest().contains(QStringLiteral("loop=1")));
+            }
+            *prev_jumps = jumps;
+          };
+          schedule(5000, [sample]() { sample("online-sample-1", false); });
+          schedule(7000, [sample]() { sample("online-sample-2", false); });
+          schedule(9000, [sample]() { sample("online-sample-3", true); });
+          schedule(9500, [&window, check, log_state, online_ready]() {
+            if (!*online_ready) {
+              return;
+            }
+            window.TogglePlaybackForTest();  // Space 暂停
+            log_state("online-paused");
+            check("loop-online-pause", !window.IsPlayingForTest());
+            check("loop-online-pause-play-enabled",
+                  window.PlayActionEnabledForTest());
+            window.TogglePlaybackForTest();  // Space 继续
+            log_state("online-resumed");
+            check("loop-online-resume", window.IsPlayingForTest());
+          });
+          schedule(10000, [&window, check, finish]() {
+            std::fprintf(stderr, "T4.2 loop_online loop_disabled=%d\n",
+                         window.LoopDisabledCountForTest());
+            std::fflush(stderr);
+            check("loop-online-no-loop-disabled",
+                  window.LoopDisabledCountForTest() == 0);
+            finish();
+          });
+          return;
+        }
 
         schedule(400, [&window, log_state]() {
           window.GoToInputForTest(QStringLiteral("100"));
@@ -2496,9 +2660,14 @@ int main(int argc, char* argv[]) {
           window.StartPlaybackForTest();
           log_state("play-start");
         });
-        schedule(10000, [&window, log_state]() {
+        schedule(10000, [&window, log_state, check]() {
           window.TogglePlaybackForTest();  // 暂停，检查 3 次循环后 A/B 不变
           log_state("after-3-loops");
+          const QString state = window.LoopStateForTest();
+          check("f4-a1-loop-jumps", window.LoopJumpCountForTest() >= 3);
+          check("f4-a1-loop-state", state.contains(QStringLiteral("loop=1")) &&
+                                        state.contains(QStringLiteral("a=100")) &&
+                                        state.contains(QStringLiteral("b=160")));
         });
         schedule(10200, [&window, log_state]() {
           window.ToggleLoopForTest();  // F4-A3：关闭循环
@@ -2506,8 +2675,11 @@ int main(int argc, char* argv[]) {
           window.StartPlaybackForTest();
           log_state("loop-off-play");
         });
-        schedule(13000, [&window, log_state]() {
+        schedule(13000, [&window, log_state, check]() {
           log_state("after-161");  // 应已越过 160/161，且不回到 A
+          check("f4-a3-passes-b",
+                window.CurrentFrameForTest() > 161 &&
+                    window.LoopStateForTest().contains(QStringLiteral("loop=0")));
           window.TogglePlaybackForTest();
         });
         schedule(13200, [&window, log_state]() {
@@ -2524,32 +2696,234 @@ int main(int argc, char* argv[]) {
           window.StartPlaybackForTest();  // A=B：进入定帧
           log_state("freeze-start");
         });
-        schedule(18600, [&window, log_state]() {
+        schedule(18600, [&window, log_state, check]() {
           log_state("freeze-5s");  // 5s 后仍应 frame=100、音频时钟无效
+          const QString state = window.LoopPlaybackStateForTest();
+          check("f4-a9-freeze-frame",
+                window.CurrentFrameForTest() == 100 &&
+                    state.contains(QStringLiteral("frozen=1")) &&
+                    state.contains(QStringLiteral("playing=1")));
+          check("f4-a9-freeze-audio-clock",
+                state.contains(QStringLiteral("audio_clock=0")));
         });
-        schedule(18900, [&window, log_state]() {
+        schedule(18900, [&window, log_state, check]() {
           window.StepForwardForTest();  // F4-A10：定帧中 PgDn 到 101
           log_state("after-step");
+          check("f4-a10-step-101", window.CurrentFrameForTest() == 101 &&
+                                       !window.IsPlayingForTest());
         });
-        schedule(19200, [&window, log_state]() {
+        schedule(19200, [&window, log_state, check]() {
           window.StartPlaybackForTest();  // Space：回到 100 重新定住
           log_state("refreeze");
+          check("f4-a10-refreeze", window.IsPlayingForTest() &&
+                                       window.CurrentFrameForTest() == 100);
         });
         schedule(19500, [&window, log_state]() {
           log_state("refreeze-hold");
         });
-        schedule(19700, [&window, log_state]() {
+        schedule(19700, [&window, log_state, check]() {
           window.ToggleLoopForTest();  // F4-A10：关闭循环，从 100 恢复播放
           log_state("loop-off-resume");
+          check("f4-a10-loop-off-resumes", window.IsPlayingForTest());
         });
-        schedule(20000, [&window, log_state]() {
+        schedule(20000, [&window, log_state, check]() {
           log_state("resume-after-loop-off");
+          check("f4-a10-resume-advances",
+                window.IsPlayingForTest() && window.CurrentFrameForTest() > 100);
           window.TogglePlaybackForTest();  // Space 暂停
         });
-        schedule(20200, [&window, log_state]() {
+        schedule(20200, [&window, log_state, check]() {
           log_state("paused");
+          check("f4-a10-paused", !window.IsPlayingForTest());
         });
-        QTimer::singleShot(20500, Qt::PreciseTimer, &app, &QCoreApplication::quit);
+
+        // ---- L1：结束态（Space 必须可用） ----
+        auto end_baseline = std::make_shared<int>(-1);
+        schedule(21000, [&window, log_state, end_baseline]() {
+          const qint64 last = window.LastFrameIndexForTest();
+          *end_baseline = window.PlaybackEndCountForTest();
+          window.GoToInputForTest(
+              QString::number(std::max<qint64>(0, last - 12)));
+          window.StartPlaybackForTest();
+          log_state("end-near");
+        });
+        schedule(23500, [&window, check, log_state, end_baseline]() {
+          log_state("at-end");
+          std::fprintf(stderr,
+                       "T4.2 loop_end_probe end_count=%d baseline=%d "
+                       "play_enabled=%d text=%s status=%s\n",
+                       window.PlaybackEndCountForTest(), *end_baseline,
+                       window.PlayActionEnabledForTest() ? 1 : 0,
+                       window.PlayActionTextForTest().toUtf8().constData(),
+                       window.StatusMessageForTest().toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-end-reached", window.PlaybackEndCountForTest() > *end_baseline);
+          check("loop-end-play-enabled", window.PlayActionEnabledForTest());
+          check("loop-end-play-text",
+                window.PlayActionTextForTest() == QStringLiteral("播放"));
+          check("loop-end-status",
+                window.StatusMessageForTest().contains(QStringLiteral("播放结束")));
+          check("loop-end-not-playing", !window.IsPlayingForTest());
+          window.PressSpaceKeyForTest();  // Space 必须能重新起播
+        });
+        schedule(24000, [&window, check, log_state]() {
+          log_state("space-after-end");
+          check("loop-end-space-restarts", window.IsPlayingForTest());
+          check("loop-end-space-play-enabled", window.PlayActionEnabledForTest());
+          window.PressSpaceKeyForTest();  // 暂停，准备失败注入相位
+        });
+
+        // ---- L1：循环跳转失败只关循环、不废播放（注入 3 次失败） ----
+        auto fail_end_baseline = std::make_shared<int>(-1);
+        schedule(24500, [&window, log_state, fail_end_baseline]() {
+          window.GoToInputForTest(QStringLiteral("200"));
+          window.SetLoopInForTest();
+          window.GoToInputForTest(QStringLiteral("260"));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          window.GoToInputForTest(QStringLiteral("200"));
+          window.StartPlaybackForTest();
+          *fail_end_baseline = window.PlaybackEndCountForTest();
+          log_state("fail-ready");
+        });
+        schedule(25000, [&window]() {
+          window.SetFailLoopSeeksForTest(3);
+          std::fprintf(stderr, "T4.2 loop_fail_inject n=3\n");
+          std::fflush(stderr);
+        });
+        schedule(29000, [&window, check, log_state, fail_end_baseline]() {
+          log_state("after-fail");
+          std::fprintf(stderr,
+                       "T4.2 loop_fail_probe disabled=%d playing=%d "
+                       "play_enabled=%d end_count=%d baseline=%d loop_state=%s\n",
+                       window.LoopDisabledCountForTest(),
+                       window.IsPlayingForTest() ? 1 : 0,
+                       window.PlayActionEnabledForTest() ? 1 : 0,
+                       window.PlaybackEndCountForTest(), *fail_end_baseline,
+                       window.LoopStateForTest().toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-fail-disabled", window.LoopDisabledCountForTest() >= 1);
+          check("loop-fail-loop-off",
+                window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+          check("loop-fail-play-enabled", window.PlayActionEnabledForTest());
+          check("loop-fail-still-playing", window.IsPlayingForTest());
+          check("loop-fail-no-reached-end",
+                window.PlaybackEndCountForTest() == *fail_end_baseline);
+        });
+        schedule(29500, [&window, check, log_state]() {
+          window.PressSpaceKeyForTest();  // Space 暂停
+          log_state("fail-paused");
+          check("loop-fail-space-pauses", !window.IsPlayingForTest());
+        });
+        schedule(30000, [&window, check, log_state]() {
+          window.PressSpaceKeyForTest();  // Space 继续
+          log_state("fail-resumed");
+          check("loop-fail-space-resumes", window.IsPlayingForTest());
+          window.PressSpaceKeyForTest();  // 暂停
+        });
+
+        // ---- L1：A=B 定帧可见 + 音频停 + F4-A10 回归 ----
+        schedule(30500, [&window, log_state]() {
+          window.GoToInputForTest(QStringLiteral("100"));
+          window.SetLoopInForTest();
+          window.SetLoopOutForTest();  // A=B=100
+          window.ToggleLoopForTest();
+          window.StartPlaybackForTest();
+          log_state("freeze2-start");
+        });
+        schedule(31000, [&window, check, log_state]() {
+          log_state("freeze2-hold");
+          const QString state = window.LoopPlaybackStateForTest();
+          const QString status = window.StatusMessageForTest();
+          std::fprintf(stderr, "T4.2 loop_freeze_probe status=%s state=%s\n",
+                       status.toUtf8().constData(), state.toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-freeze-hint", status.contains(QStringLiteral("定帧")));
+          check("loop-freeze-frame", window.CurrentFrameForTest() == 100);
+          check("loop-freeze-playing", window.IsPlayingForTest());
+          check("loop-freeze-audio-paused",
+                state.contains(QStringLiteral("audio_clock=0")) &&
+                    !state.contains(QStringLiteral("audio_state=2")));
+        });
+        schedule(31500, [&window, check, log_state]() {
+          window.StepForwardForTest();  // F4-A10：定帧中 PgDn 到 101
+          log_state("freeze2-step");
+          check("loop-freeze-step-leaves", !window.IsPlayingForTest() &&
+                                               window.CurrentFrameForTest() == 101);
+          check("loop-freeze-step-loop-on",
+                window.LoopStateForTest().contains(QStringLiteral("loop=1")));
+        });
+        schedule(32000, [&window, log_state]() {
+          window.PressSpaceKeyForTest();  // 回到 A 重新定住
+          log_state("freeze2-refreeze");
+        });
+        schedule(32500, [&window, check, log_state]() {
+          log_state("freeze2-refreeze-hold");
+          check("loop-freeze-refreeze", window.IsPlayingForTest() &&
+                                            window.CurrentFrameForTest() == 100);
+          window.ToggleLoopForTest();  // F4-A10：L 关闭循环 → 从 100 恢复播放
+          log_state("freeze2-loop-off");
+        });
+        schedule(33000, [&window, check, log_state]() {
+          log_state("freeze2-resumed");
+          check("loop-freeze-exit-resumes",
+                window.IsPlayingForTest() && window.CurrentFrameForTest() > 100);
+          window.PressSpaceKeyForTest();  // 暂停
+        });
+        schedule(33500, [&window, check, log_state]() {
+          log_state("freeze2-paused");
+          check("loop-freeze-exit-pauses", !window.IsPlayingForTest());
+        });
+
+        // ---- L1：循环预检拦截（gate=false）——不做同步 seek，只关循环 + 提示 ----
+        auto gate_jumps = std::make_shared<int>(-1);
+        auto gate_end = std::make_shared<int>(-1);
+        schedule(33800, [&window, log_state, gate_jumps, gate_end]() {
+          window.GoToInputForTest(QStringLiteral("300"));
+          window.SetLoopInForTest();
+          window.GoToInputForTest(QStringLiteral("340"));
+          window.SetLoopOutForTest();
+          window.ToggleLoopForTest();
+          window.GoToInputForTest(QStringLiteral("300"));
+          window.StartPlaybackForTest();
+          *gate_jumps = window.LoopJumpCountForTest();
+          *gate_end = window.PlaybackEndCountForTest();
+          window.SetLoopSeekDeniedForTest(true);
+          log_state("gate-denied");
+        });
+        schedule(35500, [&window, check, log_state, gate_jumps, gate_end]() {
+          log_state("gate-blocked");
+          std::fprintf(stderr,
+                       "T4.2 loop_gate_probe disabled=%d playing=%d "
+                       "play_enabled=%d jumps=%d baseline_jumps=%d end_count=%d "
+                       "status=%s loop_state=%s\n",
+                       window.LoopDisabledCountForTest(),
+                       window.IsPlayingForTest() ? 1 : 0,
+                       window.PlayActionEnabledForTest() ? 1 : 0,
+                       window.LoopJumpCountForTest(), *gate_jumps,
+                       window.PlaybackEndCountForTest(),
+                       window.StatusMessageForTest().toUtf8().constData(),
+                       window.LoopStateForTest().toUtf8().constData());
+          std::fflush(stderr);
+          check("loop-gate-disabled", window.LoopDisabledCountForTest() >= 2);
+          check("loop-gate-loop-off",
+                window.LoopStateForTest().contains(QStringLiteral("loop=0")));
+          check("loop-gate-play-enabled", window.PlayActionEnabledForTest());
+          check("loop-gate-still-playing", window.IsPlayingForTest());
+          check("loop-gate-no-sync-seek",
+                window.LoopJumpCountForTest() == *gate_jumps);
+          check("loop-gate-no-reached-end",
+                window.PlaybackEndCountForTest() == *gate_end);
+          check("loop-gate-hint", window.StatusMessageForTest().contains(
+                                      QStringLiteral("尚未缓存")));
+          window.SetLoopSeekDeniedForTest(false);
+          window.PressSpaceKeyForTest();  // 暂停
+        });
+        schedule(36000, [&window, check, log_state, finish]() {
+          log_state("gate-paused");
+          check("loop-gate-paused", !window.IsPlayingForTest());
+          finish();
+        });
       }
       if (loop_end_test) {
         // T7.2.1：A=last-20、B=last，B 是文件末帧；必须持续回 A，不能停在 B。

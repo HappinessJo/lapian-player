@@ -231,6 +231,8 @@ class MainWindow : public QMainWindow {
   void OpenFile(const QString& path);
   // T8.6 在线会话：产品确认路径与自动化共用。返回 false 时 last_online_error 可读。
   bool StartOnlineSession(const lapian::app::OnlineRequest& request);
+  // L1 test-only：--loop-test 的在线缓存命中相位按 bvid+cid 打开会话（不联网取流）。
+  bool StartOnlineCacheHitForTest(const QString& bvid, qint64 cid);
   QString OnlineStateForTest() const;
   QString OnlineProgressForTest() const;
   QString OnlineLastErrorForTest() const;
@@ -310,6 +312,14 @@ class MainWindow : public QMainWindow {
   QString LoopPlaybackStateForTest() const;
   // T7.2.1：B→A 成功跳转次数，用于“B 在末帧”回归。
   int LoopJumpCountForTest() const;
+  // L1：结束态/循环跳转失败后播放仍可用；注入 n 次循环 seek 失败做回归。
+  bool PlayActionEnabledForTest() const;
+  QString PlayActionTextForTest() const;
+  void SetFailLoopSeeksForTest(int n);
+  // L1：强制循环预检返回 false（验证“不做同步 seek、只关循环 + 提示”）。
+  void SetLoopSeekDeniedForTest(bool denied);
+  int LoopDisabledCountForTest() const;
+  int PlaybackEndCountForTest() const;
   // T5.2 自动化验证入口：与 Ctrl+M / 侧栏点击 / 删除确认后的路径一致；
   // 删除入口跳过确认对话框，确认逻辑仍由 UI 路径覆盖。
   void AddMarkForTest();
@@ -656,6 +666,7 @@ class MainWindow : public QMainWindow {
   void OnPlaybackStateChanged(bool playing);
   void OnPlaybackEnded();
   void OnLoopJumped(qint64 frame, double media_seconds);
+  void OnLoopDisabled(const QString& reason);
   void OnDeviceReady(const QString& summary);
   void OnDeviceError(const QString& message);
   void OnVolumeChanged(int value);
@@ -995,6 +1006,10 @@ class MainWindow : public QMainWindow {
   int cache_last_maintenance_removed_entries_ = 0;
   double cache_last_maintenance_ms_ = 0.0;
   std::unique_ptr<PlaybackController> playback_;
+  // L1：循环失败/结束态计数（只 GUI 线程写；test-only 断言用）。
+  int loop_disabled_count_ = 0;
+  int playback_end_count_ = 0;
+  bool loop_seek_denied_for_test_ = false;
   std::unique_ptr<lapian::media::PreviewDecoder> preview_;
   std::unique_ptr<lapian::media::OnlinePreviewDecoder> online_preview_;
   std::unique_ptr<lapian::audio::AudioEngine> audio_;

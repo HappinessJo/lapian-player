@@ -53,6 +53,7 @@ void PlaybackController::SetSession(lapian::media::MediaSession* session) {
   loop_out_wait_active_ = false;
   loop_jump_count_ = 0;
   loop_jump_failures_ = 0;
+  fail_loop_seeks_for_test_ = 0;
   has_pending_ = false;
   pending_frame_ = 0;
   pending_pts_seconds_ = 0.0;
@@ -140,6 +141,10 @@ void PlaybackController::SetLoopRange(bool enabled, std::int64_t in,
     frozen_ = true;
     timer_.stop();
     clock_.Pause();
+    // L1/F4-A9：定帧必须无音频输出；不依赖 MainWindow 的 stateChanged 处理。
+    if (audio_ != nullptr) {
+      audio_->Pause();
+    }
     start_pending_ = false;
     rate_pending_ = false;
     audio_clock_active_ = false;
@@ -166,6 +171,10 @@ void PlaybackController::SetDecodeGate(DecodeGate gate) {
   if (!decode_gate_) {
     buffering_ = false;
   }
+}
+
+void PlaybackController::SetLoopSeekGate(LoopSeekGate gate) {
+  loop_seek_gate_ = std::move(gate);
 }
 
 void PlaybackController::TryResumeFromBuffering() {
@@ -207,6 +216,10 @@ void PlaybackController::Play() {
     start_media_seconds_ = current_pts_seconds_;
     clock_.Seek(current_pts_seconds_);
     audio_clock_active_ = false;
+    // L1/F4-A9：定帧期间无音频输出。
+    if (audio_ != nullptr) {
+      audio_->Pause();
+    }
     start_pending_ = false;
     rate_pending_ = false;
     timer_.stop();
@@ -214,14 +227,24 @@ void PlaybackController::Play() {
     return;
   }
 
-  if (LoopActive() && current_frame_ > loop_out_) {
+  if (end_) {
+    // L1：播放到结尾后按 Space 是显式起播（不是“自动回开头”）：循环开→回 A，
+    // 循环关→回第 0 帧。seek 失败时保持结束态，Space 可重试。
+    const std::int64_t restart = LoopActive() ? loop_in_ : 0;
+    if (!SeekToFrameInternal(restart)) {
+      if (loop_log_) {
+        std::fprintf(stderr, "T4.2 play_restart_seek_failed frame=%lld to=%lld\n",
+                     static_cast<long long>(current_frame_),
+                     static_cast<long long>(restart));
+        std::fflush(stderr);
+      }
+      return;
+    }
+  } else if (LoopActive() && current_frame_ > loop_out_) {
     // 从区间外起播：直接回到 A，避免播放到文件尾也不循环。
     if (!SeekToFrameInternal(loop_in_)) {
       return;
     }
-  }
-  if (end_ && !LoopActive()) {
-    return;
   }
   // 从 B/末尾再起播时，B 已经“到达”，下一次 Tick 应直接回 A。
   loop_out_reached_ = LoopActive() && current_frame_ >= loop_out_;
@@ -320,8 +343,34 @@ bool PlaybackController::SeekToFrameInternal(std::int64_t frame) {
 }
 
 bool PlaybackController::JumpToLoopStart(std::int64_t trigger_frame) {
+  // L1（C）：同步 seek 前预检——在线增长会话的 A 还没缓存/不在稳定前缀内时
+  // 不做同步 seek，直接降级为“关循环 + 提示”，避免把未缓存读阻塞在 UI 线程。
+  if (loop_seek_gate_ && !loop_seek_gate_(loop_in_)) {
+    if (loop_log_) {
+      std::fprintf(stderr, "T4.2 loop_seek_gate_blocked from=%lld to=%lld\n",
+                   static_cast<long long>(trigger_frame),
+                   static_cast<long long>(loop_in_));
+      std::fflush(stderr);
+    }
+    DisableLoop(QStringLiteral("A 尚未缓存，已关闭循环"),
+                "loop_disabled_after_gate_block", trigger_frame);
+    return false;
+  }
   const auto jump_start = std::chrono::steady_clock::now();
   const int pending_before = pending_frame_;
+  // L1 test-only：注入失败，等价于在线同步 seek 失败（复现用户链路/回归）。
+  if (fail_loop_seeks_for_test_ > 0) {
+    --fail_loop_seeks_for_test_;
+    ++loop_jump_failures_;
+    if (loop_log_) {
+      std::fprintf(stderr,
+                   "T4.2 loop_jump_failed from=%lld to=%lld failures=%d injected=1\n",
+                   static_cast<long long>(trigger_frame),
+                   static_cast<long long>(loop_in_), loop_jump_failures_);
+      std::fflush(stderr);
+    }
+    return false;
+  }
   if (!SeekToFrameInternal(loop_in_)) {
     ++loop_jump_failures_;
     if (loop_log_) {
@@ -354,10 +403,44 @@ bool PlaybackController::JumpToLoopStart(std::int64_t trigger_frame) {
                  static_cast<long long>(trigger_frame),
                  static_cast<long long>(pending_before),
                  static_cast<long long>(loop_in_), seek_ms);
+    if (seek_ms > 300.0) {
+      // L1（C）：能 seek 但慢——只记录，不改“同步 seek”结构（残差）。
+      std::fprintf(stderr,
+                   "T4.2 loop_seek_slow from=%lld to=%lld seek_ms=%.2f\n",
+                   static_cast<long long>(trigger_frame),
+                   static_cast<long long>(loop_in_), seek_ms);
+    }
     std::fflush(stderr);
   }
   emit loopJumped(static_cast<qint64>(current_frame_), current_pts_seconds_);
   return true;
+}
+
+void PlaybackController::DisableLoopAfterFailures() {
+  DisableLoop(QStringLiteral("循环跳转失败，已关闭循环"),
+              "loop_disabled_after_failures", current_frame_);
+}
+
+void PlaybackController::DisableLoop(const QString& reason, const char* diagnostic,
+                                     std::int64_t trigger_frame) {
+  // 只关循环：保持 playing_/timer_/clock_，从当前（B）位置继续播；绝不 Finish()
+  // 或发 reachedEnd（否则 MainWindow 会禁用播放，Space 失效）。
+  const int failures = loop_jump_failures_;
+  loop_enabled_ = false;
+  loop_out_reached_ = false;
+  loop_out_wait_active_ = false;
+  loop_jump_failures_ = 0;
+  ++loop_disabled_count_;
+  if (loop_log_) {
+    const QByteArray reason_utf8 = reason.toUtf8();
+    std::fprintf(stderr,
+                 "T4.2 %s from=%lld failures=%d playing=%d reason=%s\n",
+                 diagnostic != nullptr ? diagnostic : "loop_disabled",
+                 static_cast<long long>(trigger_frame), failures, playing_ ? 1 : 0,
+                 reason_utf8.constData());
+    std::fflush(stderr);
+  }
+  emit loopDisabled(reason);
 }
 
 double PlaybackController::TargetSeconds() {
@@ -496,7 +579,8 @@ void PlaybackController::Tick() {
             return;
           }
           if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
-            Finish();
+            // L1：跳转失败只关循环；文件尾的自然结束交给下一次 Tick。
+            DisableLoopAfterFailures();
           }
           return;
         }
@@ -548,7 +632,12 @@ void PlaybackController::Tick() {
           return;
         }
         if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
-          Finish();
+          // L1：只关循环；B 已呈现，丢掉待呈现帧后从 B+1 继续播（不 Finish）。
+          DisableLoopAfterFailures();
+          has_pending_ = false;
+          pending_frame_ = 0;
+          pending_pts_seconds_ = 0.0;
+          pending_info_ = lapian::media::DecodedFrameInfo{};
         }
         return;
       }
@@ -564,9 +653,10 @@ void PlaybackController::Tick() {
         return;
       }
       if (loop_jump_failures_ >= kMaxLoopJumpFailures) {
-        Finish();
+        // L1：只关循环。循环已关，B+1 不再需要丢弃，下一次 Tick 正常呈现。
+        DisableLoopAfterFailures();
       }
-      // 跳转失败时不要把 B+1 当普通帧呈现；下一 tick 重试。
+      // 跳转失败时不要把 B+1 当普通帧呈现；下一 tick 重试（或按已关循环继续）。
       return;
     }
 
