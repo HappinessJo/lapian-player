@@ -125,7 +125,7 @@ SettingsLoadResult ParseAppSettings(const QByteArray& bytes) {  SettingsLoadResu
     }
   }
   // D1：预览分辨率非字符串/未知字符串 → auto；缓存非数字/非有限值 → 512，
-  // 数字越界先四舍五入再按当前分辨率的 [下限, 2048] 夹取。
+  // 数字越界先四舍五入再按当前分辨率的 [下限, 4096] 夹取。
   const QJsonValue preview_resolution = root.value(QStringLiteral("preview_resolution"));
   if (preview_resolution.isString()) {
     result.settings.preview_resolution =

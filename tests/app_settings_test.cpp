@@ -1,6 +1,6 @@
 // T6.3 设置持久化单测：默认值、序列化/解析、非法值 clamp、损坏/未知 schema、
 // 未知键忽略、Unicode 路径 roundtrip、原子覆盖写、不可读/不可写回退。
-// D1：新增预览分辨率/缓存键（auto/1080p/720p、128–2048MiB）的解析、落盘夹取、
+// D1：新增预览分辨率/缓存键（auto/1080p/720p、128–4096MiB）的解析、落盘夹取、
 // 内存上限与 ResolvePreviewConfig 纯函数。
 // 只依赖 Qt Core 与 lapian_settings；不碰 Qt Widgets / FFmpeg。
 
@@ -390,7 +390,8 @@ void TestPreviewParse() {
   CheckPreview(ParseAppSettings(QByteArrayLiteral("{\"schema\":1}")),
                PreviewResolution::kAuto, 512, "preview-parse-missing-defaults");
 
-  // D1 roundtrip：四个代表值序列化→解析一致；两个键总是写、resolution 小写规范键。
+  // D1 roundtrip：代表值序列化→解析一致；两个键总是写、resolution 小写规范键。
+  // 2048 仍是合法档（旧设置兼容），4096 是新的绝对上限。
   struct RoundtripCase {
     PreviewResolution resolution;
     int cache_mb;
@@ -401,6 +402,7 @@ void TestPreviewParse() {
       {PreviewResolution::k1080p, 1024, "1080p/1024"},
       {PreviewResolution::k720p, 128, "720p/128"},
       {PreviewResolution::k1080p, 2048, "1080p/2048"},
+      {PreviewResolution::k1080p, 4096, "1080p/4096"},
   };
   for (const RoundtripCase& item : roundtrips) {
     AppSettings settings;
@@ -457,7 +459,7 @@ void TestPreviewParse() {
                    "{\"schema\":1,\"preview_cache_mb\":null}")),
                PreviewResolution::kAuto, 512, "preview-cache-null-default");
 
-  // D1 越界 cache：先四舍五入再按 [下限, 2048] 夹取。
+  // D1 越界 cache：先四舍五入再按 [下限, 4096] 夹取。2048 仍是合法值（旧设置兼容）。
   CheckPreview(ParseAppSettings(QByteArrayLiteral(
                    "{\"schema\":1,\"preview_cache_mb\":100}")),
                PreviewResolution::kAuto, 256, "preview-cache-clamp-low-100");
@@ -467,15 +469,24 @@ void TestPreviewParse() {
   CheckPreview(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":-1}")),
       PreviewResolution::kAuto, 256, "preview-cache-clamp-negative");
+  // 2048：旧上限档，现在只是普通合法值，必须原样保留。
   CheckPreview(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":2048}")),
-      PreviewResolution::kAuto, 2048, "preview-cache-clamp-at-max");
+      PreviewResolution::kAuto, 2048, "preview-cache-at-2048-legal");
+  // 4096：新绝对上限，合法且原样保留。
   CheckPreview(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":4096}")),
-      PreviewResolution::kAuto, 2048, "preview-cache-clamp-high-4096");
+      PreviewResolution::kAuto, 4096, "preview-cache-at-max-4096-legal");
+  // 4097：超过 1MiB → 夹到 4096。
+  CheckPreview(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":4097}")),
+      PreviewResolution::kAuto, 4096, "preview-cache-clamp-high-4097");
+  CheckPreview(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":99999}")),
+      PreviewResolution::kAuto, 4096, "preview-cache-clamp-high-99999");
   CheckPreview(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":1e300}")),
-      PreviewResolution::kAuto, 2048, "preview-cache-clamp-huge");
+      PreviewResolution::kAuto, 4096, "preview-cache-clamp-huge");
   CheckPreview(
       ParseAppSettings(QByteArrayLiteral("{\"schema\":1,\"preview_cache_mb\":-1e300}")),
       PreviewResolution::kAuto, 256, "preview-cache-clamp-huge-negative");
@@ -497,6 +508,32 @@ void TestPreviewParse() {
                                          "\"preview_resolution\":\"1080p\","
                                          "\"preview_cache_mb\":128}")),
       PreviewResolution::k1080p, 256, "preview-cache-1080p-clamp-low");
+  // 720P 档 4096 也合法（上限与分辨率无关，只夹下限）。
+  CheckPreview(
+      ParseAppSettings(QByteArrayLiteral("{\"schema\":1,"
+                                         "\"preview_resolution\":\"720p\","
+                                         "\"preview_cache_mb\":4096}")),
+      PreviewResolution::k720p, 4096, "preview-cache-720p-4096-legal");
+  std::printf("[boundary] parse 2048=%d 4096=%d 4097=%d 1e300=%d -1e300=%d "
+              "512.6=%d\n",
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":2048}"))
+                  .settings.preview_cache_mb,
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":4096}"))
+                  .settings.preview_cache_mb,
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":4097}"))
+                  .settings.preview_cache_mb,
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":1e300}"))
+                  .settings.preview_cache_mb,
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":-1e300}"))
+                  .settings.preview_cache_mb,
+              ParseAppSettings(QByteArrayLiteral(
+                                   "{\"schema\":1,\"preview_cache_mb\":512.6}"))
+                  .settings.preview_cache_mb);
 
   // D1 未知键（含未知 preview_* 键）继续忽略，不影响新键解析。
   CheckPreview(ParseAppSettings(QByteArrayLiteral(
@@ -515,6 +552,15 @@ void TestPreviewParse() {
   Check(merged.preview_resolution == PreviewResolution::k1080p &&
             merged.preview_cache_mb == 1024,
         "preview-merge-preserves-preview-keys");
+  // 4096 是合法值：产品保存音量/波形时不能被冲回 512/下限。
+  AppSettings base_4096{10, true};
+  base_4096.preview_resolution = PreviewResolution::k1080p;
+  base_4096.preview_cache_mb = 4096;
+  const AppSettings merged_4096 = MergeVolumeWaveform(base_4096, 55, true);
+  Check(merged_4096.preview_cache_mb == 4096 &&
+            merged_4096.preview_resolution == PreviewResolution::k1080p &&
+            merged_4096.volume == 55,
+        "preview-merge-preserves-4096-cache");
 
   // D1 规范键/解析：小写规范键、大小写不敏感、非法回退。
   Check(PreviewResolutionKey(PreviewResolution::kAuto) == QStringLiteral("auto") &&
@@ -538,7 +584,7 @@ void TestPreviewParse() {
             PreviewResolution::k720p,
         "preview-parse-key-custom-fallback");
 
-  // D1 clamp：下限 → 2048 → 可用内存 25%；25% 低于下限时保下限并报告冲突。
+  // D1 clamp：下限 → 4096 → 可用内存 25%；25% 低于下限时保下限并报告冲突。
   bool limited = false;
   Check(ClampPreviewCacheMb(2048, PreviewResolution::k1080p, 4096, &limited) == 1024 &&
             limited,
@@ -557,6 +603,28 @@ void TestPreviewParse() {
   Check(ClampPreviewCacheMb(100, PreviewResolution::k720p, 0, nullptr) ==
             kPreviewCacheMinMb720p,
         "preview-clamp-720p-min");
+  // 4096 档：可用 8192MB → 25% = 2048，夹取并报告；未知内存不夹。
+  bool limited_8192 = false;
+  const int clamp_4096_8192 =
+      ClampPreviewCacheMb(4096, PreviewResolution::k1080p, 8192, &limited_8192);
+  Check(clamp_4096_8192 == 2048 && limited_8192,
+        "preview-clamp-4096-memory-quarter");
+  bool limited_unknown = true;
+  const int clamp_4096_unknown =
+      ClampPreviewCacheMb(4096, PreviewResolution::k1080p, 0, &limited_unknown);
+  Check(clamp_4096_unknown == 4096 && !limited_unknown,
+        "preview-clamp-4096-memory-unknown");
+  Check(ClampPreviewCacheMb(4096, PreviewResolution::k720p, 0, nullptr) == 4096,
+        "preview-clamp-4096-720p-keeps-max");
+  // 超过绝对上限：5000 → 4096；可用内存未知时不夹。
+  Check(ClampPreviewCacheMb(5000, PreviewResolution::k1080p, 0, nullptr) == 4096,
+        "preview-clamp-above-max-5000");
+  std::printf("[boundary] clamp 4096/1080p/8192MB=%d limited=%d; "
+              "4096/1080p/0=%d limited=%d; 4096/720p/0=%d; 5000/1080p/0=%d\n",
+              clamp_4096_8192, limited_8192 ? 1 : 0, clamp_4096_unknown,
+              limited_unknown ? 1 : 0,
+              ClampPreviewCacheMb(4096, PreviewResolution::k720p, 0, nullptr),
+              ClampPreviewCacheMb(5000, PreviewResolution::k1080p, 0, nullptr));
   Check(PreviewCacheMinMbForMaxSide(1280) == kPreviewCacheMinMb720p &&
             PreviewCacheMinMbForMaxSide(1920) == kPreviewCacheMinMb1080p,
         "preview-min-mb-by-max-side");
@@ -664,6 +732,19 @@ void TestPreviewStore() {
         "preview-store-writes-lowercase-key");
   Check(saved.value(QStringLiteral("preview_cache_mb")).toInt() == 1024,
         "preview-store-writes-cache-mb");
+
+  // 4096：新绝对上限合法且真的落盘（读回同样是 4096，不是显示值/被夹回 2048）。
+  AppSettings max_cache = settings;
+  max_cache.preview_cache_mb = 4096;
+  Check(store.Save(max_cache), "preview-store-save-4096");
+  const SettingsLoadResult max_loaded = store.Load();
+  CheckPreview(max_loaded, PreviewResolution::k1080p, 4096,
+               "preview-store-4096-roundtrip");
+  Check(QJsonDocument::fromJson(ReadAll(store.file_path()))
+                .object()
+                .value(QStringLiteral("preview_cache_mb"))
+                .toInt() == 4096,
+        "preview-store-writes-4096-cache-mb");
 
   // 旧文件（无 preview 键）→ auto/512；旧字段保持。
   Check(WriteAll(store.file_path(),

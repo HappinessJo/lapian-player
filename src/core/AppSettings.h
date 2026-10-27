@@ -28,7 +28,7 @@ enum class PreviewResolution { kAuto = 0, k1080p = 1, k720p = 2 };
 constexpr int kPreviewCacheDefaultMb = 512;   // 默认
 constexpr int kPreviewCacheMinMb720p = 128;   // 720P 下限
 constexpr int kPreviewCacheMinMb1080p = 256;  // 1080P 下限
-constexpr int kPreviewCacheMaxMb = 2048;      // 上限（硬）
+constexpr int kPreviewCacheMaxMb = 4096;      // 上限（硬）
 
 struct AppSettings {
   int volume = 100;

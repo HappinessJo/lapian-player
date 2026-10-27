@@ -57,7 +57,7 @@ constexpr std::size_t kDefaultCacheBudgetBytes = 64u * 1024u * 1024u;
 constexpr int kMinPreviewMaxSide = 256;
 constexpr int kMaxPreviewMaxSide = 1920;
 constexpr std::size_t kMinCacheBudgetBytes = 8u * 1024u * 1024u;
-constexpr std::size_t kMaxCacheBudgetBytes = 2048u * 1024u * 1024u;
+constexpr std::size_t kMaxCacheBudgetBytes = 4096ull * 1024ull * 1024ull;
 // 远跳粗帧最长边 320；只用于“先出一张画面”，随后必须精确目标或更近缓存。
 constexpr int kCoarseMaxSide = 320;
 

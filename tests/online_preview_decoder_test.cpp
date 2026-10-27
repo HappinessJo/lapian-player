@@ -570,6 +570,58 @@ int main(int argc, char** argv) {
     large.End();
   }
 
+  // 1920 / 4096MiB：新绝对上限（4096 原样生效）；帧上限约 1380；真的能填充不崩。
+  {
+    lapian::media::OnlinePreviewDecoder max_budget;
+    lapian::media::OnlinePreviewDecoder::Config config;
+    config.max_side = 1920;
+    config.cache_budget_bytes = 4096ull * 1024ull * 1024ull;
+    Check(max_budget.Configure(config),
+          "Configure(1920,4096MiB) 在 Begin 前返回 true");
+    Check(max_budget.config().cache_budget_bytes ==
+              4096ull * 1024ull * 1024ull,
+          "1920/4096MiB 配置原样生效（=4096MiB）");
+    Check(max_budget.config().max_side == 1920,
+          "1920/4096MiB 长边 1920");
+    const int limit = max_budget.cached_frame_limit();
+    std::printf("[perf] online_preview_1920_4096_frames=%d\n", limit);
+    Check(limit >= 1378 && limit <= 1382,
+          "1920/4096MiB 缓存帧上限约 1380（±2）");
+    max_budget.Begin(source, path, stream_index, index, 600, true, 599);
+    Check(wait_preview_ready(&max_budget), "1920/4096MiB 解码器可打开");
+    max_budget.UpdateTarget(600, true);
+    lapian::media::PreviewFrame frame = PollTarget(&max_budget, 600, 3000);
+    Check(frame.frame != nullptr, "1920/4096MiB 目标帧可发布");
+    if (frame.frame != nullptr) {
+      Check(frame.frame->width == 1920 && frame.frame->height == 1080,
+            "1920/4096MiB 预览帧为 1920x1080");
+      av_frame_free(&frame.frame);
+    }
+    // 正向短拖动：多解几帧填缓存，验证 4096 档下预算不变式与不崩溃。
+    for (std::int64_t target = 601; target <= 640; ++target) {
+      max_budget.UpdateTarget(target, true);
+      lapian::media::PreviewFrame filled = max_budget.TakeLatestFrame();
+      if (filled.frame != nullptr) {
+        av_frame_free(&filled.frame);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("[perf] online_preview_1920_4096_cache_bytes=%zu peak=%zu\n",
+                max_budget.cache_bytes(), max_budget.cache_peak_bytes());
+    Check(max_budget.cache_bytes() > 0,
+          "1920/4096MiB 缓存填充后 cache_bytes>0");
+    Check(max_budget.cache_bytes() <= 4096ull * 1024ull * 1024ull,
+          "1920/4096MiB 当前缓存字节 ≤4096MiB");
+    Check(max_budget.cache_peak_bytes() <=
+              4096ull * 1024ull * 1024ull + 1920ull * 1080ull * 3ull / 2ull,
+          "1920/4096MiB 缓存峰值 ≤4096MiB + 一帧");
+    Check(!max_budget.alloc_fallback_used(),
+          "1920/4096MiB 未触发分配失败回退");
+    Check(max_budget.cached_frames() <= max_budget.cached_frame_limit(),
+          "1920/4096MiB 缓存帧数有界（≤帧上限）");
+    max_budget.End();
+  }
+
   // 1280 / 128MiB：帧数上限随预算/分辨率变化（约 96–100 帧）。
   {
     lapian::media::OnlinePreviewDecoder medium;
@@ -601,17 +653,33 @@ int main(int argc, char** argv) {
     zero.max_side = 0;
     zero.cache_budget_bytes = 0;
     Check(clamped.Configure(zero), "非法 {0,0} Configure 仍返回 true（夹取）");
-    Check(clamped.config().max_side == 256, "{0,0} 长边夹到下限 256");
-    Check(clamped.config().cache_budget_bytes == 8u * 1024u * 1024u,
-          "{0,0} 缓存夹到下限 8MiB");
+    const int zero_side = clamped.config().max_side;
+    const std::size_t zero_budget = clamped.config().cache_budget_bytes;
+    Check(zero_side == 256, "{0,0} 长边夹到下限 256");
+    Check(zero_budget == 8u * 1024u * 1024u, "{0,0} 缓存夹到下限 8MiB");
 
     lapian::media::OnlinePreviewDecoder::Config huge;
     huge.max_side = 99999;
     huge.cache_budget_bytes = 8ull * 1024ull * 1024ull * 1024ull;
     Check(clamped.Configure(huge), "非法 {99999,8GiB} Configure 仍返回 true");
     Check(clamped.config().max_side == 1920, "{99999,8GiB} 长边夹到上限 1920");
-    Check(clamped.config().cache_budget_bytes == 2048u * 1024u * 1024u,
-          "{99999,8GiB} 缓存夹到上限 2048MiB");
+    Check(clamped.config().cache_budget_bytes == 4096ull * 1024ull * 1024ull,
+          "{99999,8GiB} 缓存夹到上限 4096MiB");
+
+    // 显式 {1920, 8GiB}：只有预算越界，夹到 4096MiB 且长边保持 1920。
+    lapian::media::OnlinePreviewDecoder::Config huge_budget;
+    huge_budget.max_side = 1920;
+    huge_budget.cache_budget_bytes = 8ull * 1024ull * 1024ull * 1024ull;
+    Check(clamped.Configure(huge_budget),
+          "Configure(1920,8GiB) 仍返回 true（夹取）");
+    const int huge_side = clamped.config().max_side;
+    const std::size_t huge_budget_value = clamped.config().cache_budget_bytes;
+    Check(huge_side == 1920, "{1920,8GiB} 长边保持 1920");
+    Check(huge_budget_value == 4096ull * 1024ull * 1024ull,
+          "{1920,8GiB} 缓存夹到上限 4096MiB");
+    std::printf("[boundary] configure 1920/8GiB -> side=%d budget=%zu; "
+                "0/0 -> side=%d budget=%zu\n",
+                huge_side, huge_budget_value, zero_side, zero_budget);
   }
 
   // 分配失败回退：强制 3 次预览帧分配失败 → 先降预算 75% 重试，仍失败回退

@@ -7766,7 +7766,7 @@ void MainWindow::ResolveOnlinePreviewConfig() {
   parse_ok = false;
   const int env_cache_mb =
       qEnvironmentVariableIntValue("LAPIAN_PREVIEW_CACHE_MB", &parse_ok);
-  if (parse_ok && env_cache_mb >= 8 && env_cache_mb <= 2048) {
+  if (parse_ok && env_cache_mb >= 8 && env_cache_mb <= 4096) {
     cache_override = true;
     settings.preview_cache_mb = env_cache_mb;
   }

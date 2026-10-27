@@ -66,11 +66,11 @@ class OnlinePreviewDecoder {
   // 未配置的旧调用方（本地/旧测试/预热）行为不变；D3 从设置页取值。
   struct Config {
     int max_side = 1024;                        // 预览帧长边上限（256..1920）
-    std::size_t cache_budget_bytes = 64u << 20;  // 缓存预算（8MiB..2048MiB）
+    std::size_t cache_budget_bytes = 64u << 20;  // 缓存预算（8MiB..4096MiB）
     bool operator==(const Config&) const = default;
   };
   // 必须在 Begin 前调用；Begin 之后返回 false 且不改变已生效配置。
-  // 越界值被夹到 256..1920 / 8MiB..2048MiB（不崩、不拒绝）。
+  // 越界值被夹到 256..1920 / 8MiB..4096MiB（不崩、不拒绝）。
   bool Configure(const Config& config);
   Config config() const;  // 实际生效（可能已被分配失败回退改写）
   // 由 cache_budget_bytes / 16:9 估计帧字节算出的帧数上限（至少 8）。
