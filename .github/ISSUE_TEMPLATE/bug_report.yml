@@ -1,0 +1,97 @@
+name: Bug 报告
+description: 报告一个可以复现的问题（崩溃、卡顿、拖动/逐帧异常等）
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填全，尤其是**本地/在线**、**素材规格**和**现象**——这三项决定能不能复现。
+        请不要粘贴 SESSDATA / Cookie / 任何凭据。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 安装版/便携版的版本或 exe SHA256 前 8 位（设置页或文件名可见）
+      placeholder: "例如 v0.1.0 / 823707DD"
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统与硬件
+      placeholder: "Windows 11 23H2 / i5-12400 / 核显 UHD730 / 32GB"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 场景
+      options:
+        - 本地视频
+        - B 站在线（首次播放/增长会话）
+        - B 站缓存命中（离线重看）
+        - 两者都有
+        - 与媒体无关（界面/设置/启动）
+    validations:
+      required: true
+
+  - type: input
+    id: media
+    attributes:
+      label: 素材规格
+      description: 分辨率 / 编码 / 帧率 / 时长；在线请给 BV 号（不要贴 Cookie）
+      placeholder: "1920x1080 H.264 30fps 3:00；或 BV1xxxxxxxxx"
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开到出问题的每一步，越具体越好（例如拖动跨度、方向、速度）
+      placeholder: |
+        1. 打开 xxx.mp4
+        2. 在 00:10 附近按住时间轴向右拖 2 秒，再向左拖 2 秒
+        3. 松手后按 Space
+        4. 出现：帧号停住 / 播放按钮变灰 / 界面无响应
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: "松手后落到精确帧，Space 正常播放/暂停"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 是否卡死/崩溃/掉帧/黑屏；帧号、播放按钮、状态栏分别是什么状态；能否恢复
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图（可选）
+      description: 设置 `LAPIAN_ONLINE_LOG=1` / `LAPIAN_LOOP_LOG=1` 后复现，粘贴相关几行即可；截图请确认无版权问题
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我确认没有在内容里包含任何账号/Cookie/凭据
+          required: true
+        - label: 我使用的是最新 Release（或已说明版本）
+          required: false

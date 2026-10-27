@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 使用与构建文档
+    url: https://github.com/HappinessJo/lapian-player#readme
+    about: 先看 README 的「快速开始 / 从源码构建 / 已知限制」

@@ -226,7 +226,7 @@ ctest --test-dir build\release -C Release --output-on-failure
 ## 12. Agent 3 独立复验（2026-10-25）
 
 - **二进制**：clean 重建后的 Medium 副本（hash 见
-  [online-quality-switch.md](online-quality-switch.md) §10），非 Agent 2 的工作产物。
+  online-quality-switch.md §10），非 Agent 2 的工作产物。
 - **命令**：§10 第 3 条，独立根 `build\verify-parity`，`--m1-throttle-bps 1048576`。
 - **结果**：`online_drag_parity_result checks=45 failures=0`。
 
@@ -419,5 +419,5 @@ $exe = "$env:LOCALAPPDATA\Programs\拉片软件\lapian.exe"
   `build\t3-ctest-*.log`、`build\t4-build.out.log`、`build\t4-install.log`、
   `build\t5-*.{out,err}.log`、`out\package\package-report.txt`（`build/`/`out/` 不入库）。
 - 残余：无符号化 dump；4K/60 与 `post_seek_immediate` 未覆盖；用户体感确认非量化。
-  详见 [tasks-online-parity-fix.md](../tasks-online-parity-fix.md) §9.9、
-  [handoff-2026-10-25-p0-close.md](../handoff-2026-10-25-p0-close.md)。
+  详见 tasks-online-parity-fix.md §9.9、
+  handoff-2026-10-25-p0-close.md。

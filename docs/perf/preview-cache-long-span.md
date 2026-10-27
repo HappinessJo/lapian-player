@@ -5,9 +5,9 @@
 > `online_drag_forward_backward_parity` 逻辑；未打包、未安装，未动
 > `lapian-c8`/安装版/E:。
 >
-> 前置：[计划](../plan-2026-10-27-preview-cache-cap-4096.md) §2.3/§3 P3/§4、
-> [L1 计划](../plan-2026-10-27-loop-workrange-fix.md)（`9e7a6f0`，P3 不改其文件）、
-> [C9 发布](../release-2026-10-27-preview-config.md)、
+> 前置：计划 §2.3/§3 P3/§4、
+> L1 计划（`9e7a6f0`，P3 不改其文件）、
+> C9 发布、
 > [D4 配置矩阵](preview-config-matrix.md)。
 > 基线：HEAD `9e7a6f0`（P1 上限 4096、P2 设置页范围/本机上限、L1 循环修复均已入库），
 > 工作树干净；P3 改动见 §1，构建后 ctest 38/38。

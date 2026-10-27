@@ -1,0 +1,71 @@
+# 构建与离线测试（手动触发）
+#
+# 说明：
+# - 这是「尽力而为」的 CI：依赖体积大（Qt/FFmpeg），且仓库测试里有相当一部分需要本地
+#   `media/` 素材（未入库），所以这里只跑**不依赖素材**的纯逻辑单测。
+# - 触发方式：Actions → build → Run workflow（workflow_dispatch），避免 push 时出现红叉。
+# - 若你愿意维护完整的 CI（媒体夹具 + 在线用例），欢迎提交 PR。
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Qt 6.8.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          arch: win64_msvc2022_64
+          modules: "qttools"
+          cache: true
+
+      - name: 启用 MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 下载 FFmpeg（LGPL shared 7.1）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'ffmpeg') -Force
+          $src = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'ffmpeg') -Directory | Select-Object -First 1
+          if (-not (Test-Path (Join-Path $src.FullName 'include\libavformat\avformat.h'))) { throw 'FFmpeg 包结构不符' }
+          $dst = Join-Path $PWD 'third_party\ffmpeg\prebuilt'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item (Join-Path $src.FullName '*') $dst -Recurse -Force
+          "FFMPEG_ROOT=$dst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 构建 SoundTouch
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-soundtouch.ps1
+
+      - name: 配置
+        shell: pwsh
+        run: |
+          cmake -S . -B build/ci -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DFFMPEG_ROOT="$env:FFMPEG_ROOT"
+
+      - name: 构建
+        shell: pwsh
+        run: cmake --build build/ci --config Release --parallel
+
+      - name: 离线单测（不依赖 media/ 素材）
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $PWD 'build/tmp'
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $env:TEMP = $tmp; $env:TMP = $tmp
+          ctest --test-dir build/ci -C Release --output-on-failure `
+            -R "lapian_(app_settings|frame_math|frame_index|frame_cache|timeline|mark_store|status_notice|time_stretch|snapshot_naming|online_preview)_test"

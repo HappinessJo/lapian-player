@@ -11,6 +11,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](#从源码构建)
 [![Qt](https://img.shields.io/badge/Qt-6.8.3-41CD52.svg)](#从源码构建)
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-7.1.1%20LGPL-007808.svg)](licenses/THIRD-PARTY-NOTICES.md)
+[![docs](https://github.com/HappinessJo/lapian-player/actions/workflows/docs.yml/badge.svg)](https://github.com/HappinessJo/lapian-player/actions/workflows/docs.yml)
 
 [下载](#下载即用) · [快速开始](#快速开始) · [快捷键](#快捷键) · [参与贡献](#参与贡献)
 
@@ -62,14 +63,18 @@ MAD / PV 的功力常常就在 **1–3 帧**之间：切点早一帧还是晚一
 
 ## 界面
 
+<p align="center">
+  <img src="docs/screenshots/main.png" width="1100" alt="拉片软件主界面">
+</p>
+
 三段式：**顶栏**（文件 / 模式 / 清晰度 / 设置）· **画面**（D3D11 渲染）· **右侧检查器**（标记 / 截图 / 信息）
 + 底部传输条与时间轴（视图窗 / 工作区两条滑块、波形、播放头）。
 
 视觉规范见 [docs/ui-v2-visual-reference.md](docs/ui-v2-visual-reference.md)；
 交互原型见 [docs/ui-v2-proto/index.html](docs/ui-v2-proto/index.html)。
 
-> 截图区欢迎贡献：提交一张**你自己的 MAD / PV 拉片截图**即可（请确保你有权使用该画面）。
-> 我们不内置任何视频素材。
+> 截图里的画面是 ffmpeg 生成的合成测试图案，**不含任何第三方视频素材**。
+> 也欢迎你用自己有权使用的 MAD / PV 截图替换它（提 PR 即可）。
 
 ## 下载即用
 
@@ -114,6 +119,7 @@ ctest --test-dir build\release -C Release --output-on-failure
 - 依赖版本：Qt 6.8.3 / FFmpeg 7.1.1（LGPL、D3D11VA）/ SoundTouch 2.3.3 / CMake 3.31.6
 - 测试基线：**38/38**（含 timeline 188 项、mark store 281 项、在线预览/缓存/QR/故障等）
 - 打包：`scripts\build-release.ps1 -Clean -Package`
+- CI：文档/链接/凭据检查自动跑；`build` 工作流是**手动触发**的尽力而为构建（部分测试需要本地 `media/` 素材，CI 只跑离线子集），见 [.github/workflows](.github/workflows)。
 
 ## 快捷键
 

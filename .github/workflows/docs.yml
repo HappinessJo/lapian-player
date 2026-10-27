@@ -1,0 +1,73 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 必备文件
+        run: |
+          for f in README.md LICENSE CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md .gitattributes .gitignore; do
+            test -f "$f" || { echo "缺少 $f"; exit 1; }
+          done
+
+      - name: 不提交大文件 / 二进制 / 测试产物
+        run: |
+          set -e
+          big=$(find . -path ./.git -prune -o -type f -size +5M -print)
+          if [ -n "$big" ]; then echo "以下文件超过 5MB："; echo "$big"; exit 1; fi
+          bad=$(git ls-files | grep -E '\.(pyc|pdb|exe|dll|zip|7z|mp4|yuv)$|__pycache__/|third_party/|^build/|^dist/|^out/|^media/|\.lapian(-workrange)?\.json$' || true)
+          if [ -n "$bad" ]; then echo "这些文件不应入库："; echo "$bad"; exit 1; fi
+
+      - name: 凭据扫描
+        run: |
+          if grep -rInE 'SESSDATA[=:][[:space:]]*[A-Za-z0-9%._-]{16,}|Bearer[[:space:]]+[A-Za-z0-9._-]{20,}' \
+              --exclude-dir=.git --exclude-dir=.github --exclude-dir=build \
+              --exclude-dir=third_party --exclude-dir=media \
+              --include='*.md' --include='*.json' --include='*.cpp' --include='*.h' . ; then
+            echo "疑似真实凭据，请移除"; exit 1
+          fi
+
+      - name: Markdown 相对链接
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, urllib.parse
+          files = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md"]
+          for root, _, names in os.walk("docs"):
+              files += [os.path.join(root, n) for n in names if n.endswith(".md")]
+          bad = []
+          pat = re.compile(r'\[[^\]]*\]\(([^)]+)\)')
+          fence = re.compile(r'^\s*(```|~~~)')
+          for f in files:
+              if not os.path.exists(f):
+                  continue
+              in_code = False
+              for line in open(f, encoding="utf-8"):
+                  if fence.match(line):
+                      in_code = not in_code
+                      continue
+                  if in_code:
+                      continue
+                  for m in pat.finditer(line):
+                      link = m.group(1).strip()
+                      if link.startswith(("http://", "https://", "mailto:", "#")):
+                          continue
+                      path = urllib.parse.unquote(link.split("#")[0])
+                      if not path:
+                          continue
+                      target = os.path.normpath(os.path.join(os.path.dirname(f), path))
+                      if not os.path.exists(target):
+                          bad.append(f"{f}: {link}")
+          if bad:
+              print("失效链接：")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("links ok")
+          PY

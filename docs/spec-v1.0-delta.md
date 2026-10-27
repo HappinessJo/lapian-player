@@ -2,7 +2,7 @@
 
 - **版本**：v0.4（2026-10-23 DEC-6：扫码登录并入 v2，非 MVP 门）
 - **状态**：**S3 定稿 + DEC-6 增量**。**未并入 `spec.md`**；B 与 DEC-1…DEC-6 均已拍板；ADR-007 附条件接受（T8.2/T8.4 回填）；进入 S4。
-- **依据**：[spec.md](../spec.md) v0.3、[product-v2-vision.md](product-v2-vision.md) v1.0、[ADR-007 草案](adr/ADR-007-bilibili-online.md)、[v2-online-spike.md](perf/v2-online-spike.md) v0.2、[S1/S2 交接](handoff-2026-10-23-s1s2.md)、[spec-versioning.md](spec-versioning.md) v1.0
+- **依据**：[spec.md](../spec.md) v0.3、[product-v2-vision.md](product-v2-vision.md) v1.0、[ADR-007 草案](adr/ADR-007-bilibili-online.md)、v2-online-spike.md v0.2、S1/S2 交接、[spec-versioning.md](spec-versioning.md) v1.0
 - **范围**：只定义**在线模式**的增量验收口径与本地模式不退化约束。v1 本地模式仍以 `spec.md` v0.3 为准；本文件不重写 F1–F8 / P1–P14。
 - **规则**：只加不改；冲突时按模式限定解释（§7）。本文件不修改 `spec.md`、`plan.md` v0.2、`tasks.md`。
 

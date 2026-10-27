@@ -1,0 +1,43 @@
+name: 使用案例 / 拉片分享
+description: 分享你用这个工具做的 MAD/PV 拉片流程、截图或技巧
+title: "[Showcase] "
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎分享你的拉片方式：拆转场、看踩点、对比构图、0.25x 看作画……
+        分享截图时请**确保你有权使用该画面**；不要上传整段视频。
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你在拉什么
+      description: 素材类型（MAD/PV/AMV/静止系/手书…）、你关注的点
+      placeholder: "静止系 MAD，主要看转场和文字排版节奏"
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: 你的操作流程
+      description: 用了哪些键/功能，怎么设 A-B、怎么记笔记
+      placeholder: "I/O 设 1s 循环 → 0.25x 看 3 遍 → S 截图 → 备注写切点偏移"
+    validations:
+      required: true
+
+  - type: textarea
+    id: tips
+    attributes:
+      label: 技巧或建议（可选）
+    validations:
+      required: false
+
+  - type: textarea
+    id: shots
+    attributes:
+      label: 截图（可选）
+      description: 直接拖图片进来；请确认版权/授权
+    validations:
+      required: false

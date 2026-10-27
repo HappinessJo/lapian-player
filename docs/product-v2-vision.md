@@ -2,7 +2,7 @@
 
 - **版本**：v1.1（2026-10-23 DEC-6：扫码登录并入 MVP 增强）
 - **状态**：已拍板。S1 产品定义产出；五个决定由用户逐条确认；**DEC-6 把“扫码登录”从“明确不做”改为“MVP 增强（T8.2.2，非门）”**。
-- **依据**：[AGENTS.md](../AGENTS.md) v6.7、[spec.md](../spec.md) v0.3、[product-v2-bilibili-proposal.md](product-v2-bilibili-proposal.md)、[tasks.md](../tasks.md) v0.28
+- **依据**：[AGENTS.md](../AGENTS.md) v6.7、[spec.md](../spec.md) v0.3、product-v2-bilibili-proposal.md、[tasks.md](../tasks.md) v0.28
 - **范围**：只回答"为什么做、给谁做、做到哪、怎么算成功"。**不含实现方案**；架构、验收口径、任务拆分在 S2/S3 产出，不在此文承诺。
 
 ---

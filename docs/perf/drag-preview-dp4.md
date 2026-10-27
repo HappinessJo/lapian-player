@@ -9,9 +9,9 @@
   在线预览、缓存 schema、默认 AVC≤1080p。
 - **代码基线**：`d586548`（DP-3）；`9e584e9` 仅追加 DP-4 提示词文档。
 - **交付提交**：见 `git log -1`（本证据、交接与 AGENTS/任务表同一提交）。
-- **交接**：[handoff-2026-10-24-dp4.md](../handoff-2026-10-24-dp4.md)
-- **上一轮**：[drag-preview-dp3.md](drag-preview-dp3.md)
-- **任务表**：[tasks-drag-preview-v2.md](../tasks-drag-preview-v2.md)
+- **交接**：handoff-2026-10-24-dp4.md
+- **上一轮**：drag-preview-dp3.md
+- **任务表**：tasks-drag-preview-v2.md
 
 ---
 

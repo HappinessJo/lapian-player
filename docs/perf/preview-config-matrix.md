@@ -3,9 +3,9 @@
 > 状态：**D4 执行完毕，代码 + 本文一起提交**。范围只到探针/门配置化/证据；
 > 不改产品默认值、不改 0.9/30fps/5% 阈值、不动 M1/M2 门，未打包未安装。
 >
-> 前置：[计划](plan-2026-10-27-preview-parity-config.md) §2/§6/§4.4、
-> [C8 交接](handoff-2026-10-27-c8-forward-backward.md)、
-> [在线拖动 perf](perf/online-drag-parity.md)。
+> 前置：计划 §2/§6/§4.4、
+> C8 交接、
+> 在线拖动 perf。
 > 基线：HEAD `afc0f95`（D1/D2/D3 已入库）、ctest 38/38。
 
 ---

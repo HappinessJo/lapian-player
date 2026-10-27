@@ -2,7 +2,7 @@
 
 - **范围**：只做 T8.7。未做 T8.8 M1 门、T8.6.1a/b、T8.3.1 缓存管理 UI/孤儿清理、DASH/1080P60/4K/清晰度选择/扫码；未改 M1/M2 门、验收数字与本地模式路径。
 - **基线**：`6cb4c6d`（T8.6 + 热修）；本任务一个可审查提交（hash 见 `git log -1`）。
-- **依据**：[tasks-v2](../tasks-v2.md) v0.14 T8.7、[delta v0.4](../spec-v1.0-delta.md) O5/O6/O10/A2、[T8.6 交接](../handoff-2026-10-23-t8.6.md)、[T8.6 证据](v2-online-session.md)。
+- **依据**：tasks-v2 v0.14 T8.7、[delta v0.4](../spec-v1.0-delta.md) O5/O6/O10/A2、T8.6 交接、T8.6 证据。
 - **一句话**：完整缓存命中不再走 playurl/DownloadJob，直接打开 `data.mp4`；在线标记/备注按 `bvid+cid` 存 `lapian-online-1`，截图落 `Pictures\拉片软件\<bvid>\` 并追加 `index.jsonl`；清缓存保留记录、重建回访、损坏记录不阻塞；**M1 3/3 720P 仍 blocked（OB-2 360P），本任务不判 M1**。
 
 ---

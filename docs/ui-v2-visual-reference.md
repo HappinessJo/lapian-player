@@ -12,8 +12,8 @@
 ---
 
 > **仓库里已有渲好的对照图（不想现场渲就看这两张）**：
-> [render-plan-1280.png](ui-v2-proto/render-plan-1280.png)（原型 1280×900）与
-> [render-vs-product-3a5.png](ui-v2-proto/render-vs-product-3a5.png)（上=原型，下=2026-10-26 的 v2 壳层，
+> render-plan-1280.png（原型 1280×900）与
+> render-vs-product-3a5.png（上=原型，下=2026-10-26 的 v2 壳层，
 > 用于看清"已对齐/仍缺"的差别）。图是 2026-10-26 渲的，原型改动后请按 §2 重渲并覆盖。
 > 3B 的时间轴逐区对照见 `build/ui-v2-compare-timeline.png`（上=原型、下=产品，2×）——
 > 它是**构建产物**（不入库），复现方法：`--banner-test` 截图后按 §2 的坐标裁剪拼接。
@@ -87,7 +87,7 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
   `ok #9ed6a1 / warn #f0cb7a / err #f08c93 / cache #a6d8c4`，各自配 `*_bg` / `*_border`。
   原型 `:root` 里的 `--ok #6fbf73` 等是早期值，**不要用**。
 - **文字层级**：`text #e8e8ee` / `text-dim #a2a2ad`（按钮/标签）/ `text-meta #8a8a95`（元信息）/
-  `text-mute #6f6f7a`（**仅禁用与装饰**）。对比度实测见 [3A 交接](handoff-2026-10-26-ui-v2-3a.md) §4.4。
+  `text-mute #6f6f7a`（**仅禁用与装饰**）。对比度实测见 3A 交接 §4.4。
 - **字号**：11px 元信息、12px 正文/按钮、13px 标题（文件名）、26px 等宽时间码（compact 22 / dense 22）。
   一律 `QFont::setPixelSize`（`Theme::UiFont/MonoFont`），**不在 QSS 里写字号**。
 
@@ -101,7 +101,7 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
    已在 3B 补上（形态与原型一致），但波形还是 `#7aa2f7` 实色 + `0.62×可用高`（原型是 `--wave` 55% 半透明、
    独立标记带），标记只有细线 + 3px 小旗（原型是带帧号文字的旗标条）。属"仍缺"，3C/收口再定。
    另：dense 档（客户区 <520）时间轴按 §3.1 无面板头，但"工作区/视图数值移到 Transport 副行"这半句
-   **3B 未做**（Transport 副行在 502px 宽时只剩 ~190px，塞不下）→ 见 [3B 交接](handoff-2026-10-26-ui-v2-3b.md) §10-2。
+   **3B 未做**（Transport 副行在 502px 宽时只剩 ~190px，塞不下）→ 见 3B 交接 §10-2。
 3. **检查器已 tab 化（3C，2026-10-26）**：`ui/InspectorPanel` 做了头 26 三 tab + 计数徽标 + `+`/折叠、
    `v2InspectorStack` 三页（既有 MarkPanel 原对象 / 截图网格 / 信息表）、页脚存储位置、折叠 44 rail。
    与原型仍有差距：标记行没有 hover 删除按钮、选中行没有左侧 2px accent 竖条（MarkPanel 既有行为，
@@ -137,5 +137,5 @@ $uri  = ([System.Uri]((Resolve-Path 'docs\ui-v2-proto\plan.html').Path)).Absolut
   `collapsed/tab/page/w/h/marks/shots/tiles/badge/shotbadge/rail/info/store`，并在每个 DPI 相位保存
   `build/t6.4-dpi-<tag>-inspector-{collapsed,wide,shots,info,narrow}.png`。
 - 每栏高度仍以令牌 ±2px 为准（M4 断言在 `LayoutProblemsForTest()` 里）。
-- 正文对比度 ≥4.5:1（截屏采样，方法见 [3A 交接](handoff-2026-10-26-ui-v2-3a.md) §4.4）。
+- 正文对比度 ≥4.5:1（截屏采样，方法见 3A 交接 §4.4）。
 - 新增/改动控件必须带稳定 `objectName`（列表见规划 §7.7），否则截图对比与自动化都定位不到。
