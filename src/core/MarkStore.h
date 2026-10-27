@@ -64,6 +64,107 @@ struct MarkStoreOptions {
   std::string appdata_online_dir;
 };
 
+// W1（2026-10-27，spec §3.8 / F8-A4）：工作区 A/B 按视频记忆。
+// 只存 A/B；循环开关仍只在本次会话内保持（不写 enabled）。文件 schema 固定 1：
+//   {"schema":1,"in":100,"out":160,"kind":"local|online","id":"<path_key|bvid-cid>",
+//    "size":123,"mtime_ms":1690000000000,"frames":3000,"updated_at":"..."}
+// 本地：`<视频>.lapian-workrange.json`（sidecar），写失败回退
+// `%APPDATA%\拉片软件\marks\<path_hash>.workrange.json`；在线：
+// `<online 记录目录>/<bvid>-<cid>.lapian-workrange.json`。
+// 无记录 / 损坏 / 版本不符 / 指纹不符 / 非法值一律按“全片两头”，不报错。
+inline constexpr int kWorkRangeSchemaVersion = 1;
+
+struct WorkRange {
+  std::int64_t in = 0;
+  std::int64_t out = 0;
+
+  bool operator==(const WorkRange&) const = default;
+};
+
+enum class WorkRangeKind { kLocal, kOnline };
+
+// "local" / "online"；未知字符串返回 false。
+const char* WorkRangeKindName(WorkRangeKind kind);
+bool ParseWorkRangeKind(const std::string& text, WorkRangeKind* kind);
+
+struct WorkRangeRecord {
+  int schema = kWorkRangeSchemaVersion;
+  WorkRangeKind kind = WorkRangeKind::kLocal;
+  std::string id;             // 本地 path_key；在线 "<bvid>-<cid>"
+  std::uint64_t size = 0;     // 本地：视频字节数（在线为 0）
+  std::int64_t mtime_ms = 0;  // 本地：视频 mtime（epoch 毫秒；在线为 0）
+  std::int64_t frames = 0;    // 保存时的帧数（帧数变化时按新帧数 clamp）
+  WorkRange range;
+  std::string updated_at;  // ISO-8601 UTC（毫秒）；仅诊断用
+};
+
+// 工作区文件的完整路径（UTF-8）。
+struct WorkRangePaths {
+  std::string sidecar;   // <视频>.lapian-workrange.json
+  std::string fallback;  // <marks 目录>/<path_hash>.workrange.json
+  std::string path_hash;
+};
+
+WorkRangePaths ResolveWorkRangePaths(const std::string& video_path_utf8,
+                                     const MarkStoreOptions& options = {});
+// 在线工作区文件：`<online_dir>/<bvid>-<cid>.lapian-workrange.json`。
+std::string OnlineWorkRangePath(const std::string& online_dir_utf8,
+                                const std::string& bvid, std::int64_t cid);
+
+// JSON 序列化/解析（schema=1）。解析严格要求字段类型与 in>=0、out>=in、
+// frames>=1；版本更高时 unsupported_schema=true（调用方不得覆盖）。
+std::string SerializeWorkRangeFile(const WorkRangeRecord& record);
+bool ParseWorkRangeFile(const std::string& json_utf8, WorkRangeRecord* record,
+                        std::string* error,
+                        bool* unsupported_schema = nullptr);
+
+// 指纹 + 取值范围校验，并按 current_frames clamp 到
+// [0, current_frames-1]（out >= in）。返回 false 表示按“无记录”处理。
+bool ValidateWorkRange(const WorkRangeRecord& record, WorkRangeKind expected_kind,
+                       const std::string& expected_id, std::uint64_t current_size,
+                       std::int64_t current_mtime_ms, std::int64_t current_frames,
+                       WorkRange* out_range, std::string* reason = nullptr);
+
+// 小 store：一个视频的 A/B 记录（读/写/删）。永不抛异常；失败静默返回 false，
+// 不阻塞播放（只按 LAPIAN_WORKRANGE_LOG 记录）。
+class WorkRangeStore {
+ public:
+  WorkRangeStore() = default;
+
+  static WorkRangeStore Open(const std::string& video_path_utf8,
+                             const MarkStoreOptions& options = {});
+  static WorkRangeStore OpenOnline(const std::string& bvid, std::int64_t cid,
+                                   const std::string& online_dir_utf8);
+
+  bool valid() const { return valid_; }
+  bool online() const { return online_; }
+  // 读取 + 指纹校验都通过（尚未按当前帧数 clamp）。
+  bool has_record() const { return has_record_; }
+  const WorkRange& range() const { return record_.range; }
+  std::int64_t stored_frames() const { return record_.frames; }
+  const std::string& id() const { return record_.id; }
+  const std::string& path() const { return path_; }
+  bool using_fallback() const { return using_fallback_; }
+
+  // 按当前帧数 clamp；false = 没有可用记录（默认全片）。
+  bool Restore(std::int64_t current_frames, WorkRange* out_range) const;
+  // 原子写（QSaveFile）；sidecar 失败自动回退 AppData（在线只有一条路径）。
+  bool Save(const WorkRange& range, std::int64_t frames, std::string* out_path,
+            std::string* error);
+  // 删除 sidecar + 回退（在线一条）；没有文件也算成功。
+  bool Remove(std::string* error = nullptr);
+
+ private:
+  bool valid_ = false;
+  bool online_ = false;
+  bool has_record_ = false;
+  bool using_fallback_ = false;
+  WorkRangeRecord record_;
+  WorkRangePaths paths_;
+  std::string path_;
+  std::string video_path_;
+};
+
 // 每条在线标记在创建时记录的实际流信息；换档后用 PTS 映射帧号，不静默复用。
 struct OnlineMarkMeta {
   double fps = 0.0;

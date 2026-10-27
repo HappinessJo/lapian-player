@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,11 @@ using lapian::core::MarkWarning;
 using lapian::core::MarkWarningKind;
 using lapian::core::SaveResult;
 using lapian::core::VideoIdentity;
+using lapian::core::WorkRange;
+using lapian::core::WorkRangeKind;
+using lapian::core::WorkRangePaths;
+using lapian::core::WorkRangeRecord;
+using lapian::core::WorkRangeStore;
 
 int g_failures = 0;
 
@@ -775,6 +781,372 @@ void TestIdentityMismatch(const QString& root) {
   Check(QFileInfo::exists(sidecar), "不自动覆盖标识不一致的 sidecar");
 }
 
+QJsonObject ReadJsonObject(const QString& path) {
+  return QJsonDocument::fromJson(ReadAll(path)).object();
+}
+
+bool WriteJsonObject(const QString& path, const QJsonObject& object) {
+  return WriteAll(path, QJsonDocument(object).toJson(QJsonDocument::Indented));
+}
+
+// W1：工作区 A/B 按视频记忆——路径派生（本地 sidecar / AppData 回退 / 在线）。
+void TestWorkRangePaths(const QString& root) {
+  std::printf("\n-- W1 工作区路径派生 --\n");
+  const QString directory = root + QStringLiteral("/workrange/paths");
+  const QString video = NewVideo(directory, QStringLiteral("中文 视频.mp4"));
+  const QString other = NewVideo(directory, QStringLiteral("另一个.mp4"));
+  const MarkStoreOptions options =
+      OptionsFor(root + QStringLiteral("/appdata-workrange"));
+  const MarkPaths mark_paths = ResolveMarkPaths(ToUtf8(video), options);
+  const WorkRangePaths paths = ResolveWorkRangePaths(ToUtf8(video), options);
+
+  const std::string normalized_video =
+      lapian::core::MakeVideoIdentity(ToUtf8(video), 0).path;
+  CheckEq(paths.sidecar, normalized_video + ".lapian-workrange.json",
+          "W1：sidecar = 视频完整名 + .lapian-workrange.json");
+  CheckEq(paths.path_hash, mark_paths.path_hash, "W1：path_hash 与标记 sidecar 一致");
+  CheckEq(paths.fallback,
+          ToUtf8(root + QStringLiteral("/appdata-workrange/marks/") +
+                 FromUtf8(paths.path_hash) + QStringLiteral(".workrange.json")),
+          "W1：回退 = marks 目录/<hash>.workrange.json");
+  Check(paths.sidecar != FromUtf8(mark_paths.sidecar).toStdString(),
+        "W1：工作区文件与标记 sidecar 分开");
+
+  const WorkRangePaths other_paths = ResolveWorkRangePaths(ToUtf8(other), options);
+  Check(other_paths.sidecar != paths.sidecar &&
+            other_paths.fallback != paths.fallback,
+        "W1：不同视频路径与回退都不同（换视频不串）");
+
+  const std::string online = lapian::core::OnlineWorkRangePath(
+      ToUtf8(root + QStringLiteral("/online-records")), "BV1BMnv6jE5S",
+      42915922022LL);
+  CheckEq(online,
+          ToUtf8(root + QStringLiteral(
+                          "/online-records/BV1BMnv6jE5S-42915922022"
+                          ".lapian-workrange.json")),
+          "W1：在线工作区 = <bvid>-<cid>.lapian-workrange.json");
+  Check(lapian::core::OnlineWorkRangePath(ToUtf8(root), "bad/../bvid", 1).empty(),
+        "W1：非法 bvid 不派生在线路径");
+  Check(lapian::core::OnlineWorkRangePath(ToUtf8(root), "BV1", 0).empty(),
+        "W1：cid<=0 不派生在线路径");
+
+  // >MAX_PATH 中文长目录：路径派生不能炸。
+  QString long_dir = root + QStringLiteral("/workrange/long");
+  int index = 0;
+  while (long_dir.size() < 280) {
+    long_dir += QLatin1Char('/') + QStringLiteral("很长的中文目录名称_工作区") +
+                QString::number(index++);
+  }
+  const QString long_video = NewVideo(long_dir, QStringLiteral("长路径.mp4"));
+  Check(long_video.size() > 260, "W1：长路径视频 >260 字符");
+  const WorkRangePaths long_paths =
+      ResolveWorkRangePaths(ToUtf8(long_video), options);
+  const std::string expected_suffix = ".lapian-workrange.json";
+  Check(long_paths.sidecar.size() ==
+            ToUtf8(long_video).size() + expected_suffix.size(),
+        "W1：长路径 sidecar 后缀正确");
+  WorkRangeStore long_store = WorkRangeStore::Open(ToUtf8(long_video), options);
+  Check(long_store.valid() && !long_store.has_record(), "W1：长路径打开不崩、无记录");
+}
+
+// W1：JSON 序列化/解析（roundtrip、损坏、空、schema 更高、非法区间）。
+void TestWorkRangeRoundtrip() {
+  std::printf("\n-- W1 工作区 roundtrip / 坏值 --\n");
+  WorkRangeRecord record;
+  record.kind = WorkRangeKind::kLocal;
+  record.id = "c:\\视频\\测试.mp4";
+  record.size = 12345;
+  record.mtime_ms = 1690000000000LL;
+  record.frames = 3000;
+  record.range = WorkRange{100, 160};
+  record.updated_at = "2026-10-27T00:00:00.000Z";
+
+  const std::string json = lapian::core::SerializeWorkRangeFile(record);
+  WorkRangeRecord parsed;
+  std::string error;
+  Check(lapian::core::ParseWorkRangeFile(json, &parsed, &error),
+        "W1：serialize/parse roundtrip");
+  Check(parsed.id == record.id, "W1：id roundtrip");
+  Check(parsed.kind == WorkRangeKind::kLocal, "W1：kind roundtrip local");
+  CheckEq64(static_cast<std::int64_t>(parsed.size),
+            static_cast<std::int64_t>(record.size), "W1：size roundtrip");
+  CheckEq64(parsed.mtime_ms, record.mtime_ms, "W1：mtime_ms roundtrip");
+  CheckEq64(parsed.frames, 3000, "W1：frames roundtrip");
+  Check(parsed.range == record.range, "W1：in/out roundtrip");
+  CheckEq(parsed.updated_at, record.updated_at, "W1：updated_at roundtrip");
+
+  const QJsonObject object = QJsonDocument::fromJson(
+                                 QByteArray::fromStdString(json)).object();
+  CheckEq64(object.value(QStringLiteral("schema")).toInteger(), 1,
+            "W1：schema=1");
+  CheckEq64(object.value(QStringLiteral("in")).toInteger(), 100, "W1：JSON in");
+  CheckEq64(object.value(QStringLiteral("out")).toInteger(), 160, "W1：JSON out");
+  CheckEq(object.value(QStringLiteral("kind")).toString().toUtf8().toStdString(),
+          "local", "W1：JSON kind=local");
+
+  WorkRangeRecord online = record;
+  online.kind = WorkRangeKind::kOnline;
+  online.id = "BV1BMnv6jE5S-42915922022";
+  online.size = 0;
+  online.mtime_ms = 0;
+  Check(lapian::core::ParseWorkRangeFile(
+            lapian::core::SerializeWorkRangeFile(online), &parsed, &error),
+        "W1：在线记录 roundtrip");
+  Check(parsed.kind == WorkRangeKind::kOnline && parsed.id == online.id,
+        "W1：在线 kind/id roundtrip");
+
+  Check(!lapian::core::ParseWorkRangeFile("", &parsed, &error), "W1：空内容无效");
+  Check(!lapian::core::ParseWorkRangeFile("{", &parsed, &error), "W1：损坏 JSON 无效");
+  Check(!lapian::core::ParseWorkRangeFile("[]", &parsed, &error),
+        "W1：根不是对象无效");
+
+  auto modified = [&](const char* key, const QJsonValue& value) {
+    QJsonObject copy = object;
+    copy.insert(QString::fromLatin1(key), value);
+    return QJsonDocument(copy).toJson().toStdString();
+  };
+  auto removed = [&](const char* key) {
+    QJsonObject copy = object;
+    copy.remove(QString::fromLatin1(key));
+    return QJsonDocument(copy).toJson().toStdString();
+  };
+  bool unsupported = false;
+  Check(!lapian::core::ParseWorkRangeFile(modified("schema", 2), &parsed, &error,
+                                          &unsupported) &&
+            unsupported,
+        "W1：schema 更高 = 无记录且禁止覆盖");
+  unsupported = false;
+  Check(!lapian::core::ParseWorkRangeFile(modified("schema", 0), &parsed, &error,
+                                          &unsupported) &&
+            !unsupported,
+        "W1：schema=0 无效");
+  Check(!lapian::core::ParseWorkRangeFile(modified("in", -1), &parsed, &error),
+        "W1：in<0 无效");
+  Check(!lapian::core::ParseWorkRangeFile(modified("out", 50), &parsed, &error),
+        "W1：out<in 无效");
+  Check(!lapian::core::ParseWorkRangeFile(removed("frames"), &parsed, &error),
+        "W1：frames 缺失无效");
+  Check(!lapian::core::ParseWorkRangeFile(removed("in"), &parsed, &error),
+        "W1：in 缺失无效");
+  Check(!lapian::core::ParseWorkRangeFile(removed("id"), &parsed, &error),
+        "W1：id 缺失无效");
+  Check(!lapian::core::ParseWorkRangeFile(modified("kind", "bogus"), &parsed,
+                                          &error),
+        "W1：kind 非法无效");
+  Check(!lapian::core::ParseWorkRangeFile(modified("in", QStringLiteral("100")),
+                                          &parsed, &error),
+        "W1：in 不是整数无效");
+}
+
+// W1：指纹 + 取值校验 / 按当前帧数 clamp。
+void TestWorkRangeValidate() {
+  std::printf("\n-- W1 工作区校验 / clamp --\n");
+  WorkRangeRecord record;
+  record.kind = WorkRangeKind::kLocal;
+  record.id = "c:\\video\\a.mp4";
+  record.size = 123;
+  record.mtime_ms = 1'690'000'000'000LL;
+  record.frames = 100;
+  record.range = WorkRange{10, 90};
+
+  WorkRange out;
+  Check(lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                        123, record.mtime_ms, 100, &out, nullptr),
+        "W1：指纹一致通过");
+  Check(out == (WorkRange{10, 90}), "W1：范围原样返回");
+  Check(!lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                         124, record.mtime_ms, 100, &out, nullptr),
+        "W1：size 不符 = 无记录");
+  Check(!lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                         123, record.mtime_ms + 5000, 100, &out,
+                                         nullptr),
+        "W1：mtime 差 >2000ms = 无记录");
+  Check(lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                        123, record.mtime_ms + 1500, 100, &out,
+                                        nullptr),
+        "W1：mtime 差 ≤2000ms 仍有效");
+  Check(!lapian::core::ValidateWorkRange(record, WorkRangeKind::kOnline,
+                                         record.id, 123, record.mtime_ms, 100,
+                                         &out, nullptr),
+        "W1：kind 不符 = 无记录");
+  Check(!lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                         123, record.mtime_ms, 0, &out, nullptr),
+        "W1：帧数未知 = 无记录");
+
+  record.range = WorkRange{10, 900};
+  Check(lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                        123, record.mtime_ms, 100, &out, nullptr) &&
+            out == (WorkRange{10, 99}),
+        "W1：out 超 frames → clamp 到末帧");
+  record.range = WorkRange{500, 600};
+  Check(lapian::core::ValidateWorkRange(record, WorkRangeKind::kLocal, record.id,
+                                        123, record.mtime_ms, 300, &out, nullptr) &&
+            out == (WorkRange{299, 299}),
+        "W1：in/out 都超新帧数 → 双 clamp 仍 out>=in");
+
+  WorkRangeRecord online;
+  online.kind = WorkRangeKind::kOnline;
+  online.id = "BV1BMnv6jE5S-42915922022";
+  online.frames = 100;
+  online.range = WorkRange{10, 20};
+  Check(lapian::core::ValidateWorkRange(online, WorkRangeKind::kOnline, online.id,
+                                        0, 0, 100, &out, nullptr),
+        "W1：在线 bvid/cid 一致通过");
+  Check(!lapian::core::ValidateWorkRange(online, WorkRangeKind::kOnline,
+                                         "BV1BMnv6jE5S-1", 0, 0, 100, &out,
+                                         nullptr),
+        "W1：在线 bvid/cid 不符 = 无记录");
+}
+
+// W1：store 原子写/读回/覆盖/删除/指纹不符/只读回退/在线。
+void TestWorkRangeStore(const QString& root) {
+  std::printf("\n-- W1 工作区 store（原子写/回退/在线） --\n");
+  const QString directory = root + QStringLiteral("/workrange/store");
+  const QString video = NewVideo(directory, QStringLiteral("存储.mp4"));
+  const MarkStoreOptions options =
+      OptionsFor(root + QStringLiteral("/appdata-workrange-store"));
+  const WorkRangePaths paths = ResolveWorkRangePaths(ToUtf8(video), options);
+  const QString sidecar = FromUtf8(paths.sidecar);
+  const QString fallback = FromUtf8(paths.fallback);
+  const std::int64_t video_size = ReadAll(video).size();
+  const std::int64_t mtime_ms =
+      QFileInfo(video).lastModified().toMSecsSinceEpoch();
+
+  WorkRangeStore store = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(store.valid(), "W1：本地 store 有效");
+  Check(!store.has_record(), "W1：初始无记录");
+  CheckEq(store.path(), paths.sidecar, "W1：path 指向 sidecar");
+  WorkRange out;
+  Check(!store.Restore(120, &out), "W1：无记录 Restore=false");
+
+  std::string saved_path;
+  std::string error;
+  Check(store.Save(WorkRange{100, 160}, 300, &saved_path, &error),
+        "W1：保存工作区");
+  CheckEq(saved_path, paths.sidecar, "W1：保存到 sidecar");
+  Check(QFileInfo::exists(sidecar), "W1：sidecar 文件存在");
+  Check(!QFileInfo::exists(fallback), "W1：未写回退");
+  Check(store.has_record(), "W1：保存后 has_record");
+
+  const QJsonObject saved = ReadJsonObject(sidecar);
+  CheckEq64(saved.value(QStringLiteral("schema")).toInteger(), 1, "W1：落盘 schema=1");
+  CheckEq64(saved.value(QStringLiteral("in")).toInteger(), 100, "W1：落盘 in");
+  CheckEq64(saved.value(QStringLiteral("out")).toInteger(), 160, "W1：落盘 out");
+  CheckEq(saved.value(QStringLiteral("kind")).toString().toUtf8().toStdString(),
+          "local", "W1：落盘 kind=local");
+  CheckEq(saved.value(QStringLiteral("id")).toString().toUtf8().toStdString(),
+          store.id(), "W1：落盘 id=path_key");
+  CheckEq64(saved.value(QStringLiteral("size")).toInteger(), video_size,
+            "W1：落盘 size");
+  const std::int64_t saved_mtime =
+      saved.value(QStringLiteral("mtime_ms")).toInteger();
+  Check(std::llabs(saved_mtime - mtime_ms) <= 2000, "W1：落盘 mtime 为视频 mtime");
+  CheckEq64(saved.value(QStringLiteral("frames")).toInteger(), 300,
+            "W1：落盘 frames");
+  Check(!saved.value(QStringLiteral("updated_at")).toString().isEmpty(),
+        "W1：updated_at 非空");
+  Check(store.Restore(300, &out) && out == (WorkRange{100, 160}),
+        "W1：Restore 读回 A/B");
+
+  WorkRangeStore reopened = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(reopened.has_record(), "W1：重开有记录");
+  Check(reopened.Restore(300, &out) && out == (WorkRange{100, 160}),
+        "W1：重开恢复 A/B");
+  Check(!reopened.using_fallback(), "W1：重开用 sidecar");
+  Check(reopened.Restore(120, &out) && out == (WorkRange{100, 119}),
+        "W1：帧数变小时按新帧数 clamp B");
+  Check(reopened.Restore(2000, &out) && out == (WorkRange{100, 160}),
+        "W1：帧数变大不变");
+
+  Check(reopened.Save(WorkRange{0, 50}, 300, &saved_path, &error),
+        "W1：覆盖保存");
+  WorkRangeStore overwritten = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(overwritten.Restore(300, &out) && out == (WorkRange{0, 50}),
+        "W1：覆盖后读回");
+
+  // 指纹不符（size 或 mtime 被改）：按无记录，不恢复。
+  QJsonObject tampered = ReadJsonObject(sidecar);
+  tampered.insert(QStringLiteral("size"), video_size + 1);
+  Check(WriteJsonObject(sidecar, tampered), "W1：写入错误 size 的记录");
+  WorkRangeStore wrong_size = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(!wrong_size.has_record(), "W1：size 不符不恢复");
+  Check(!wrong_size.Restore(300, &out), "W1：size 不符 Restore=false");
+
+  tampered = ReadJsonObject(sidecar);
+  tampered.insert(QStringLiteral("mtime_ms"), saved_mtime - 60'000);
+  Check(WriteJsonObject(sidecar, tampered), "W1：写入错误 mtime 的记录");
+  WorkRangeStore wrong_mtime = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(!wrong_mtime.has_record(), "W1：mtime 不符不恢复");
+
+  QJsonObject broken = ReadJsonObject(sidecar);
+  broken.insert(QStringLiteral("out"), -5);
+  Check(WriteJsonObject(sidecar, broken), "W1：写入 out<0 的记录");
+  WorkRangeStore broken_store = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(!broken_store.has_record(), "W1：非法记录按无记录");
+
+  Check(overwritten.Save(WorkRange{10, 20}, 300, &saved_path, &error),
+        "W1：重新写入正常记录");
+  Check(overwritten.Remove(&error), "W1：删除工作区文件");
+  Check(!QFileInfo::exists(sidecar), "W1：sidecar 已删除");
+  Check(!overwritten.has_record(), "W1：删除后 has_record=false");
+
+  // sidecar 路径被目录占用 → 原子写失败 → 静默回退 AppData。
+  Check(QDir().mkpath(sidecar), "W1：用目录占住 sidecar 路径（模拟不可写）");
+  WorkRangeStore blocked = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(blocked.valid() && !blocked.has_record(), "W1：sidecar 被占用时仍可打开");
+  Check(blocked.Save(WorkRange{30, 40}, 300, &saved_path, &error),
+        "W1：sidecar 不可写时保存成功");
+  CheckEq(saved_path, paths.fallback, "W1：回退到 AppData");
+  Check(blocked.using_fallback(), "W1：标记为 AppData 回退");
+  Check(QFileInfo::exists(fallback), "W1：回退文件存在");
+  Check(QDir(sidecar).exists(), "W1：sidecar 目录未被破坏");
+  WorkRangeStore from_fallback = WorkRangeStore::Open(ToUtf8(video), options);
+  Check(from_fallback.has_record() && from_fallback.using_fallback(),
+        "W1：重开读回退");
+  Check(from_fallback.Restore(300, &out) && out == (WorkRange{30, 40}),
+        "W1：回退恢复 A/B");
+  // sidecar 路径仍被目录占用：Remove 对目录不删，整体返回 false（只按日志记录）。
+  const bool removed_fallback = from_fallback.Remove(&error);
+  Check(!removed_fallback && !error.empty(), "W1：目录占位时 Remove 报错但不删目录");
+  Check(!QFileInfo::exists(fallback), "W1：回退文件已删除");
+  Check(QDir(sidecar).exists(), "W1：目录不当文件删除");
+  QDir().rmdir(sidecar);
+
+  // 在线：<records>/<bvid>-<cid>.lapian-workrange.json。
+  const QString records_root = root + QStringLiteral("/workrange/online-records");
+  WorkRangeStore online =
+      WorkRangeStore::OpenOnline("BV1BMnv6jE5S", 42915922022LL,
+                                 ToUtf8(records_root));
+  Check(online.valid() && !online.has_record(), "W1：在线 store 有效/初始无记录");
+  Check(online.Save(WorkRange{10, 20}, 100, &saved_path, &error),
+        "W1：在线保存成功");
+  const std::string expected_online = lapian::core::OnlineWorkRangePath(
+      ToUtf8(records_root), "BV1BMnv6jE5S", 42915922022LL);
+  CheckEq(saved_path, expected_online, "W1：在线保存路径");
+  Check(QFileInfo::exists(FromUtf8(saved_path)), "W1：在线文件存在");
+  const QJsonObject online_json = ReadJsonObject(FromUtf8(saved_path));
+  CheckEq(online_json.value(QStringLiteral("kind")).toString().toUtf8().toStdString(),
+          "online", "W1：在线记录 kind=online");
+  CheckEq(online_json.value(QStringLiteral("id")).toString().toUtf8().toStdString(),
+          "BV1BMnv6jE5S-42915922022", "W1：在线记录 id=bvid-cid");
+
+  WorkRangeStore online_reopened = WorkRangeStore::OpenOnline(
+      "BV1BMnv6jE5S", 42915922022LL, ToUtf8(records_root));
+  Check(online_reopened.has_record() &&
+            online_reopened.Restore(100, &out) && out == (WorkRange{10, 20}),
+        "W1：在线重开恢复 A/B");
+  WorkRangeStore other_cid = WorkRangeStore::OpenOnline(
+      "BV1BMnv6jE5S", 42915922023LL, ToUtf8(records_root));
+  Check(!other_cid.has_record(), "W1：换 cid 不串");
+  WorkRangeStore other_bvid = WorkRangeStore::OpenOnline(
+      "BV1BMnv6jE5T", 42915922022LL, ToUtf8(records_root));
+  Check(!other_bvid.has_record(), "W1：换 bvid 不串");
+  Check(!WorkRangeStore::OpenOnline("bad/bvid", 1, ToUtf8(records_root)).valid(),
+        "W1：非法 bvid 在线 store 无效");
+  Check(online_reopened.Remove(&error), "W1：在线删除");
+  Check(!QFileInfo::exists(FromUtf8(expected_online)), "W1：在线文件已删除");
+}
+
 // 手动入口（不注册到 ctest）：用真实只读目录验证 sidecar 写入失败后回退 AppData。
 // 用法：设置 LAPIAN_MANUAL_VIDEO / LAPIAN_MANUAL_APPDATA 后运行
 //       lapian_mark_store_test --manual-readonly
@@ -849,6 +1221,10 @@ int main(int argc, char** argv) {
   TestAtomicFailure(temp.path());
   TestLongPathAtomicWrite(temp.path());
   TestIdentityMismatch(temp.path());
+  TestWorkRangePaths(temp.path());
+  TestWorkRangeRoundtrip();
+  TestWorkRangeValidate();
+  TestWorkRangeStore(temp.path());
 
   if (g_failures > 0) {
     std::printf("\n失败 %d 项\n", g_failures);
