@@ -85,6 +85,14 @@ MAD / PV 的功力常常就在 **1–3 帧**之间：切点早一帧还是晚一
 
 > 未做代码签名，首次运行会有 SmartScreen 提示。
 
+### macOS（第三方 fork，非官方）
+
+macOS Apple Silicon 版由 [luoboruodai/lapian-player](https://github.com/luoboruodai/lapian-player) 维护，
+不在本项目主线发布范围内。安装包、构建说明与问题反馈请见该仓库的
+[Releases](https://github.com/luoboruodai/lapian-player/releases)。
+
+> 该构建由第三方维护，不是本项目官方产物；本项目主线仍只支持 Windows。
+
 ## 快速开始
 
 1. 打开软件，`Ctrl+O` 选一个本地 MAD / PV；或 `Ctrl+U` 粘贴 B 站 BV 号。
