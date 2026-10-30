@@ -21,6 +21,10 @@
 
 > 把一支 MAD / PV 拆到帧：**看剪辑点、看转场、看构图、看踩点**，然后记下来。
 
+> **macOS 用户：** 主线目前只提供 Windows 版；Apple Silicon 版由第三方 fork 维护，
+> 非本项目官方发布。见 [luoboruodai/lapian-player](https://github.com/luoboruodai/lapian-player)
+> 的 [Releases](https://github.com/luoboruodai/lapian-player/releases)。
+
 ## 为什么做这个
 
 MAD / PV 的功力常常就在 **1–3 帧**之间：切点早一帧还是晚一帧、转场是硬切还是白闪、
