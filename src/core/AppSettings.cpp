@@ -1,4 +1,5 @@
 #include "core/AppSettings.h"
+#include "core/AppDataPaths.h"
 
 #include <QDir>
 #include <QFile>
@@ -268,19 +269,11 @@ SettingsStore::SettingsStore(QString root_dir)
     : root_dir_(root_dir.isEmpty() ? DefaultRootDir() : std::move(root_dir)) {}
 
 QString SettingsStore::DefaultRootDir() {
-  // 与 MarkStore 的 AppData 回退保持同一父目录：%APPDATA%\拉片软件。
-  QString appdata = qEnvironmentVariable("APPDATA");
-  if (appdata.isEmpty()) {
-    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+  const QString root = lapian::core::DefaultAppDataRoot();
+  if (QFileInfo(root).fileName() == QStringLiteral("拉片软件")) {
+    return root;
   }
-  if (appdata.isEmpty()) {
-    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-  }
-  QDir base(appdata);
-  if (base.dirName() == QStringLiteral("拉片软件")) {
-    return base.absolutePath();
-  }
-  return base.filePath(QStringLiteral("拉片软件"));
+  return QDir(root).filePath(QStringLiteral("拉片软件"));
 }
 
 QString SettingsStore::file_path() const {

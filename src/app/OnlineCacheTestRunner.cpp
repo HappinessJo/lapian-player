@@ -21,8 +21,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#endif
 
 namespace lapian::app {
 namespace {
@@ -60,6 +62,7 @@ bool EnsureParent(const QString& path) {
 }
 
 bool MarkSparse(const QString& path) {
+#ifdef _WIN32
   const QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
   const std::wstring wide =
       (native.startsWith(QStringLiteral("\\\\?\\"))
@@ -77,6 +80,9 @@ bool MarkSparse(const QString& path) {
                                   &returned, nullptr);
   CloseHandle(handle);
   return ok != 0;
+#else
+  return QFileInfo::exists(path);
+#endif
 }
 
 bool CreateSizedFile(const QString& path, qint64 size) {

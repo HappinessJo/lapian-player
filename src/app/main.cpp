@@ -37,14 +37,17 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#endif
 
 #include "app/DragStrategyTestRunner.h"
 #include "app/DragTestRunner.h"
 #include "app/GopBoundaryTestRunner.h"
 #include "app/MainWindow.h"
 #include "app/MemoryTestRunner.h"
+#include "app/ProcessMemory.h"
 #include "app/OnlineAuthTestRunner.h"
 #include "app/OnlineCacheManageTestRunner.h"
 #include "app/OnlineCacheTestRunner.h"
@@ -3975,13 +3978,12 @@ int main(int argc, char* argv[]) {
                        window.SnapshotPerfSummaryForTest().toUtf8().constData());
           std::fflush(stderr);
 
-          PROCESS_MEMORY_COUNTERS memory{};
-          const bool memory_ok =
-              GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory)) != FALSE;
+          lapian::app::ProcessMemorySample memory;
+          const bool memory_ok = lapian::app::SampleProcessMemory(&memory);
           const double working_mb =
-              memory_ok ? static_cast<double>(memory.WorkingSetSize) / (1024.0 * 1024.0) : 0.0;
+              memory_ok ? static_cast<double>(memory.working_set_bytes) / (1024.0 * 1024.0) : 0.0;
           const double peak_mb = memory_ok
-                                     ? static_cast<double>(memory.PeakWorkingSetSize) /
+                                     ? static_cast<double>(memory.peak_working_set_bytes) /
                                            (1024.0 * 1024.0)
                                      : 0.0;
           if (memory_ok) {

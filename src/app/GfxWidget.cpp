@@ -43,6 +43,11 @@ GfxWidget::GfxWidget(QWidget* parent) : QWidget(parent) {
 
 GfxWidget::~GfxWidget() = default;
 
+bool GfxWidget::IsReady() const {
+  return device_ && swap_chain_ && video_renderer_ && device_->IsValid() &&
+         swap_chain_->IsValid() && !init_failed_;
+}
+
 bool GfxWidget::EnsureReady() {
   if (init_failed_) {
     return false;

@@ -6,7 +6,9 @@
 #include <string>
 
 #include "media/MediaSession.h"
+#ifdef _WIN32
 #include "platform/gfx/D3D11Device.h"
+#endif
 
 namespace {
 
@@ -37,15 +39,20 @@ bool FileExists(const std::string& path) {
 int main() {
   std::printf("T1.4 媒体会话测试\n");
 
-  lapian::gfx::D3D11Device device;
   std::string error;
+#ifdef _WIN32
+  lapian::gfx::D3D11Device device;
   if (!device.Create(&error)) {
     Skip("D3D11 设备创建失败: " + error);
     return 77;
   }
+  ID3D11Device* native_device = device.device();
+#else
+  ID3D11Device* native_device = nullptr;
+#endif
 
   lapian::media::MediaSession session;
-  Check(!session.Open("Z:\\missing\\no-such-video.mp4", device.device(), &error),
+  Check(!session.Open("Z:\\missing\\no-such-video.mp4", native_device, &error),
         "不存在的文件打开失败");
   Check(!session.IsOpen(), "失败后会话未打开");
   Check(!error.empty(), "失败后有错误信息");
@@ -55,19 +62,19 @@ int main() {
     return g_failures == 0 ? 77 : 1;
   }
 
-  Check(session.Open("media/V9.mp4", device.device(), &error), "打开 V9");
+  Check(session.Open("media/V9.mp4", native_device, &error), "打开 V9");
   Check(session.IsOpen(), "V9 会话已打开");
   Check(session.info().video.width == 1920 && session.info().video.height == 1080,
         "V9 元数据 1080p");
   Check(session.first_frame().av_frame != nullptr, "V9 首帧可用");
 
-  Check(!session.Open("Z:\\missing\\no-such-video.mp4", device.device(), &error),
+  Check(!session.Open("Z:\\missing\\no-such-video.mp4", native_device, &error),
         "已有会话时打开不存在文件失败");
   Check(session.IsOpen(), "失败后旧会话仍打开");
   Check(session.info().video.width == 1920, "失败后旧元数据保留");
 
   if (FileExists("media/proxy/proxy-V1.mp4")) {
-    Check(session.Open("media/proxy/proxy-V1.mp4", device.device(), &error), "切换到 proxy-V1");
+    Check(session.Open("media/proxy/proxy-V1.mp4", native_device, &error), "切换到 proxy-V1");
     Check(session.path_utf8().find("proxy-V1") != std::string::npos, "切到新路径");
     Check(session.info().video.width == 1920, "新会话 1080p");
   }

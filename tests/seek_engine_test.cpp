@@ -15,7 +15,9 @@ extern "C" {
 
 #include "media/FrameIndex.h"
 #include "media/SeekEngine.h"
+#ifdef _WIN32
 #include "platform/gfx/D3D11Device.h"
+#endif
 
 namespace {
 
@@ -64,7 +66,7 @@ bool CheckFrame(lapian::media::SeekEngine& engine, const lapian::media::FrameInd
   return exact;
 }
 
-void TestFile(lapian::gfx::D3D11Device& device, const std::string& path,
+void TestFile(ID3D11Device* device, const std::string& path,
               const std::vector<std::int64_t>& frames, const std::string& label) {
   if (!FileExists(path)) {
     Skip(path + " 不存在");
@@ -79,7 +81,7 @@ void TestFile(lapian::gfx::D3D11Device& device, const std::string& path,
   Check(index.IsReliable(), label + " 索引可靠");
 
   lapian::media::SeekEngine engine;
-  if (!engine.Open(path, -1, device.device(), true, &error)) {
+  if (!engine.Open(path, -1, device, true, &error)) {
     Check(false, label + " 打开 seek 解码器: " + error);
     return;
   }
@@ -110,7 +112,7 @@ void TestFile(lapian::gfx::D3D11Device& device, const std::string& path,
   std::printf("       %s 20 随机帧 max=%.2fms\n", label.c_str(), max_ms);
 }
 
-void TestFallback(lapian::gfx::D3D11Device& device) {
+void TestFallback(ID3D11Device* device) {
   const std::string path = "media/V9.mp4";
   if (!FileExists(path)) {
     Skip("V9 不存在，跳过低可靠降级");
@@ -128,7 +130,7 @@ void TestFallback(lapian::gfx::D3D11Device& device) {
   Check(!index.IsReliable(), "连续偏差后索引不可靠");
 
   lapian::media::SeekEngine engine;
-  if (!engine.Open(path, -1, device.device(), true, &error)) {
+  if (!engine.Open(path, -1, device, true, &error)) {
     Check(false, "fallback 打开解码器: " + error);
     return;
   }
@@ -142,19 +144,24 @@ int main() {
   av_log_set_level(AV_LOG_ERROR);
   std::printf("T2.3 精确 seek 测试\n");
 
-  lapian::gfx::D3D11Device device;
   std::string error;
+#ifdef _WIN32
+  lapian::gfx::D3D11Device device;
   if (!device.Create(&error)) {
     Skip("D3D11 设备创建失败: " + error);
     return 77;
   }
+  ID3D11Device* native_device = device.device();
+#else
+  ID3D11Device* native_device = nullptr;
+#endif
 
-  TestFile(device, "media/V9.mp4", {0, 1, 24, 59, 100, 119}, "V9");
-  TestFile(device, "media/proxy/proxy-V1.mp4", {0, 1, 24, 100, 359, 719}, "proxy-V1");
-  TestFile(device, "media/测试.mp4", {0, 1, 100, 1000, 3000, 4572}, "real-1080p30");
-  TestFile(device, "build/test-media/real-gop2s-full.mp4", {0, 1, 100, 1000, 3000, 4572},
+  TestFile(native_device, "media/V9.mp4", {0, 1, 24, 59, 100, 119}, "V9");
+  TestFile(native_device, "media/proxy/proxy-V1.mp4", {0, 1, 24, 100, 359, 719}, "proxy-V1");
+  TestFile(native_device, "media/测试.mp4", {0, 1, 100, 1000, 3000, 4572}, "real-1080p30");
+  TestFile(native_device, "build/test-media/real-gop2s-full.mp4", {0, 1, 100, 1000, 3000, 4572},
            "2s-GOP");
-  TestFallback(device);
+  TestFallback(native_device);
 
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);

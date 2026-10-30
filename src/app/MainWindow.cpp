@@ -1522,18 +1522,19 @@ void MainWindow::ShowShellHelp() {
 }
 
 MainWindow::~MainWindow() {
+  if (QCoreApplication::instance() != nullptr) {
+    QObject::disconnect(qApp, nullptr, this, nullptr);
+    QCoreApplication::instance()->removeEventFilter(this);
+  }
   // T8.6：兜底关闭在线下载/reader（正常关窗已在 closeEvent 里做过）。
   if (online_mode_ || online_) {
     ShutdownOnlineSession(true);
   }
   // T7.1：先取消并 join 索引线程（每包检查取消，通常毫秒级返回），再释放会话。
   CancelIndexBuild();
-  // 先落盘设置（不等待截图/标记），再停掉可能还在跑的步进连发并摘掉应用级过滤器。
+  // 先落盘设置（不等待截图/标记），再停掉可能还在跑的步进连发。
   FlushSettings();
   StopStepRepeat("shutdown");
-  if (QCoreApplication::instance() != nullptr) {
-    QCoreApplication::instance()->removeEventFilter(this);
-  }
   // 再等工作线程结束，最后释放它可能引用的解码器/帧资源。
   if (snapshots_ != nullptr) {
     snapshots_->Drain();
@@ -3491,7 +3492,7 @@ bool MainWindow::ApplyOnlineReady(const lapian::app::OnlineReadyInfo& info) {
     return ApplyOnlineCacheHit(info);
   }
   if (!info.source || info.part_path.isEmpty() || gfx_ == nullptr ||
-      gfx_->d3d_device() == nullptr) {
+      !gfx_->IsReady()) {
     online_last_error_ = QStringLiteral("在线首帧打开缺少数据源/图形设备");
     statusBar()->showMessage(online_last_error_, 8000);
     ready_step("early_no_source");
@@ -5891,7 +5892,7 @@ void MainWindow::OpenLocalMedia(const QString& path,
   }
   }  // online == nullptr：本地路径的预检/权限提示
   CancelPendingMarkJump();
-  if (gfx_ == nullptr || gfx_->d3d_device() == nullptr) {
+  if (gfx_ == nullptr || !gfx_->IsReady()) {
     ShowOpenError(QStringLiteral("图形设备未就绪，无法打开视频"));
     return;
   }

@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QVector>
 
@@ -140,10 +141,20 @@ QString UniqueKey(const QString& seed, int index) {
 void TestDefaults(const QString& temp) {
   const QString default_root = CacheStore::DefaultRoot();
   const QString default_records = CacheManager::DefaultRecordsRoot();
+#ifdef _WIN32
   Check(CacheManager::IsPathInside(default_root, qEnvironmentVariable("LOCALAPPDATA")),
         "default-root-under-localappdata", default_root);
   Check(CacheManager::IsPathInside(default_records, qEnvironmentVariable("APPDATA")),
         "default-records-under-appdata", default_records);
+#else
+  Check(CacheManager::IsPathInside(
+            default_root, QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)),
+        "default-root-under-cache", default_root);
+  Check(default_records == CacheManager::DefaultRecordsRootFor(
+                               QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)) &&
+            !default_records.contains(QStringLiteral("拉片软件/拉片软件")),
+        "default-records-under-appdata-no-duplicate", default_records);
+#endif
   Check(!CacheManager::IsPathInside(default_root, QDir::currentPath()),
         "default-root-not-workspace", default_root);
   Check(!CacheManager::IsPathInside(default_records, QDir::currentPath()),

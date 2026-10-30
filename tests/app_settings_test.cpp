@@ -273,9 +273,15 @@ void TestStore() {
   const QString default_root = SettingsStore::DefaultRootDir();
   Check(QFileInfo(default_root).isAbsolute(), "default-root-absolute");
   Check(default_root.endsWith(QStringLiteral("拉片软件")), "default-root-name");
+#ifdef _WIN32
   Check(QDir::fromNativeSeparators(default_root)
             .contains(QStringLiteral("AppData/Roaming"), Qt::CaseInsensitive),
         "default-root-under-appdata-roaming");
+#else
+  Check(QDir::fromNativeSeparators(default_root)
+            .contains(QStringLiteral("Library/Application Support"), Qt::CaseInsensitive),
+        "default-root-under-application-support");
+#endif
   Check(SettingsLoadStatusName(SettingsLoadStatus::kMissing) ==
             QStringLiteral("missing"),
         "status-name-missing");

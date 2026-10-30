@@ -5,12 +5,12 @@ project(lapian
   DESCRIPTION "拉片软件 — 帧级参考片审阅器（T0.1 骨架）"
   LANGUAGES CXX)
 
-if(NOT WIN32)
-  message(FATAL_ERROR "拉片软件仅支持 Windows。")
+if(NOT WIN32 AND NOT APPLE)
+  message(FATAL_ERROR "拉片软件目前支持 Windows 与 macOS。")
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-  message(FATAL_ERROR "仅支持 x64 构建。")
+  message(FATAL_ERROR "仅支持 64 位构建。")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -24,6 +24,9 @@ option(LAPIAN_WARNINGS_AS_ERRORS "把编译警告当作错误" OFF)
 
 include(CompilerOptions)
 include(Dependencies)
+if(APPLE)
+  include(MacDependencies)
+endif()
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets)
 qt_standard_project_setup(REQUIRES 6.8)

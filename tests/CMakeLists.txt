@@ -69,12 +69,14 @@ set_tests_properties(lapian_path_probe_test PROPERTIES
 
 # T8.1 在线解析：BV/URL 归一化、view JSON、错误码、非法 0 请求、取消；
 # WinHttpClient 用本机慢服务器验证成功/超时/取消 ≤100ms/无 Cookie 头。
-add_executable(lapian_online_resolve_test online_resolve_test.cpp)
-lapian_apply_common_options(lapian_online_resolve_test)
-target_link_libraries(lapian_online_resolve_test PRIVATE lapian_online ws2_32)
-add_test(NAME lapian_online_resolve_test COMMAND lapian_online_resolve_test)
-set_tests_properties(lapian_online_resolve_test PROPERTIES
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+if(WIN32)
+  add_executable(lapian_online_resolve_test online_resolve_test.cpp)
+  lapian_apply_common_options(lapian_online_resolve_test)
+  target_link_libraries(lapian_online_resolve_test PRIVATE lapian_online ws2_32)
+  add_test(NAME lapian_online_resolve_test COMMAND lapian_online_resolve_test)
+  set_tests_properties(lapian_online_resolve_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
 
 # T8.2 凭据/nav：DPAPI 往返/无明文/损坏回退/清除、SESSDATA 校验、
 # nav 成功/-101/412/429/超时/取消/脱敏、Cookie 只允许 API host。
@@ -178,16 +180,18 @@ set_tests_properties(lapian_online_frame_rate_test PROPERTIES
 # URL 过期刷新/刷新失败/API 错误矩阵/真实 WinHTTP 4.5s 超时/网络无响应看门狗/
 # 缓存损坏自动重建/磁盘不足/DASH 单流失败/关闭阻塞/日志脱敏/4 读者并发。
 # 全部注入（fake HTTP/transport + 本机 127.0.0.1 静默服务器），不联网、无 GUI。
-add_executable(lapian_online_fault_test
-  online_fault_test.cpp
-  ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.cpp
-  ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.h)
-lapian_apply_common_options(lapian_online_fault_test)
-target_link_libraries(lapian_online_fault_test PRIVATE lapian_online lapian::ffmpeg ws2_32)
-lapian_copy_ffmpeg_dlls(lapian_online_fault_test)
-add_test(NAME lapian_online_fault_test COMMAND lapian_online_fault_test)
-set_tests_properties(lapian_online_fault_test PROPERTIES
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+if(WIN32)
+  add_executable(lapian_online_fault_test
+    online_fault_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/OnlineSession.h)
+  lapian_apply_common_options(lapian_online_fault_test)
+  target_link_libraries(lapian_online_fault_test PRIVATE lapian_online lapian::ffmpeg ws2_32)
+  lapian_copy_ffmpeg_dlls(lapian_online_fault_test)
+  add_test(NAME lapian_online_fault_test COMMAND lapian_online_fault_test)
+  set_tests_properties(lapian_online_fault_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
 
 # T8.11 渐进索引/波形：真实 OB-3 缓存按 256KB 受控增长（等价 1–2MB/s），
 # 验证只扫已发布前缀/stable 单调/前缀 PTS 不变/30s 覆盖/完成精确/读字节比；
@@ -241,15 +245,17 @@ set_tests_properties(lapian_video_decoder_test PROPERTIES
   SKIP_RETURN_CODE 77)
 
 # T1.3 离屏渲染测试：D3D11 RTV 回读，不建窗口。
-add_executable(lapian_video_renderer_test video_renderer_test.cpp)
-lapian_apply_common_options(lapian_video_renderer_test)
-target_link_libraries(lapian_video_renderer_test PRIVATE lapian_core lapian_media)
-lapian_copy_ffmpeg_dlls(lapian_video_renderer_test)
+if(WIN32)
+  add_executable(lapian_video_renderer_test video_renderer_test.cpp)
+  lapian_apply_common_options(lapian_video_renderer_test)
+  target_link_libraries(lapian_video_renderer_test PRIVATE lapian_core lapian_media)
+  lapian_copy_ffmpeg_dlls(lapian_video_renderer_test)
 
-add_test(NAME lapian_video_renderer_test COMMAND lapian_video_renderer_test)
-set_tests_properties(lapian_video_renderer_test PROPERTIES
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-  SKIP_RETURN_CODE 77)
+  add_test(NAME lapian_video_renderer_test COMMAND lapian_video_renderer_test)
+  set_tests_properties(lapian_video_renderer_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    SKIP_RETURN_CODE 77)
+endif()
 
 # T1.4 媒体会话切换：失败保留旧会话。
 add_executable(lapian_media_session_test media_session_test.cpp)

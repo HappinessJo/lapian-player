@@ -32,8 +32,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#endif
 
 namespace lapian::app {
 namespace {

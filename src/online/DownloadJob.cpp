@@ -11,11 +11,7 @@
 #include <cstring>
 #include <limits>
 
-#include <windows.h>
-
-extern "C" {
-#include <libavutil/error.h>
-}
+#include "online/NativeFile.h"
 
 namespace lapian::online {
 namespace {
@@ -26,54 +22,6 @@ std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              Clock::now().time_since_epoch())
       .count();
-}
-
-QString ToExtendedPath(const QString& path) {
-  QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
-  if (native.startsWith(QStringLiteral("\\\\?\\"))) {
-    return native;
-  }
-  if (native.startsWith(QStringLiteral("\\\\"))) {
-    return QStringLiteral("\\\\?\\UNC\\") + native.mid(2);
-  }
-  return QStringLiteral("\\\\?\\") + native;
-}
-
-QString Win32ErrorText(DWORD code) {
-  wchar_t* buffer = nullptr;
-  const DWORD length = FormatMessageW(
-      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-          FORMAT_MESSAGE_IGNORE_INSERTS,
-      nullptr, code, 0, reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
-  QString text;
-  if (length > 0 && buffer != nullptr) {
-    text = QString::fromWCharArray(buffer, static_cast<int>(length)).trimmed();
-  }
-  if (buffer != nullptr) {
-    LocalFree(buffer);
-  }
-  if (text.isEmpty()) {
-    text = QStringLiteral("Win32 %1").arg(code);
-  }
-  return text;
-}
-
-int AvErrorFromWin32(DWORD code) {
-  switch (code) {
-    case ERROR_DISK_FULL:
-    case ERROR_HANDLE_DISK_FULL:
-      return AVERROR(ENOSPC);
-    case ERROR_ACCESS_DENIED:
-    case ERROR_WRITE_PROTECT:
-      return AVERROR(EACCES);
-    case ERROR_NOT_ENOUGH_MEMORY:
-    case ERROR_OUTOFMEMORY:
-      return AVERROR(ENOMEM);
-    case ERROR_OPERATION_ABORTED:
-      return AVERROR(ECANCELED);
-    default:
-      return AVERROR(EIO);
-  }
 }
 
 }  // namespace
@@ -199,41 +147,34 @@ bool DownloadJob::Start(QString* error) {
                     .arg(total_));
   }
 
-  const std::wstring wide = ToExtendedPath(part_path_).toStdWString();
-  HANDLE handle =
-      CreateFileW(wide.c_str(), GENERIC_WRITE,
-                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                  FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (handle == INVALID_HANDLE_VALUE) {
-    const DWORD code = GetLastError();
-    return fail(QStringLiteral("无法打开缓存写入句柄：%1").arg(Win32ErrorText(code)));
+  const native_file::Handle handle = native_file::OpenForWrite(part_path_);
+  if (handle == native_file::kInvalid) {
+    return fail(QStringLiteral("无法打开缓存写入句柄：%1")
+                    .arg(native_file::ErrorText(native_file::LastError())));
   }
-  LARGE_INTEGER file_size{};
-  if (GetFileSizeEx(handle, &file_size) == FALSE) {
-    const DWORD code = GetLastError();
-    CloseHandle(handle);
+  std::int64_t file_size = 0;
+  if (!native_file::Size(handle, &file_size)) {
+    const int code = native_file::LastError();
+    native_file::Close(handle);
     return fail(QStringLiteral("无法读取缓存文件长度：%1")
-                    .arg(Win32ErrorText(code)));
+                    .arg(native_file::ErrorText(code)));
   }
-  if (file_size.QuadPart != existing_) {
-    // .part 长度是唯一真相；OpenPart 与句柄看到不同长度时按句柄校正。
-    existing_ = file_size.QuadPart;
+  if (file_size != existing_) {
+    existing_ = file_size;
     if (existing_ > total_) {
-      CloseHandle(handle);
+      native_file::Close(handle);
       return fail(QStringLiteral("缓存文件长度异常（%1 > %2 字节）")
                       .arg(existing_)
                       .arg(total_));
     }
   }
-  LARGE_INTEGER offset{};
-  offset.QuadPart = existing_;
-  if (SetFilePointerEx(handle, offset, nullptr, FILE_BEGIN) == FALSE) {
-    const DWORD code = GetLastError();
-    CloseHandle(handle);
+  if (!native_file::Seek(handle, existing_)) {
+    const int code = native_file::LastError();
+    native_file::Close(handle);
     return fail(QStringLiteral("无法定位缓存写入位置：%1")
-                    .arg(Win32ErrorText(code)));
+                    .arg(native_file::ErrorText(code)));
   }
-  write_handle_ = reinterpret_cast<std::intptr_t>(handle);
+  write_handle_ = handle;
   written_ = existing_;
 
   // playurl 元数据写 meta（失败不阻塞下载；meta 缺失可由 Load 自愈）。
@@ -458,16 +399,14 @@ void DownloadJob::Run() {
       // 没有 reader 时 truncate；已有 reader 时原地覆盖（避免短读被当作 EIO）。
       SetStats([](DownloadStats* stats) { stats->range_ignored = true; });
       const bool no_readers = source_->Stats().live_cursors == 0;
-      LARGE_INTEGER zero{};
-      if (SetFilePointerEx(reinterpret_cast<HANDLE>(write_handle_), zero,
-                           nullptr, FILE_BEGIN) == FALSE) {
-        FinishFailed(AvErrorFromWin32(GetLastError()),
+      if (!native_file::Seek(write_handle_, 0)) {
+        FinishFailed(native_file::AvError(native_file::LastError()),
                      QStringLiteral("无法重置缓存写入位置"));
         return;
       }
       if (no_readers) {
-        if (SetEndOfFile(reinterpret_cast<HANDLE>(write_handle_)) == FALSE) {
-          FinishFailed(AvErrorFromWin32(GetLastError()),
+        if (!native_file::Truncate(write_handle_)) {
+          FinishFailed(native_file::AvError(native_file::LastError()),
                        QStringLiteral("无法截断缓存文件"));
           return;
         }
@@ -633,32 +572,29 @@ bool DownloadJob::WritePart(const std::uint8_t* data, std::size_t size,
     }
     return false;
   }
-  HANDLE handle = reinterpret_cast<HANDLE>(write_handle_);
-  if (handle == INVALID_HANDLE_VALUE || handle == nullptr) {
+  const native_file::Handle handle = write_handle_;
+  if (handle == native_file::kInvalid) {
     sink_av_error_ = AVERROR(EIO);
     if (error != nullptr) {
       *error = QStringLiteral("缓存写入句柄不可用");
     }
     return false;
   }
-  LARGE_INTEGER position{};
-  position.QuadPart = offset;
-  if (SetFilePointerEx(handle, position, nullptr, FILE_BEGIN) == FALSE) {
-    const DWORD code = GetLastError();
-    sink_av_error_ = AvErrorFromWin32(code);
+  if (!native_file::Seek(handle, offset)) {
+    const int code = native_file::LastError();
+    sink_av_error_ = native_file::AvError(code);
     if (error != nullptr) {
       *error = QStringLiteral("无法定位缓存写入位置：%1")
-                   .arg(Win32ErrorText(code));
+                   .arg(native_file::ErrorText(code));
     }
     return false;
   }
-  DWORD written = 0;
-  if (WriteFile(handle, data, static_cast<DWORD>(size), &written, nullptr) ==
-      FALSE) {
-    const DWORD code = GetLastError();
-    sink_av_error_ = AvErrorFromWin32(code);
+  std::size_t written = 0;
+  if (!native_file::Write(handle, data, size, &written)) {
+    const int code = native_file::LastError();
+    sink_av_error_ = native_file::AvError(code);
     if (error != nullptr) {
-      *error = QStringLiteral("写入缓存失败：%1").arg(Win32ErrorText(code));
+      *error = QStringLiteral("写入缓存失败：%1").arg(native_file::ErrorText(code));
     }
     return false;
   }
@@ -689,9 +625,8 @@ bool DownloadJob::WritePart(const std::uint8_t* data, std::size_t size,
   // 必须先写盘再发布：reader 只读 Published 以内的字节。
   source_->Publish(updated);
 
-  LARGE_INTEGER file_size{};
-  if (GetFileSizeEx(handle, &file_size) == FALSE ||
-      file_size.QuadPart < updated) {
+  std::int64_t file_size = 0;
+  if (!native_file::Size(handle, &file_size) || file_size < updated) {
     sink_av_error_ = AVERROR(EIO);
     if (error != nullptr) {
       *error = QStringLiteral("缓存文件长度小于已发布字节");
@@ -785,10 +720,10 @@ void DownloadJob::CloseWriteHandle() {
   if (write_handle_ == -1) {
     return;
   }
-  HANDLE handle = reinterpret_cast<HANDLE>(write_handle_);
+  const native_file::Handle handle = write_handle_;
   write_handle_ = -1;
-  FlushFileBuffers(handle);
-  CloseHandle(handle);
+  native_file::Flush(handle);
+  native_file::Close(handle);
 }
 
 void DownloadJob::FinishCompleted() {

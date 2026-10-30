@@ -46,13 +46,19 @@ void TestLocalProbe() {
   using lapian::media::ProbePathWithTimeout;
 
   const auto existing_started = std::chrono::steady_clock::now();
-  const PathProbeResult existing = ProbePathWithTimeout("media\\V9.mp4", 2000);
+#ifdef _WIN32
+  const std::string existing_path = "media\\V9.mp4";
+  const std::string missing_path = "build\\t7.5-pathprobe-missing.mp4";
+#else
+  const std::string existing_path = "media/macos-smoke.mp4";
+  const std::string missing_path = "build/t7.5-pathprobe-missing.mp4";
+#endif
+  const PathProbeResult existing = ProbePathWithTimeout(existing_path, 2000);
   const double existing_ms = ElapsedMs(existing_started);
   Check(existing.status == PathProbeStatus::kReachable, "本地已存在文件可达");
   Check(existing_ms < 2000.0, "本地已存在文件不等待超时");
 
-  const PathProbeResult missing =
-      ProbePathWithTimeout("build\\t7.5-pathprobe-missing.mp4", 2000);
+  const PathProbeResult missing = ProbePathWithTimeout(missing_path, 2000);
   Check(missing.status == PathProbeStatus::kMissing, "本地缺失文件报告 missing");
   Check(missing.elapsed_ms < 2000.0, "本地缺失文件快速返回");
   Check(!missing.message.empty(), "缺失文件有可读提示");

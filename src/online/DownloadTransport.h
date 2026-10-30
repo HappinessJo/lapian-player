@@ -95,7 +95,8 @@ class IDownloadTransport {
                                            const HttpCancelToken& cancel) = 0;
 };
 
-// Windows 产品栈：动态加载 WinHTTP；异步读取 + 工作线程轮询取消。
+// Windows 产品栈：动态加载 WinHTTP；macOS 使用 libcurl。
+#ifdef _WIN32
 class WinHttpDownloadTransport final : public IDownloadTransport {
  public:
   WinHttpDownloadTransport() = default;
@@ -108,5 +109,19 @@ class WinHttpDownloadTransport final : public IDownloadTransport {
   // 测试/证据：winhttp.dll 是否已被本进程动态加载。
   static bool LibraryLoadedForTest();
 };
+#else
+class CurlDownloadTransport final : public IDownloadTransport {
+ public:
+  CurlDownloadTransport() = default;
+  ~CurlDownloadTransport() override = default;
+
+  DownloadTransportResult GetRange(const DownloadRequest& request,
+                                   IDownloadSink* sink,
+                                   const HttpCancelToken& cancel) override;
+
+  static bool LibraryLoadedForTest();
+};
+using WinHttpDownloadTransport = CurlDownloadTransport;
+#endif
 
 }  // namespace lapian::online

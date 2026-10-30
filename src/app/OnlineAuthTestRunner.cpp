@@ -148,8 +148,13 @@ void OnlineAuthTestRunner::Run() {
 
   Check(QStringLiteral("privacy-visible"), dialog_->PrivacyNoticeVisibleForTest());
   const QString privacy = dialog_->PrivacyNoticeTextForTest();
+#ifdef _WIN32
+  const QString storage_term = QStringLiteral("DPAPI");
+#else
+  const QString storage_term = QStringLiteral("钥匙串");
+#endif
   Check(QStringLiteral("privacy-text"),
-        privacy.contains(QStringLiteral("DPAPI")) &&
+        privacy.contains(storage_term) &&
             privacy.contains(QStringLiteral("api.bilibili.com")) &&
             privacy.contains(QStringLiteral("本地模式不联网")));
   Check(QStringLiteral("initial-anonymous"),

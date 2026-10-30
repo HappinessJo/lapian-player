@@ -3,6 +3,10 @@
 #include <QSize>
 #include <QWidget>
 
+#ifndef _WIN32
+#include <QImage>
+#endif
+
 #include <memory>
 
 struct AVFrame;
@@ -18,8 +22,8 @@ class SwapChain;
 class VideoRenderer;
 }  // namespace lapian::gfx
 
-// 视频区占位控件：一个带独立 HWND 的原生子表面，由 D3D11 交换链直接呈现。
-// T0.1 仅清屏；T1.3 起在这里做 NV12/P010 着色与按 display matrix 旋转。
+// 视频显示控件。Windows 使用独立 HWND / D3D11 呈现；
+// macOS 使用 Qt QImage / QPainter 绘制 FFmpeg 软件帧，保留旋转与窗口适配。
 class GfxWidget : public QWidget {
   Q_OBJECT
 
@@ -27,13 +31,14 @@ class GfxWidget : public QWidget {
   explicit GfxWidget(QWidget* parent = nullptr);
   ~GfxWidget() override;
 
-  // T1.3：把解码器的一帧复制到 GPU 并呈现；rotation 为 display matrix 的逆时针角度。
+  // 接受一帧并按 display matrix 的逆时针角度呈现；macOS 转换为 QImage。
   // DP-1：返回 false 表示上传失败（例如硬件帧来自其它设备）；预览路径据此回退
   // 软件解码，report_error=false 时不弹错误横幅（回退由预览层记录）。
   bool SetVideoFrame(const AVFrame* frame, int rotation_counterclockwise_degrees,
                      bool report_error = true);
+  bool IsReady() const;
   void ClearVideoFrame();
-  // T1.2/T1.3：解码器必须用同一个 D3D11 设备，硬件帧才能跨线程/模块拷贝。
+  // Windows 解码器必须使用同一个 D3D11 设备；macOS 软件路径返回 nullptr。
   ID3D11Device* d3d_device();
   // T6.1：交换链后备缓冲的实际像素尺寸（逻辑尺寸 × devicePixelRatio）。
   // 全屏切换后用它确认交换链跟随了控件 resize；未初始化/设备丢失时返回空。
@@ -48,8 +53,8 @@ class GfxWidget : public QWidget {
   void fullScreenToggleRequested();
   // T7.1：一帧真正走到 Present 之后发一次；用于冷启动 P2 的“首帧呈现”埋点。
   void framePresented();
-  // T8.6 后续：视频区是独立原生 HWND，Qt 窗口级 drop 会被它挡住；
-  // 在原生子窗口接受本地文件拖放后转发给 MainWindow::OpenFile。
+  // Windows 的原生 HWND 会挡住 Qt 窗口级 drop；视频控件接受本地文件拖放，
+  // 并转发给 MainWindow::OpenFile。macOS 使用同一入口。
   void localFileDropped(const QString& path);
 
  protected:
@@ -66,9 +71,15 @@ class GfxWidget : public QWidget {
   void UpdateSwapChainSize();
   void PresentFrame();
 
+#ifdef _WIN32
   std::unique_ptr<lapian::gfx::D3D11Device> device_;
   std::unique_ptr<lapian::gfx::SwapChain> swap_chain_;
   std::unique_ptr<lapian::gfx::VideoRenderer> video_renderer_;
+#else
+  QImage current_frame_;
+  int rotation_ = 0;
+  bool ready_ = false;
+#endif
   bool init_failed_ = false;
   bool device_lost_reported_ = false;
   // T7.1：SetVideoFrame 成功后置位，下一次 Present 成功时发 framePresented。

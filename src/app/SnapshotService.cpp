@@ -7,8 +7,12 @@
 #include <QImage>
 #include <QString>
 
+#ifdef _WIN32
 #include <wincodec.h>
 #include <wrl/client.h>
+#else
+#include <QBuffer>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -31,7 +35,9 @@ extern "C" {
 
 namespace {
 
+#ifdef _WIN32
 using Microsoft::WRL::ComPtr;
+#endif
 
 constexpr std::size_t kMaxQueue = 4;
 
@@ -46,9 +52,11 @@ std::string AvErrorText(int error) {
   return buffer;
 }
 
+#ifdef _WIN32
 QString HResultText(HRESULT hr) {
   return QStringLiteral("0x%1").arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0'));
 }
+#endif
 
 bool ConvertToBgra(const AVFrame* source, QImage* image, QString* error) {
   if (source == nullptr || image == nullptr) {
@@ -110,6 +118,14 @@ bool EncodePng(const QImage& image, QByteArray* output, QString* error) {
     return false;
   }
 
+#ifndef _WIN32
+  QBuffer buffer(output);
+  if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) {
+    *error = QStringLiteral("Qt PNG 编码失败");
+    return false;
+  }
+  return true;
+#else
   ComPtr<IWICImagingFactory> factory;
   HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_IWICImagingFactory,
@@ -224,6 +240,7 @@ bool EncodePng(const QImage& image, QByteArray* output, QString* error) {
   }
   output->resize(static_cast<int>(total));
   return true;
+#endif
 }
 
 }  // namespace
@@ -294,10 +311,14 @@ int SnapshotService::PendingCount() const {
 }
 
 void SnapshotService::WorkerLoop() {
+#ifdef _WIN32
   const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   const bool com_ready =
       SUCCEEDED(com_result) || com_result == RPC_E_CHANGED_MODE;
   const bool com_needs_uninit = SUCCEEDED(com_result);
+#else
+  const bool com_ready = true;
+#endif
 
   while (true) {
     Task task;
@@ -322,7 +343,9 @@ void SnapshotService::WorkerLoop() {
     qint64 encode_ms = 0;
     bool saved = false;
     if (!com_ready) {
+#ifdef _WIN32
       error = QStringLiteral("截图线程 COM 初始化失败（%1）").arg(HResultText(com_result));
+#endif
     } else {
       try {
         saved = ProcessTask(task, &path, &fallback, &error, &encode_ms,
@@ -335,9 +358,6 @@ void SnapshotService::WorkerLoop() {
       }
     }
 
-    // 先发信号再清 busy_：Drain() 返回时 snapshotSaved/snapshotFailed 已经
-    // 投递到接收线程的事件队列，调用方再 processEvents 就能确定拿到结果。
-    // 若反过来先置 idle，Drain() 可能抢在信号入队前返回（4K 编码更长时可见）。
     if (saved) {
       emit snapshotSaved(path, fallback, static_cast<qint64>(task.request.frame), encode_ms);
       if (!index_warning.isEmpty()) {
@@ -355,9 +375,11 @@ void SnapshotService::WorkerLoop() {
     idle_cv_.notify_all();
   }
 
+#ifdef _WIN32
   if (com_needs_uninit) {
     CoUninitialize();
   }
+#endif
 }
 
 bool SnapshotService::ProcessTask(const Task& task, QString* path, bool* used_fallback,

@@ -15,11 +15,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
-
 #include <dbghelp.h>
-
 #pragma comment(lib, "dbghelp.lib")
+#endif
 
 #include "app/MainWindow.h"
 #include "app/OnlineResolveDialog.h"
@@ -29,6 +29,7 @@ namespace {
 
 // T8.14：M2 门期间复现过一次未定位的 teardown 崩溃；探针进程记录符号化栈，
 // 产品不安装这个过滤器。
+#ifdef _WIN32
 LONG WINAPI M1CrashFilter(EXCEPTION_POINTERS* info) {
   static LONG handled = 0;
   if (InterlockedExchange(&handled, 1) != 0) {
@@ -69,6 +70,7 @@ LONG WINAPI M1CrashFilter(EXCEPTION_POINTERS* info) {
   }
   return EXCEPTION_EXECUTE_HANDLER;
 }
+#endif
 
 void Print(const QString& text) {
   std::fprintf(stderr, "%s\n", text.toUtf8().constData());
@@ -115,7 +117,9 @@ void OnlineM1TestRunner::Start() {
 }
 
 void OnlineM1TestRunner::Run() {
+#ifdef _WIN32
   SetUnhandledExceptionFilter(M1CrashFilter);
+#endif
   auto check = [this](const char* name, bool ok, const QString& detail = {}) {
     ++checks_;
     if (!ok) {

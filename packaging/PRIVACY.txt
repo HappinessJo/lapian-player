@@ -1,72 +1,81 @@
-﻿拉片软件 — 隐私、联网与数据位置说明
-====================================
+拉片软件 — 隐私、联网与数据位置 / Privacy, Network & Data
+==========================================================
 
-本说明适用于安装版和便携版。拉片软件不提供账号体系，不收集遥测/使用统计，
-不检查自动更新，也不上传崩溃报告。
+中文
+----
+本地模式不联网：打开本地视频、播放、逐帧、波形、标记/备注、截图、设置和退出
+不会发起网络请求。只有提交 BV/URL 或点击扫码登录时才启用在线网络栈。
 
-一、本地模式：不联网
---------------------
-打开本地视频、播放、逐帧步进、波形、标记/备注、截图、设置和退出都不发起
-网络请求。在线模块按需加载；没有输入 BV 号并确认在线打开之前，不会初始化
-在线网络栈。
+在线模式：
+- 提交 BV/URL 后访问 api.bilibili.com，读取公开元数据、播放地址、清晰度和登录状态。
+- 点击“扫码登录”才访问 passport.bilibili.com 的官方 generate/poll 接口；二维码本地渲染。
+- 视频/音频从 playurl 返回的 B 站 CDN 下载，CDN 请求不携带 SESSDATA/Cookie。
+- 不自动更新、不收集遥测、不上传崩溃报告，不批量下载，不绕过付费/DRM/地区限制。
+- Windows 使用 WinHTTP；macOS 使用 libcurl。代理行为遵循系统/运行环境。
 
-二、在线模式：只在明确操作后联网
---------------------------------
-1. 输入 BV 号或 B 站视频链接并提交后，才访问 api.bilibili.com，用于读取公开
-   元数据、播放地址、清晰度目录和登录状态（view/playurl/nav/quality 等接口）。
-2. 只有点击“扫码登录”时，才访问 passport.bilibili.com 的官方二维码接口
-   （generate/poll）；二维码在本地渲染，不加载远程图片。
-3. 视频/音频数据从 playurl 返回的 B 站 CDN 地址下载。CDN 请求不携带
-   SESSDATA/Cookie。
-4. 不访问上述主机之外的地址；不把数据上传到本项目控制的服务器。
-   网络请求由 Windows WinHTTP 发出，可能遵循系统代理设置。
+缓存：
+- Windows：%LOCALAPPDATA%\拉片软件\cache
+- macOS：~/Library/Caches/拉片软件/cache
+默认配额 20 GiB，可在设置中修改、清空或清理孤儿条目。缓存是普通文件，不含
+SESSDATA、Cookie 或签名 URL。清空缓存不删除在线标记、备注或截图；当前会话保留。
 
-三、在线缓存
-------------
-默认缓存根：%LOCALAPPDATA%\拉片软件\cache
-默认配额：20 GiB（可在“设置 — 在线缓存”中修改）。缓存按 LRU 淘汰，可在设置
-中查看占用、打开目录、清空缓存或清理孤儿条目。清空缓存不会删除在线标记/
-备注/截图；当前会话的条目会保留。
+记录与设置：
+- Windows：%APPDATA%\拉片软件\
+- macOS：~/Library/Application Support/拉片软件\
+在线记录为 online/<bvid>-<cid>.lapian.json；设置为 settings.json；本地视频标记
+默认在视频旁的 <视频名>.lapian.json，不可写时回退到上述目录的 marks。
+截图默认在“图片/拉片软件”，不可写时使用应用数据回退目录。文件只保存在本机。
 
-缓存内容是 B 站视频/音频分片和元数据（标题、UP 主、BV/cid、清晰度等），
-不包含 SESSDATA、Cookie 或签名 URL。缓存是普通本地文件，不做加密。
+登录凭据：
+- Windows 使用当前用户 DPAPI 加密，文件为 %APPDATA%\拉片软件\credentials.dat。
+- macOS 使用系统钥匙串，标记文件不含明文，路径位于上述应用数据目录。
+SESSDATA 只发送给 api.bilibili.com，不写入日志、缓存、截图或在线记录；可随时清除。
 
-如果在设置中改了缓存目录，旧目录不会自动迁移或删除；卸载程序只清理默认
-缓存目录，不会清理你自定义的缓存目录。
+清理：
+Windows 卸载器保留设置、在线记录、凭据、marks、截图和 sidecar；只有明确选择时
+才删除默认缓存。macOS 删除 App 不会自动删除上述任何数据，请按需手动清理。
+自定义缓存目录不会被卸载流程自动删除。
 
-四、在线记录、截图与设置
-------------------------
-- 在线记录（标记/备注）：%APPDATA%\拉片软件\online\<bvid>-<cid>.lapian.json
-- 设置：%APPDATA%\拉片软件\settings.json
-- 截图：%USERPROFILE%\Pictures\拉片软件\<bvid>\；图片目录不可写时回退到
-  %APPDATA%\拉片软件\online\snapshots
-- 本地视频旁的标记/备注 sidecar：与视频同目录的 <视频名>.lapian.json
-这些文件只保存在本机，不会被上传。
+许可：Qt、FFmpeg、SoundTouch 以 LGPL 动态链接；libcurl 使用 curl/X11 许可。
+完整许可、第三方清单与源码获取说明见 App 内 Contents/Resources/licenses。
 
-五、登录凭据
-------------
-登录是可选功能。只保存 SESSDATA 一项 Cookie，使用 Windows DPAPI（当前
-Windows 用户）加密，默认位置：
-%APPDATA%\拉片软件\credentials.dat
+English
+-------
+Local mode makes no network requests. Opening local videos, playback, frame stepping,
+waveforms, marks, notes, snapshots, settings and quitting do not use the network.
+The online stack is used only after you submit a BV/URL or start QR login.
 
-SESSDATA 只发送给 api.bilibili.com，不写入日志、缓存、截图或在线记录；
-可在在线打开对话框或设置中清除。清除后按未登录处理。
+Online mode:
+- Submitting a BV/URL contacts api.bilibili.com for public metadata, stream URLs,
+  quality options and login state.
+- QR login alone contacts passport.bilibili.com's official generate/poll endpoints;
+  QR images are rendered locally.
+- Media is downloaded from Bilibili CDN URLs returned by playurl without SESSDATA
+  or cookies. There is no telemetry, auto-update, crash upload, bulk downloading,
+  or bypass of payment, DRM or regional restrictions.
+- Windows uses WinHTTP; macOS uses libcurl. Proxy behavior follows the host environment.
 
-六、卸载与清理
---------------
-卸载只删除程序文件、快捷方式、开始菜单项和本软件注册的“打开方式”项。
-默认保留：
-- %APPDATA%\拉片软件（设置、在线记录、凭据、marks 回退）
-- %USERPROFILE%\Pictures\拉片软件（截图）
-- 视频旁的 sidecar 与 snapshots\
-- %LOCALAPPDATA%\拉片软件\cache（在线缓存）
+Cache:
+- Windows: %LOCALAPPDATA%\拉片软件\cache
+- macOS: ~/Library/Caches/拉片软件/cache
+The default 20 GiB quota can be changed or cleared in Settings. Cache files contain
+no SESSDATA, cookies or signed URLs. Clearing cache does not delete online marks,
+notes or snapshots, and the current session is preserved.
 
-卸载时会询问是否“同时删除在线缓存”，默认选“否”。只有明确选“是”，或静默
-卸载时显式传入 /CLEARCACHE，才会删除默认缓存目录
-%LOCALAPPDATA%\拉片软件\cache。即使清理缓存，也不会删除上面的记录、截图、
-设置、凭据、marks 或 sidecar。
+Records and settings:
+- Windows: %APPDATA%\拉片软件\
+- macOS: ~/Library/Application Support/拉片软件\
+Online records use online/<bvid>-<cid>.lapian.json; settings use settings.json.
+Local marks default to <video>.lapian.json beside the video, with a marks fallback
+in the directory above. Snapshots default to Pictures/拉片软件. Data stays local.
 
-七、许可与源码
---------------
-Qt 与 FFmpeg 以 LGPL 动态链接方式随包分发。许可全文、第三方清单和源码获取
-说明见程序目录下的 licenses\ 与 SOURCE-OFFER.md。
+Credentials:
+- Windows uses the current user's DPAPI protection in credentials.dat.
+- macOS uses the system Keychain; the marker file contains no plaintext secret.
+SESSDATA is sent only to api.bilibili.com and never written to logs, cache, snapshots
+or online records. It can be cleared at any time.
+
+Cleanup:
+The Windows uninstaller preserves settings, records, credentials, marks, snapshots
+and sidecars; cache is removed only after an explicit choice. On macOS, deleting
+the app deletes none of these data. Custom cache directories are not auto-removed.

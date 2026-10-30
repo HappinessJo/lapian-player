@@ -17,7 +17,13 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace lapian::online {
 namespace {
@@ -40,6 +46,7 @@ QString InvalidReasonFor(std::int64_t size) {
       .arg(size);
 }
 
+#ifdef _WIN32
 QString Win32ErrorText(DWORD code) {
   wchar_t* buffer = nullptr;
   const DWORD length = FormatMessageW(
@@ -59,7 +66,6 @@ QString Win32ErrorText(DWORD code) {
   return text;
 }
 
-// 长路径统一加 \\?\；缓存路径可能超过 MAX_PATH（T8.3 已验 301+ 字符）。
 QString ToExtendedPath(const QString& path) {
   QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
   if (native.startsWith(QStringLiteral("\\\\?\\"))) {
@@ -70,6 +76,7 @@ QString ToExtendedPath(const QString& path) {
   }
   return QStringLiteral("\\\\?\\") + native;
 }
+#endif
 
 }  // namespace
 
@@ -306,6 +313,9 @@ std::unique_ptr<GrowingCursor> GrowingCursor::Open(
     return fail(QStringLiteral("可增长读层没有数据文件路径"));
   }
 
+  std::intptr_t native_handle = -1;
+  std::int64_t native_size = 0;
+#ifdef _WIN32
   const QString native = ToExtendedPath(file_path);
   const std::wstring wide = native.toStdWString();
   HANDLE handle = CreateFileW(
@@ -314,40 +324,69 @@ std::unique_ptr<GrowingCursor> GrowingCursor::Open(
   if (handle == INVALID_HANDLE_VALUE) {
     const DWORD code = GetLastError();
     return fail(QStringLiteral("无法打开缓存文件：%1（Win32 %2：%3）")
-                    .arg(file_path, QString::number(code),
-                         Win32ErrorText(code)));
+                    .arg(file_path, QString::number(code), Win32ErrorText(code)));
   }
-
   LARGE_INTEGER file_size{};
   if (GetFileSizeEx(handle, &file_size) == FALSE) {
     const DWORD code = GetLastError();
     CloseHandle(handle);
     return fail(QStringLiteral("无法读取缓存文件长度：%1（Win32 %2：%3）")
-                    .arg(file_path, QString::number(code),
-                         Win32ErrorText(code)));
+                    .arg(file_path, QString::number(code), Win32ErrorText(code)));
   }
+  native_handle = reinterpret_cast<std::intptr_t>(handle);
+  native_size = file_size.QuadPart;
+#else
+  const QByteArray path = QFile::encodeName(file_path);
+  const int handle = ::open(path.constData(), O_RDONLY);
+  if (handle < 0) {
+    return fail(QStringLiteral("无法打开缓存文件：%1（%2）")
+                    .arg(file_path, QString::fromLocal8Bit(std::strerror(errno))));
+  }
+  if (::flock(handle, LOCK_SH | LOCK_NB) != 0) {
+    const int code = errno;
+    ::close(handle);
+    return fail(QStringLiteral("无法锁定缓存读句柄：%1（%2）")
+                    .arg(file_path, QString::fromLocal8Bit(std::strerror(code))));
+  }
+  struct stat info {};
+  if (::fstat(handle, &info) != 0) {
+    const int code = errno;
+    ::close(handle);
+    return fail(QStringLiteral("无法读取缓存文件长度：%1（%2）")
+                    .arg(file_path, QString::fromLocal8Bit(std::strerror(code))));
+  }
+  native_handle = handle;
+  native_size = info.st_size;
+#endif
 
   // Publish 必须在写盘之后：已发布前缀不得超前于实际文件长度。
   const std::int64_t published = source->Published();
-  if (published > file_size.QuadPart) {
-    CloseHandle(handle);
+  if (published > native_size) {
+#ifdef _WIN32
+    CloseHandle(reinterpret_cast<HANDLE>(native_handle));
+#else
+    ::close(static_cast<int>(native_handle));
+#endif
     return fail(QStringLiteral(
                     "可增长读层状态异常：已发布 %1 字节，但文件只有 %2 字节"
                     "（Publish 必须先写盘）")
                     .arg(published)
-                    .arg(file_size.QuadPart));
+                    .arg(native_size));
   }
 
   auto* buffer = static_cast<unsigned char*>(av_malloc(kGrowingAvioBufferBytes));
   if (buffer == nullptr) {
-    CloseHandle(handle);
+#ifdef _WIN32
+    CloseHandle(reinterpret_cast<HANDLE>(native_handle));
+#else
+    ::close(static_cast<int>(native_handle));
+#endif
     return fail(QStringLiteral("内存不足：无法分配 %1 字节 AVIO 缓冲")
                     .arg(kGrowingAvioBufferBytes));
   }
 
   auto cursor = std::unique_ptr<GrowingCursor>(
-      new GrowingCursor(std::move(source),
-                        reinterpret_cast<std::intptr_t>(handle), file_path));
+      new GrowingCursor(std::move(source), native_handle, file_path));
   cursor->avio_ = avio_alloc_context(
       buffer, kGrowingAvioBufferBytes, 0, cursor.get(), &GrowingCursor::ReadThunk,
       nullptr, &GrowingCursor::SeekThunk);
@@ -493,6 +532,7 @@ int GrowingCursor::Read(std::uint8_t* buffer, int buffer_size) {
   }
 
   const std::int64_t want = cap;
+#ifdef _WIN32
   LARGE_INTEGER offset{};
   offset.QuadPart = pos;
   if (SetFilePointerEx(reinterpret_cast<HANDLE>(handle_), offset, nullptr,
@@ -505,17 +545,25 @@ int GrowingCursor::Read(std::uint8_t* buffer, int buffer_size) {
     return AVERROR(EIO);
   }
   if (read != static_cast<DWORD>(want)) {
-    // 未到 Size() 却读到短/0 字节：文件被截断/状态异常，不能返回 EOF 或半包。
     return AVERROR(EIO);
   }
+  const std::int64_t bytes_read = static_cast<std::int64_t>(read);
+#else
+  const ssize_t read = ::pread(static_cast<int>(handle_), buffer,
+                               static_cast<std::size_t>(want), static_cast<off_t>(pos));
+  if (read != want) {
+    return AVERROR(EIO);
+  }
+  const std::int64_t bytes_read = static_cast<std::int64_t>(read);
+#endif
 
-  pos_ += static_cast<std::int64_t>(read);
+  pos_ += bytes_read;
   ++stats_.reads;
-  stats_.read_bytes += static_cast<std::int64_t>(read);
+  stats_.read_bytes += bytes_read;
   if (pos_ > stats_.max_read_end) {
     stats_.max_read_end = pos_;
   }
-  return static_cast<int>(read);
+  return static_cast<int>(bytes_read);
 }
 
 std::int64_t GrowingCursor::Seek(std::int64_t offset, int whence) {
@@ -579,7 +627,11 @@ void GrowingCursor::Close() {
     avio_context_free(&avio_);
   }
   if (handle_ != -1) {
+#ifdef _WIN32
     CloseHandle(reinterpret_cast<HANDLE>(handle_));
+#else
+    ::close(static_cast<int>(handle_));
+#endif
     handle_ = -1;
   }
   if (source_) {

@@ -1,6 +1,8 @@
 #include "media/VideoDecoder.h"
 
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -22,7 +24,9 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#ifdef _WIN32
 #include <libavutil/hwcontext_d3d11va.h>
+#endif
 #include <libavutil/mathematics.h>
 #include <libavutil/pixdesc.h>
 }
@@ -44,6 +48,7 @@ std::string AvErrorText(int error) {
   return buffer;
 }
 
+#ifdef _WIN32
 AVPixelFormat SelectHardwareFormat(AVCodecContext* context, const AVPixelFormat* formats) {
   (void)context;
   if (formats == nullptr) {
@@ -56,6 +61,7 @@ AVPixelFormat SelectHardwareFormat(AVCodecContext* context, const AVPixelFormat*
   }
   return formats[0];
 }
+#endif
 
 int ReadBitDepth(const AVCodecParameters* parameters) {
   int depth = 8;
@@ -162,6 +168,9 @@ struct VideoDecoder::Impl {
       *error = "媒体上下文为空";
       return false;
     }
+#ifndef _WIN32
+    prefer_hardware = false;
+#endif
     int selected = stream_index;
     if (selected < 0) {
       for (unsigned int i = 0; i < input_format->nb_streams; ++i) {
@@ -221,6 +230,7 @@ struct VideoDecoder::Impl {
                 : (small_frame ? 32 : 0);
       }
 
+#ifdef _WIN32
       if (hardware) {
         AVBufferRef* device = nullptr;
         if (shared_d3d11_device != nullptr) {
@@ -229,8 +239,6 @@ struct VideoDecoder::Impl {
             auto* hw_device = reinterpret_cast<AVHWDeviceContext*>(device->data);
             auto* d3d11_device =
                 reinterpret_cast<AVD3D11VADeviceContext*>(hw_device->hwctx);
-            // FFmpeg 的 hwdevice 释放路径会 Release 这个设备；先加引用，
-            // 避免把渲染器/窗口持有的设备提前释放。
             shared_d3d11_device->AddRef();
             d3d11_device->device = shared_d3d11_device;
             if (av_hwdevice_ctx_init(device) < 0) {
@@ -259,6 +267,10 @@ struct VideoDecoder::Impl {
         }
         context->get_format = SelectHardwareFormat;
       }
+#else
+      (void)hardware;
+      (void)shared_d3d11_device;
+#endif
 
       if (avcodec_open2(context, codec, nullptr) < 0) {
         avcodec_free_context(&context);
@@ -527,10 +539,14 @@ bool VideoDecoder::OpenWithD3D11Device(const std::string& utf8_path, int video_s
     device_lock.lock();
   }
   error->clear();
+#ifdef _WIN32
   if (prefer_hardware && d3d11_device == nullptr) {
     *error = "硬件解码需要与渲染器共用的 D3D11 设备";
     return false;
   }
+#else
+  (void)d3d11_device;
+#endif
   impl_->Close();
   impl_->path = utf8_path;
   impl_->requested_stream = video_stream_index;

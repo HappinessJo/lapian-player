@@ -1,5 +1,6 @@
 #include "app/OnlineSession.h"
 
+#include <QElapsedTimer>
 #include <QMetaObject>
 #include <QTimer>
 

@@ -1,4 +1,5 @@
 #include "online/CacheManager.h"
+#include "core/AppDataPaths.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -17,16 +18,7 @@ QString FromUtf8Path(const QString& path) {
   return QDir::fromNativeSeparators(QDir::cleanPath(path));
 }
 
-QString AppDataFallback() {
-  QString appdata = qEnvironmentVariable("APPDATA");
-  if (appdata.isEmpty()) {
-    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  }
-  if (appdata.isEmpty()) {
-    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-  }
-  return appdata;
-}
+QString AppDataFallback() { return lapian::core::DefaultAppDataRoot(); }
 
 }  // namespace
 
@@ -36,15 +28,9 @@ CacheManager::CacheManager(CacheStore* cache, QString records_root)
                                            : NormalizeRoot(records_root)) {}
 
 QString CacheManager::DefaultRecordsRootFor(const QString& appdata) {
-  QString base = appdata;
-  if (base.isEmpty()) {
-    base = AppDataFallback();
-  }
-  const QDir dir(base);
-  if (dir.dirName() == QStringLiteral("拉片软件")) {
-    return dir.filePath(QStringLiteral("online"));
-  }
-  return QDir(base).filePath(QStringLiteral("拉片软件/online"));
+  const QString base = appdata.isEmpty() ? AppDataFallback() : appdata;
+  return lapian::core::AppDataChild(lapian::core::NormalizeAppDataRoot(base),
+                                    QStringLiteral("online"));
 }
 
 QString CacheManager::DefaultRecordsRoot() {

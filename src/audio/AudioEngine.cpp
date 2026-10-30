@@ -20,9 +20,11 @@
 
 #include <QString>
 
+#ifdef _WIN32
 #include <windows.h>
 #include <avrt.h>
 #include <objbase.h>
+#endif
 
 #include "audio/AudioDecoder.h"
 #include "audio/AudioFormat.h"
@@ -725,6 +727,7 @@ struct AudioEngine::Impl {
   }
 
   void Run() {
+#ifdef _WIN32
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(com)) {
       AudioLog("audio COM init failed: 0x%08lX", static_cast<unsigned long>(com));
@@ -733,6 +736,7 @@ struct AudioEngine::Impl {
     }
     DWORD mmcss_index = 0;
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &mmcss_index);
+#endif
 
     while (true) {
       bool do_open = false;
@@ -811,10 +815,12 @@ struct AudioEngine::Impl {
     renderer.Shutdown();
     decoder.Close();
     growing_format.reset();
+#ifdef _WIN32
     if (mmcss != nullptr) {
       AvRevertMmThreadCharacteristics(mmcss);
     }
     CoUninitialize();
+#endif
   }
 };
 

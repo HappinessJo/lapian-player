@@ -1,4 +1,5 @@
 #include "online/CredentialStore.h"
+#include "core/AppDataPaths.h"
 
 #include <QDir>
 #include <QFile>
@@ -9,8 +10,13 @@
 #include <cstring>
 #include <utility>
 
+#ifdef _WIN32
 #include <windows.h>
 #include <dpapi.h>
+#else
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#endif
 
 namespace lapian::online {
 namespace {
@@ -19,6 +25,7 @@ constexpr char kMagic[8] = {'L', 'A', 'P', 'C', 'R', 'E', 'D', '1'};
 constexpr qint64 kHeaderBytes = 8 + 4;
 constexpr qint64 kMaxFileBytes = 64 * 1024;
 
+#ifdef _WIN32
 const QByteArray& CredentialEntropy() {
   static const QByteArray entropy = QByteArrayLiteral("lapian-credentials-v1");
   return entropy;
@@ -31,11 +38,11 @@ DATA_BLOB MakeBlob(const QByteArray& bytes) {
   return blob;
 }
 
-bool Protect(const QByteArray& plain, QByteArray* cipher, QString* error) {
+bool Protect(const QByteArray& plain, QByteArray* cipher, QString* error,
+             const QString&) {
   DATA_BLOB input = MakeBlob(plain);
   DATA_BLOB entropy = MakeBlob(CredentialEntropy());
   DATA_BLOB output{};
-  // 只允许当前用户：不使用 CRYPTPROTECT_LOCAL_MACHINE。
   if (!CryptProtectData(&input, L"Lapian credential", &entropy, nullptr, nullptr,
                         CRYPTPROTECT_UI_FORBIDDEN, &output)) {
     *error = QStringLiteral("DPAPI 加密失败（错误 %1）").arg(GetLastError());
@@ -48,7 +55,8 @@ bool Protect(const QByteArray& plain, QByteArray* cipher, QString* error) {
   return true;
 }
 
-bool Unprotect(const QByteArray& cipher, QByteArray* plain, QString* error) {
+bool Unprotect(const QByteArray& cipher, QByteArray* plain, QString* error,
+               const QString&) {
   DATA_BLOB input = MakeBlob(cipher);
   DATA_BLOB entropy = MakeBlob(CredentialEntropy());
   DATA_BLOB output{};
@@ -64,12 +72,102 @@ bool Unprotect(const QByteArray& cipher, QByteArray* plain, QString* error) {
   return true;
 }
 
+void DeleteProtected(const QString&) {}
+#else
+CFStringRef MakeCfString(const QByteArray& text) {
+  return CFStringCreateWithCString(nullptr, text.constData(), kCFStringEncodingUTF8);
+}
+
+CFMutableDictionaryRef MakeKeychainQuery(const QString& path) {
+  CFStringRef service = MakeCfString("org.happinessjo.lapian-player.credentials");
+  CFStringRef account = MakeCfString(path.toUtf8());
+  CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+      nullptr, 0, &kCFCopyStringDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+  CFDictionarySetValue(query, kSecAttrService, service);
+  CFDictionarySetValue(query, kSecAttrAccount, account);
+  CFRelease(service);
+  CFRelease(account);
+  return query;
+}
+
+bool Protect(const QByteArray& plain, QByteArray* cipher, QString* error,
+             const QString& path) {
+  CFMutableDictionaryRef query = MakeKeychainQuery(path);
+  CFDataRef data = CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(plain.constData()),
+                                static_cast<CFIndex>(plain.size()));
+  CFDictionarySetValue(query, kSecValueData, data);
+  CFDictionarySetValue(query, kSecAttrAccessible,
+                       kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
+  OSStatus status = SecItemAdd(query, nullptr);
+  if (status == errSecDuplicateItem) {
+    CFMutableDictionaryRef match = MakeKeychainQuery(path);
+    const void* update_keys[] = {kSecValueData};
+    const void* update_values[] = {data};
+    CFDictionaryRef update = CFDictionaryCreate(
+        nullptr, update_keys, update_values, 1, &kCFCopyStringDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    status = SecItemUpdate(match, update);
+    CFRelease(match);
+    CFRelease(update);
+  }
+  CFRelease(data);
+  CFRelease(query);
+  if (status != errSecSuccess) {
+    *error = QStringLiteral("钥匙串写入失败（%1）").arg(static_cast<int>(status));
+    return false;
+  }
+  *cipher = QByteArrayLiteral("KEYCHAIN1");
+  return true;
+}
+
+bool Unprotect(const QByteArray& cipher, QByteArray* plain, QString* error,
+               const QString& path) {
+  if (cipher != QByteArrayLiteral("KEYCHAIN1")) {
+    *error = QStringLiteral("macOS 凭据标记无效");
+    return false;
+  }
+  CFMutableDictionaryRef query = MakeKeychainQuery(path);
+  CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+  CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+  CFTypeRef item = nullptr;
+  const OSStatus status = SecItemCopyMatching(query, &item);
+  CFRelease(query);
+  if (status != errSecSuccess || item == nullptr) {
+    if (item != nullptr) {
+      CFRelease(item);
+    }
+    *error = QStringLiteral("无法读取钥匙串凭据（%1）").arg(static_cast<int>(status));
+    return false;
+  }
+  const CFDataRef data = static_cast<CFDataRef>(item);
+  *plain = QByteArray(reinterpret_cast<const char*>(CFDataGetBytePtr(data)),
+                      static_cast<qsizetype>(CFDataGetLength(data)));
+  CFRelease(item);
+  return true;
+}
+
+void DeleteProtected(const QString& path) {
+  CFMutableDictionaryRef query = MakeKeychainQuery(path);
+  SecItemDelete(query);
+  CFRelease(query);
+}
+#endif
+
 void WipeBytes(QByteArray* bytes) {
   if (bytes == nullptr) {
     return;
   }
   if (!bytes->isEmpty()) {
+#ifdef _WIN32
     SecureZeroMemory(bytes->data(), static_cast<SIZE_T>(bytes->size()));
+#else
+    volatile char* cursor = bytes->data();
+    for (qsizetype i = 0; i < bytes->size(); ++i) {
+      cursor[i] = 0;
+    }
+#endif
   }
   bytes->clear();
 }
@@ -112,18 +210,8 @@ bool ParseFileBlob(const QByteArray& blob, QByteArray* cipher, QString* error) {
 }  // namespace
 
 QString DefaultCredentialPath() {
-  QString appdata = qEnvironmentVariable("APPDATA");
-  if (appdata.isEmpty()) {
-    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  }
-  if (appdata.isEmpty()) {
-    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-  }
-  QDir base(appdata);
-  if (base.dirName() == QStringLiteral("拉片软件")) {
-    return base.filePath(QStringLiteral("credentials.dat"));
-  }
-  return base.filePath(QStringLiteral("拉片软件/credentials.dat"));
+  return lapian::core::AppDataChild(lapian::core::DefaultAppDataRoot(),
+                                    QStringLiteral("credentials.dat"));
 }
 
 CredentialStore::CredentialStore(QString path)
@@ -169,7 +257,7 @@ CredentialLoadResult CredentialStore::Load() const {
   }
 
   QByteArray plain;
-  if (!Unprotect(cipher, &plain, &result.error)) {
+  if (!Unprotect(cipher, &plain, &result.error, path_)) {
     result.corrupt = true;
     return result;
   }
@@ -204,7 +292,7 @@ bool CredentialStore::Save(const QString& sessdata, QString* error) {
   ClearSecret(&normalized.value);
   QByteArray cipher;
   QString crypto_error;
-  const bool protected_ok = Protect(plain, &cipher, &crypto_error);
+  const bool protected_ok = Protect(plain, &cipher, &crypto_error, path_);
   WipeBytes(&plain);
   if (!protected_ok) {
     if (error != nullptr) {
@@ -254,6 +342,7 @@ bool CredentialStore::Clear(QString* error) {
   if (path_.isEmpty()) {
     return true;
   }
+  DeleteProtected(path_);
   if (!QFileInfo::exists(path_)) {
     return true;
   }

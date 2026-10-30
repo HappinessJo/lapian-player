@@ -84,6 +84,7 @@ void TestV9Software() {
 }
 
 void TestV9Hardware() {
+#ifdef _WIN32
   if (!FileExists("media/V9.mp4")) {
     Skip("media/V9.mp4 不存在，跳过硬解测试");
     return;
@@ -106,6 +107,9 @@ void TestV9Hardware() {
   Check(info.width == 1920 && info.height == 1080, "V9 硬解 1080p");
   Check(info.hardware, "V9 硬解帧标记为 hardware");
   Check(info.pixel_format_name.find("d3d11") != std::string::npos, "V9 硬解格式为 d3d11");
+#else
+  std::printf("[SKIP] D3D11 hardware decode is Windows-only\n");
+#endif
 }
 
 void TestV9Sequence() {

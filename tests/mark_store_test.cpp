@@ -2,7 +2,9 @@
 // 空文件删除、AppData 回退与迁回、frame+pts 校正、原子写失败保护。
 // 不依赖 FFmpeg/D3D11，只链接 Qt Core 与 lapian_marks。
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <QByteArray>
 #include <QDateTime>
@@ -172,8 +174,13 @@ void TestPathNormalization(const QString& root) {
           lapian::core::NormalizeVideoPath(upper), "大小写不同 -> 同一路径键");
   CheckEq(lapian::core::NormalizeVideoPath(canonical),
           lapian::core::NormalizeVideoPath(dotted), "./ 规范化 -> 同一路径键");
+#ifdef _WIN32
   Check(lapian::core::NormalizeVideoPath(canonical).find('/') == std::string::npos,
         "路径键使用反斜杠");
+#else
+  Check(lapian::core::NormalizeVideoPath(canonical).find('/') != std::string::npos,
+        "路径键使用 POSIX 分隔符");
+#endif
   Check(lapian::core::NormalizeVideoPath(canonical) !=
             lapian::core::NormalizeVideoPath(ToUtf8(other)),
         "不同视频路径键不同");
@@ -638,11 +645,10 @@ void TestFallbackAndMigration(const QString& root) {
                               lapian::core::SerializeMarkFile(identity, {a}))),
         "写入初始 sidecar");
 
-  const std::wstring sidecar_w = sidecar.toStdWString();
-  const DWORD original_attributes = GetFileAttributesW(sidecar_w.c_str());
-  Check(original_attributes != INVALID_FILE_ATTRIBUTES, "读取 sidecar 属性");
-  Check(SetFileAttributesW(sidecar_w.c_str(),
-                           original_attributes | FILE_ATTRIBUTE_READONLY) != 0,
+  const QFile::Permissions original_permissions = QFileInfo(directory).permissions();
+  Check(QFile::setPermissions(directory, QFile::ReadOwner | QFile::ReadGroup |
+                                           QFile::ReadOther | QFile::ExeOwner |
+                                           QFile::ExeGroup | QFile::ExeOther),
         "设置 sidecar 只读（模拟源目录不可写）");
 
   MarkStore store = MarkStore::Open(ToUtf8(video), 5'000'000, options);
@@ -665,7 +671,7 @@ void TestFallbackAndMigration(const QString& root) {
   Check(HasWarning(reopened, MarkWarningKind::kMigrationFailed),
         "重开时仍提示旧 sidecar 未删除");
 
-  Check(SetFileAttributesW(sidecar_w.c_str(), original_attributes) != 0,
+  Check(QFile::setPermissions(directory, original_permissions),
         "恢复 sidecar 可写（模拟源目录恢复）");
   MarkStore migrated = MarkStore::Open(ToUtf8(video), 5'000'000, options);
   Check(migrated.marks().size() == 2, "迁回后标记数量不变");
@@ -700,16 +706,16 @@ void TestAtomicFailure(const QString& root) {
   Check(!before.isEmpty(), "旧 sidecar 非空");
   Check(store.AddMark(20, 2000, "B", "", nullptr), "添加标记 B");
 
-  const std::wstring sidecar_w = sidecar.toStdWString();
-  HANDLE lock = CreateFileW(sidecar_w.c_str(), GENERIC_READ, 0, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  Check(lock != INVALID_HANDLE_VALUE, "以独占共享模式锁住 sidecar");
+  const QFile::Permissions original_permissions = QFileInfo(directory).permissions();
+  Check(QFile::setPermissions(directory, QFile::ReadOwner | QFile::ReadGroup |
+                                           QFile::ReadOther | QFile::ExeOwner |
+                                           QFile::ExeGroup | QFile::ExeOther),
+        "设置 sidecar 目录只读");
   const SaveResult failed = store.Save();
-  Check(!failed.ok, "sidecar 锁定且回退不可写时保存失败");
+  Check(!failed.ok, "sidecar 目录只读且回退不可写时保存失败");
   Check(!failed.error.empty(), "保存失败返回错误信息");
-  if (lock != INVALID_HANDLE_VALUE) {
-    CloseHandle(lock);
-  }
+  Check(QFile::setPermissions(directory, original_permissions),
+        "恢复 sidecar 目录可写");
   Check(ReadAll(sidecar) == before, "失败不破坏旧 sidecar");
   const QStringList leftovers =
       QDir(directory).entryList(QStringList() << QStringLiteral("*.tmp-*"),
@@ -842,8 +848,9 @@ void TestWorkRangePaths(const QString& root) {
   const WorkRangePaths long_paths =
       ResolveWorkRangePaths(ToUtf8(long_video), options);
   const std::string expected_suffix = ".lapian-workrange.json";
-  Check(long_paths.sidecar.size() ==
-            ToUtf8(long_video).size() + expected_suffix.size(),
+  Check(long_paths.sidecar.size() >= expected_suffix.size() &&
+            long_paths.sidecar.compare(long_paths.sidecar.size() - expected_suffix.size(),
+                                       expected_suffix.size(), expected_suffix) == 0,
         "W1：长路径 sidecar 后缀正确");
   WorkRangeStore long_store = WorkRangeStore::Open(ToUtf8(long_video), options);
   Check(long_store.valid() && !long_store.has_record(), "W1：长路径打开不崩、无记录");

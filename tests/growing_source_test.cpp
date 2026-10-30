@@ -45,8 +45,10 @@ extern "C" {
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#endif
 
 namespace {
 
@@ -149,6 +151,7 @@ QString ToExtendedPath(const QString& path) {
 }
 
 bool MarkSparse(const QString& path) {
+#ifdef _WIN32
   const std::wstring wide = ToExtendedPath(path).toStdWString();
   HANDLE handle = CreateFileW(wide.c_str(), GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -161,6 +164,9 @@ bool MarkSparse(const QString& path) {
                                   0, &returned, nullptr);
   CloseHandle(handle);
   return ok != 0;
+#else
+  return QFileInfo::exists(path);
+#endif
 }
 
 bool CreateSizedFile(const QString& path, std::int64_t size) {
@@ -184,6 +190,7 @@ bool CreateSizedFile(const QString& path, std::int64_t size) {
 // 在已有文件上写一段内容（share read|write、不带 delete，模拟下载线程）。
 bool WriteAt(const QString& path, std::int64_t offset, const std::uint8_t* data,
              std::int64_t size) {
+#ifdef _WIN32
   const std::wstring wide = ToExtendedPath(path).toStdWString();
   HANDLE handle = CreateFileW(wide.c_str(), GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -209,6 +216,22 @@ bool WriteAt(const QString& path, std::int64_t offset, const std::uint8_t* data,
   }
   CloseHandle(handle);
   return ok;
+#else
+  QFile file(path);
+  if (!file.open(QIODevice::ReadWrite) || !file.seek(offset)) {
+    return false;
+  }
+  std::int64_t written = 0;
+  while (written < size) {
+    const qint64 chunk = file.write(reinterpret_cast<const char*>(data + written),
+                                    static_cast<qint64>(size - written));
+    if (chunk <= 0) {
+      return false;
+    }
+    written += chunk;
+  }
+  return true;
+#endif
 }
 
 bool WritePattern(const QString& path, std::int64_t offset, std::int64_t size) {

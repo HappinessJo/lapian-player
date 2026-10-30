@@ -14,7 +14,9 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -1228,7 +1230,9 @@ struct PreviewDecoder::Impl {
   // （1280 NV12）写入热/环缓存。与预览硬解线程分离，因此不会阻塞当前目标，
   // 也不接触 D3D11 表面池；目标跨 GOP/换会话时逐帧检查并取消。
   void RunPrefetch() {
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     VideoDecoder decoder;
     bool opened = false;
     SwsContext* prefetch_sws = nullptr;

@@ -1987,7 +1987,8 @@ void OnlinePreviewDecoder::Begin(
           static_cast<std::int64_t>(impl_->index->size()) - 1;
       const std::int64_t origin =
           std::max<std::int64_t>(0, std::min(initial_frame, last_frame));
-      impl_->warm_origin = origin;
+      impl_->warm_origin =
+          std::max<std::int64_t>(0, origin - impl_->CacheWindowLocked());
       impl_->warm_target =
           std::min<std::int64_t>(last_frame, origin + 10);
       impl_->warm_start = std::chrono::steady_clock::now();
@@ -2160,7 +2161,8 @@ void OnlinePreviewDecoder::Warm(std::int64_t frame) {
     const std::int64_t origin = std::min(frame, limit);
     const std::int64_t target =
         std::min<std::int64_t>(limit, origin + 10);
-    impl_->warm_origin = origin;
+    impl_->warm_origin =
+        std::max<std::int64_t>(0, origin - impl_->CacheWindowLocked());
     impl_->warm_target = target;
     ++impl_->warm_epoch;
     impl_->warm_start = std::chrono::steady_clock::now();

@@ -8,7 +8,9 @@
 #include <string>
 #include <thread>
 
+#ifdef _WIN32
 #include <wrl/client.h>
+#endif
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -24,8 +26,10 @@ extern "C" {
 
 #include "media/FrameIndex.h"
 #include "media/PreviewDecoder.h"
+#ifdef _WIN32
 #include "platform/gfx/D3D11Device.h"
 #include "platform/gfx/VideoRenderer.h"
+#endif
 
 namespace {
 
@@ -79,6 +83,7 @@ lapian::media::PreviewFrame PollTargetFrame(
 
 // DP-1：把预览线程的硬件帧交给同一个 VideoRenderer，离屏渲染并回读，确认
 // 不是黑屏/背景色。等价于 GfxWidget::SetVideoFrame 的同设备纹理上传路径。
+#ifdef _WIN32
 bool RendersNonBackground(ID3D11Device* device, ID3D11DeviceContext* context,
                           const AVFrame* frame, std::string* error) {
   lapian::gfx::VideoRenderer renderer;
@@ -140,6 +145,7 @@ bool RendersNonBackground(ID3D11Device* device, ID3D11DeviceContext* context,
   }
   return found;
 }
+#endif
 
 }  // namespace
 
@@ -354,6 +360,7 @@ int main(int argc, char** argv) {
     fallback.Close();
   }
 
+#ifdef _WIN32
   // DP-1：与渲染器共享 D3D11 设备硬解；无硬解/D3D11 的开发机跳过。
   {
     lapian::gfx::D3D11Device device;
@@ -435,6 +442,7 @@ int main(int argc, char** argv) {
       software.Close();
     }
   }
+#endif
 
   if (g_failures > 0) {
     std::printf("失败 %d 项\n", g_failures);

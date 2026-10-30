@@ -42,8 +42,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#endif
 
 namespace {
 
@@ -154,6 +156,7 @@ QByteArray ReadAll(const QString& path) {
 
 // 标记稀疏：20GB 记账测试只造逻辑大小，不真占盘。
 bool MarkSparse(const QString& path) {
+#ifdef _WIN32
   const QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
   const std::wstring wide =
       (native.startsWith(QStringLiteral("\\\\?\\"))
@@ -171,6 +174,9 @@ bool MarkSparse(const QString& path) {
                                   &returned, nullptr);
   CloseHandle(handle);
   return ok != 0;
+#else
+  return QFileInfo::exists(path);
+#endif
 }
 
 bool ResizeFile(const QString& path, qint64 size) {
@@ -924,6 +930,7 @@ void TestCurrentProtected() {
 // ---------------------------------------------------------------- 读句柄/待淘汰
 
 void TestEvictBusy() {
+#ifdef _WIN32
   QTemporaryDir temp;
   const QString root = temp.path() + QStringLiteral("/cache");
   const CacheKey locked{QStringLiteral("BV1BMnv6jE5S"), 55, 64, 7};
@@ -960,6 +967,9 @@ void TestEvictBusy() {
   Check(!QFileInfo::exists(mp4), "busy-cleanup-removes-pending");
   CheckLe(store.UsageBytes(), 12 * kMb, "busy-usage-under-quota");
   Check(store.Load(current).has_value(), "busy-current-kept");
+#else
+  std::printf("[SKIP] busy-evict uses Windows file-sharing semantics\n");
+#endif
 }
 
 // ---------------------------------------------------------------- 磁盘空间

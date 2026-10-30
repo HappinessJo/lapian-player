@@ -52,3 +52,25 @@ Inno 生成的卸载器位于 `{app}` 外的独立目录，其二进制静态导
    本项目未修改这两个组件的源码。
 5. **专利风险**：H.264/H.265 解码涉及专利池许可；首期按“随包分发、不额外付费”
    处理，风险记录在 `plan.md` R14 与发布说明中。
+
+## macOS 组件（当前发布）
+
+| 组件 | 版本 | 许可 | 链接方式 | 许可文本 |
+|---|---|---|---|---|
+| Qt（Core/Gui/Widgets） | 6.12.0（Homebrew） | LGPL-3.0 | 动态框架 | `licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt` |
+| FFmpeg | 9.0.2 官方源码，最小构建 | LGPL-2.1-or-later | 动态 dylib | `licenses/LGPL-2.1.txt`、`licenses/FFmpeg-LICENSE.md` |
+| SoundTouch | 2.4.1（Homebrew） | LGPL-2.1 | 动态 dylib | `licenses/SoundTouch-COPYING.txt` |
+| libcurl | 8.23.0（Homebrew） | curl/X11 | 动态 dylib | `licenses/curl.txt` |
+| CoreAudio / AudioUnit / Security | macOS SDK | 系统组件 | 系统框架，不随包再分发 | 不适用 |
+
+macOS 的对应源码与 Homebrew 构建定义见 `licenses/SOURCE-OFFER-MAC.md`。
+Qt、FFmpeg、SoundTouch 与 libcurl 均以动态库/框架形式随 App 提供，可用兼容实现替换。
+CoreAudio、Security 和系统 Qt 运行框架所需系统组件由 macOS 提供。
+qrcodegen 沿用原项目的 MIT vendored 源码，见 `licenses/qrcodegen.txt`。
+
+实际随包的 Qt、libcurl 及图像格式运行时依赖许可保存在 `licenses/homebrew/`，包括
+OpenSSL、nghttp2/nghttp3/ngtcp2、libpsl、libssh2、zstd、brotli、dbus、glib、pcre2、
+harfbuzz、freetype、libpng、double-conversion、md4c、graphite2、ICU、gettext、
+jpeg-turbo、libtiff、webp 与 xz。各依赖保留其原有许可，不按项目 MIT 重新授权。
+Homebrew libcurl 启用 Apple SecTrust 和系统信任回退；HTTPS 证书校验保持开启，
+不需要打包 Homebrew 的 CA 文件路径。

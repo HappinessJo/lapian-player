@@ -13,8 +13,13 @@
 
 #include "online/IHttpClient.h"
 
+#ifndef _WIN32
+#include "online/CurlHttpClient.h"
+#endif
+
 namespace lapian::online {
 
+#ifdef _WIN32
 class WinHttpClient final : public IHttpClient {
  public:
   WinHttpClient() = default;
@@ -32,5 +37,8 @@ class WinHttpClient final : public IHttpClient {
   // 测试用：带 SESSDATA 的请求是否允许发往该 URL（只允许 api.bilibili.com:443）。
   static bool CookieAllowedForTest(const QString& url);
 };
+#else
+using WinHttpClient = CurlHttpClient;
+#endif
 
 }  // namespace lapian::online

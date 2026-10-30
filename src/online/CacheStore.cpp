@@ -17,13 +17,22 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <utility>
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
+using DWORD = unsigned long;
+#endif
 
 namespace lapian::online {
 namespace {
@@ -177,10 +186,25 @@ DeleteStatus DeleteFileChecked(const QString& path, DWORD* win32_error) {
   }
   return DeleteStatus::kFailed;
 #else
-  if (!QFileInfo::exists(path)) {
-    return DeleteStatus::kMissing;
+  const QByteArray native = QFile::encodeName(path);
+  const int handle = ::open(native.constData(), O_RDONLY);
+  if (handle < 0) {
+    return QFileInfo::exists(path) ? DeleteStatus::kFailed : DeleteStatus::kMissing;
   }
-  return QFile::remove(path) ? DeleteStatus::kDeleted : DeleteStatus::kFailed;
+  if (::flock(handle, LOCK_EX | LOCK_NB) != 0) {
+    const int code = errno;
+    ::close(handle);
+    if (code == EWOULDBLOCK) {
+      return DeleteStatus::kBusy;
+    }
+    if (win32_error != nullptr) {
+      *win32_error = static_cast<DWORD>(code);
+    }
+    return DeleteStatus::kFailed;
+  }
+  const bool removed = QFile::remove(path);
+  ::close(handle);
+  return removed ? DeleteStatus::kDeleted : DeleteStatus::kFailed;
 #endif
 }
 
@@ -487,7 +511,17 @@ qint64 CacheStore::FreeDiskBytes(const QString& path, QString* error) {
   }
   return static_cast<qint64>(free_bytes.QuadPart);
 #else
-  return fail(QStringLiteral("本平台不支持磁盘空间查询"));
+  const QByteArray native = QFile::encodeName(probe);
+  struct statvfs info {};
+  if (::statvfs(native.constData(), &info) != 0) {
+    return fail(QStringLiteral("无法读取磁盘可用空间（%1）")
+                    .arg(QString::fromLocal8Bit(std::strerror(errno))));
+  }
+  const unsigned long long free_bytes =
+      static_cast<unsigned long long>(info.f_bavail) * info.f_frsize;
+  return free_bytes > static_cast<unsigned long long>(std::numeric_limits<qint64>::max())
+             ? std::numeric_limits<qint64>::max()
+             : static_cast<qint64>(free_bytes);
 #endif
 }
 

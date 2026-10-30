@@ -1,4 +1,5 @@
 #include "core/MarkStore.h"
+#include "core/AppDataPaths.h"
 
 #include <QByteArray>
 #include <QCryptographicHash>
@@ -52,12 +53,12 @@ std::wstring NativeLongPath(const QString& path) {
 }
 #endif
 
-// 绝对化 + 解析 . / .. + 正斜杠转反斜杠；存在的本地文件再解析 8.3/符号链接。
-// UNC 不做文件系统解析，避免打开不存在/离线的网络路径时阻塞。
+// 绝对化并解析 . / ..；Windows 保留反斜杠与 UNC 规则，POSIX 保留原生路径。
 QString CleanAbsolutePath(const QString& input) {
   if (input.isEmpty()) {
     return {};
   }
+#ifdef _WIN32
   QString path = input;
   path.replace(QLatin1Char('/'), QLatin1Char('\\'));
 
@@ -79,7 +80,6 @@ QString CleanAbsolutePath(const QString& input) {
     }
   }
 
-  // canonicalFilePath/absoluteFilePath 也可能返回 \\?\ 前缀；统一去掉便于哈希与显示。
   if (absolute.startsWith(QLatin1String("\\\\?\\UNC\\"), Qt::CaseInsensitive)) {
     absolute = QStringLiteral("\\\\") + absolute.mid(8);
   } else if (absolute.startsWith(QLatin1String("\\\\?\\"), Qt::CaseInsensitive)) {
@@ -93,29 +93,47 @@ QString CleanAbsolutePath(const QString& input) {
     absolute += QLatin1Char('\\');
   }
   return absolute;
+#else
+  if (input.startsWith(QStringLiteral("\\\\")) || input.startsWith(QStringLiteral("//"))) {
+    QString path = input;
+    path.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    if (path.startsWith(QLatin1String("\\\\?\\UNC\\"), Qt::CaseInsensitive)) {
+      path = QStringLiteral("\\\\") + path.mid(8);
+    } else if (path.startsWith(QLatin1String("\\\\?\\"), Qt::CaseInsensitive)) {
+      path = path.mid(4);
+    }
+    path.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    QString absolute = QDir::cleanPath(path);
+    absolute.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    while (absolute.size() > 3 && absolute.endsWith(QLatin1Char('\\'))) {
+      absolute.chop(1);
+    }
+    if (!absolute.startsWith(QStringLiteral("\\\\"))) {
+      absolute = QLatin1Char('\\') + absolute;
+    }
+    return absolute;
+  }
+  QString absolute = QDir::cleanPath(QFileInfo(input).absoluteFilePath());
+  const QString canonical = QFileInfo(absolute).canonicalFilePath();
+  if (!canonical.isEmpty()) {
+    absolute = QDir::cleanPath(canonical);
+  }
+  while (absolute.size() > 1 && absolute.endsWith(QLatin1Char('/'))) {
+    absolute.chop(1);
+  }
+  return absolute;
+#endif
 }
 
 QString DefaultAppDataMarksDir() {
-  QString appdata = qEnvironmentVariable("APPDATA");
-  if (appdata.isEmpty()) {
-    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  }
-  if (appdata.isEmpty()) {
-    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-  }
-  return QDir(appdata).filePath(QString::fromUtf8("拉片软件/marks"));
+  return lapian::core::AppDataChild(lapian::core::DefaultAppDataRoot(),
+                                    QStringLiteral("marks"));
 }
 
 // T8.7：%APPDATA%\拉片软件\online（不叠加第二层“拉片软件”）。
 QString DefaultAppDataOnlineDir() {
-  QString appdata = qEnvironmentVariable("APPDATA");
-  if (appdata.isEmpty()) {
-    appdata = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  }
-  if (appdata.isEmpty()) {
-    appdata = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-  }
-  return QDir(appdata).filePath(QString::fromUtf8("拉片软件/online"));
+  return lapian::core::AppDataChild(lapian::core::DefaultAppDataRoot(),
+                                    QStringLiteral("online"));
 }
 
 bool IsSafeOnlineBvid(const QString& bvid) {

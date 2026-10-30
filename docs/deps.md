@@ -84,3 +84,26 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Clean
 
 - `scripts\check-imports.ps1`：发布包不得含 `Qt6Network.dll`/`tls`/`networkinformation`；不得导入 `winhttp/wininet/urlmon/wsock32`；`ws2_32` 仅允许 `Qt6Core.dll`（Qt 运行时固定链接）与阶段 A 的预编译 FFmpeg（阶段 B 后必须消除）。
 - 手工验收：ProcMon 过滤 `Process Name=lapian.exe`、`Operation contains TCP/UDP`，启动并空窗口 60s，应 0 事件。
+
+## 8. macOS Apple Silicon（2026-10-30）
+
+| 组件 | 版本与来源 | 用途 |
+|---|---|---|
+| macOS | 26.4 arm64 | 实际构建与窗口验收环境 |
+| Apple Clang | 21.0.0 | C++20 编译 |
+| CMake / Ninja | 4.4.5 / 1.13.2 | 构建系统 |
+| Qt | 6.12.0（Homebrew，LGPL-3.0） | Core / Gui / Widgets |
+| FFmpeg | 9.0.2 官方源码，最小 LGPL 动态构建 | 解封装、软件解码与色彩转换 |
+| SoundTouch | 2.4.1（Homebrew，LGPL-2.1） | 变速音高保持 |
+| libcurl | 8.23.0（Homebrew，curl/X11） | HTTPS API 与 CDN Range 下载 |
+| Python | 3 | 打包依赖、归档与校验检查 |
+
+`./scripts/build-macos.sh` 在缺少最小 FFmpeg 时调用 `./scripts/build-ffmpeg-macos.sh`，
+从 `https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz` 获取源码并核验 SHA-256
+`8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`。
+仅构建 mov、matroska 解封装及所需解码器，禁用网络、GPL、version3、nonfree、
+x264/x265 和不需要的外部组件。不要使用 Homebrew 的 GPL-enabled FFmpeg 代替本发布输入。
+
+`./scripts/package-macos.sh` 使用 macdeployqt 收集运行时依赖，排除未使用的 QML、
+QtNetwork、虚拟键盘和 PDF/SVG 插件，并检查依赖路径、签名、版本、ZIP 成员与 DMG 挂载。
+未提供 Intel / Universal Binary、Developer ID 或 Apple 公证。

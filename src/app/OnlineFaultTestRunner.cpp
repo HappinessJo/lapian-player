@@ -1,4 +1,4 @@
-﻿#include "app/OnlineFaultTestRunner.h"
+#include "app/OnlineFaultTestRunner.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -24,11 +24,11 @@
 #include <tuple>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
-
 #include <dbghelp.h>
-
 #pragma comment(lib, "dbghelp.lib")
+#endif
 
 #include "app/MainWindow.h"
 #include "online/CacheStore.h"

@@ -1,6 +1,8 @@
 #include "app/RobustTestRunner.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <QApplication>
 #include <QCoreApplication>

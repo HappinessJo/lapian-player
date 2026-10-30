@@ -123,15 +123,26 @@ void OnlineResolveDialog::SetupUi() {
   root->addWidget(intro);
 
   auto* privacy_row = new QHBoxLayout();
+#ifdef _WIN32
+  const QString credential_storage = QStringLiteral(
+      "SESSDATA 可选用 Windows DPAPI 加密保存在 "
+      "%APPDATA%\\拉片软件\\credentials.dat");
+  const QString cache_storage = QStringLiteral(
+      "在线缓存默认在 %LOCALAPPDATA%\\拉片软件\\cache");
+#else
+  const QString credential_storage = QStringLiteral(
+      "SESSDATA 可保存在 macOS 钥匙串，凭据标记文件位于应用数据目录");
+  const QString cache_storage = QStringLiteral(
+      "在线缓存默认在 ~/Library/Caches/拉片软件/cache");
+#endif
   privacy_label_ = new QLabel(
       QStringLiteral(
           "隐私说明：在线模式只在你提交 BV/URL 后访问 api.bilibili.com；"
           "点击“扫码登录”时才访问 passport.bilibili.com 的官方二维码接口"
-          "（generate/poll，不带 Cookie，本地渲染）。"
-          "SESSDATA 可选用 Windows DPAPI 加密保存在 "
-          "%APPDATA%\\拉片软件\\credentials.dat，只发送给 api.bilibili.com，"
-          "不写入日志/缓存/截图；可随时点“清除”。"
-          "在线缓存默认在 %LOCALAPPDATA%\\拉片软件\\cache（可在设置中清空）；"
+          "（generate/poll，不带 Cookie，本地渲染）。") +
+          credential_storage +
+          QStringLiteral("，只发送给 api.bilibili.com，不写入日志/缓存/截图；可随时点“清除”。") +
+          cache_storage + QStringLiteral("（可在设置中清空）；"
           "无遥测、无自动更新、无崩溃上报。本地模式不联网。"),
       this);
   privacy_label_->setObjectName(QStringLiteral("onlinePrivacyNotice"));
@@ -1157,8 +1168,11 @@ void OnlineResolveDialog::OnQrLoginSucceeded() {
   UpdateAuthUi();
   UpdateQualityHint();
   if (qr_status_label_ != nullptr) {
-    qr_status_label_->setText(
-        QStringLiteral("已登录（扫码）；SESSDATA 已用 DPAPI 保存"));
+#ifdef _WIN32
+    qr_status_label_->setText(QStringLiteral("已登录（扫码）；SESSDATA 已用 DPAPI 保存"));
+#else
+    qr_status_label_->setText(QStringLiteral("已登录（扫码）；SESSDATA 已存入 macOS 钥匙串"));
+#endif
   }
 }
 

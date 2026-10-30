@@ -18,21 +18,27 @@ function(lapian_set_output_dir target)
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${LAPIAN_RUNTIME_OUTPUT_DIR}")
 endfunction()
 
-# 不含 Qt 的底层库（D3D11），可被测试与自检程序复用
-add_library(lapian_core STATIC
-  platform/gfx/D3D11Device.cpp
-  platform/gfx/D3D11Device.h
-  platform/gfx/SwapChain.cpp
-  platform/gfx/SwapChain.h
-  platform/gfx/VideoRenderer.cpp
-  platform/gfx/VideoRenderer.h
-  platform/gfx/VideoRenderer.hlsl
-  platform/gfx/VideoShaders.h)
-lapian_apply_common_options(lapian_core)
-target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(lapian_core PUBLIC d3d11 dxgi lapian::ffmpeg)
-# 着色器已离线用 fxc 编译进 VideoShaders.h；不要让 MSBuild 再按默认 main 入口编译 .hlsl。
-set_source_files_properties(platform/gfx/VideoRenderer.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
+# Windows 使用 D3D11；macOS 由 GfxWidget 的 Qt 软件渲染路径取代。
+if(WIN32)
+  add_library(lapian_core STATIC
+    platform/gfx/D3D11Device.cpp
+    platform/gfx/D3D11Device.h
+    platform/gfx/SwapChain.cpp
+    platform/gfx/SwapChain.h
+    platform/gfx/VideoRenderer.cpp
+    platform/gfx/VideoRenderer.h
+    platform/gfx/VideoRenderer.hlsl
+    platform/gfx/VideoShaders.h)
+  lapian_apply_common_options(lapian_core)
+  target_include_directories(lapian_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(lapian_core PUBLIC d3d11 dxgi lapian::ffmpeg)
+  # 着色器已离线用 fxc 编译进 VideoShaders.h；不要让 MSBuild 再按默认 main 入口编译 .hlsl。
+  set_source_files_properties(platform/gfx/VideoRenderer.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
+else()
+  add_library(lapian_core INTERFACE)
+  target_include_directories(lapian_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(lapian_core INTERFACE lapian::ffmpeg)
+endif()
 
 # T2.1 帧数学核心：纯 C++，不依赖 Qt/FFmpeg，先单测再接到 UI/解码。
 add_library(lapian_framemath STATIC
@@ -60,13 +66,20 @@ lapian_apply_common_options(lapian_settings)
 target_include_directories(lapian_settings PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lapian_settings PUBLIC Qt6::Core)
 
-# T8.1 在线解析：BV/URL 归一化、匿名 view 元数据、错误映射、可注入 IHttpClient。
-# T8.2 补显式 SESSDATA、nav 自检、DPAPI 凭据；HTTP 实现仍是动态加载 WinHTTP，
-# 自检通过后 T8.16 再决定打包栈（libcurl 只在构建时可选）。
-# T8.3 补 CacheStore：缓存根/meta.json/.part→.mp4/配额 LRU/续传/清空；纯本地存储。
-# T8.4 补可增长读层：GrowingSource + 每读者 Cursor/AVIO；只读 `.part`，不发起 HTTP。
-# T8.5 补 durl 取流：PlayUrl（解析）、DownloadTransport（CDN Range，无 Cookie）、
-# DownloadJob（续传/备份/重试/刷新/完成）；写盘后 Publish，关闭写句柄后 MarkComplete。
+# 在线层复用同一组业务接口；仅 HTTP 与 Range 传输实现按平台切换。
+if(WIN32)
+  set(LAPIAN_HTTP_SOURCES
+    online/WinHttpApi.h
+    online/WinHttpClient.cpp
+    online/WinHttpDownloadTransport.cpp)
+else()
+  set(LAPIAN_HTTP_SOURCES
+    online/CurlHttpClient.cpp
+    online/CurlHttpClient.h
+    online/CurlDownloadTransport.cpp
+    online/CurlDownloadTransport.h)
+endif()
+
 add_library(lapian_online STATIC
   online/BiliAuth.cpp
   online/BiliAuth.h
@@ -99,10 +112,8 @@ add_library(lapian_online STATIC
   online/QrLoginController.cpp
   online/QrLoginController.h
   online/Sessdata.h
-  online/WinHttpApi.h
-  online/WinHttpClient.cpp
   online/WinHttpClient.h
-  online/WinHttpDownloadTransport.cpp
+  ${LAPIAN_HTTP_SOURCES}
   online/qrcodegen/qrcodegen.cpp
   app/OnlineSession.cpp
   app/OnlineSession.h)
@@ -110,7 +121,12 @@ lapian_apply_common_options(lapian_online)
 target_include_directories(lapian_online PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(lapian_online PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/online/qrcodegen")
-target_link_libraries(lapian_online PUBLIC Qt6::Core Qt6::Gui PRIVATE crypt32 lapian::ffmpeg)
+if(WIN32)
+  target_link_libraries(lapian_online PUBLIC Qt6::Core Qt6::Gui PRIVATE crypt32 lapian::ffmpeg)
+else()
+  target_link_libraries(lapian_online PUBLIC Qt6::Core Qt6::Gui
+    PRIVATE lapian::curl lapian::ffmpeg "${LAPIAN_SECURITY_FRAMEWORK}")
+endif()
 
 # T7.3 长时浸泡：采样趋势/阈值判定，纯 C++，产品与单测共用。
 add_library(lapian_soak STATIC
@@ -164,7 +180,7 @@ add_library(lapian_media STATIC
   media/OnlineIndexBuilder.h
   media/OnlinePreviewDecoder.cpp
   media/OnlinePreviewDecoder.h
-  media/PathProbe.cpp
+  $<IF:$<PLATFORM_ID:Windows>,media/PathProbe.cpp,media/PathProbePosix.cpp>
   media/PathProbe.h
   media/PreviewDecoder.cpp
   media/PreviewDecoder.h
@@ -182,32 +198,36 @@ target_include_directories(lapian_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # 不调用这些类型，但静态库需要一个链接边。
 target_link_libraries(lapian_media PUBLIC lapian::ffmpeg lapian_framemath lapian_online)
 
-# T3.3b: SoundTouch 2.3.3 (LGPL-2.1, shared DLL) for tempo change without pitch.
-# Build it first with scripts\build-soundtouch.ps1; third_party/ is gitignored.
-set(LAPIAN_SOUNDTOUCH_ROOT "${CMAKE_SOURCE_DIR}/third_party/soundtouch")
-set(LAPIAN_SOUNDTOUCH_DLL "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.dll")
-set(LAPIAN_SOUNDTOUCH_LIB "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.lib")
-if(NOT EXISTS "${LAPIAN_SOUNDTOUCH_DLL}" OR NOT EXISTS "${LAPIAN_SOUNDTOUCH_LIB}")
-  message(FATAL_ERROR "SoundTouch is not built. Run scripts\\build-soundtouch.ps1 first.")
+if(WIN32)
+  # T3.3b: SoundTouch 2.3.3 (LGPL-2.1, shared DLL) for tempo change without pitch.
+  set(LAPIAN_SOUNDTOUCH_ROOT "${CMAKE_SOURCE_DIR}/third_party/soundtouch")
+  set(LAPIAN_SOUNDTOUCH_DLL "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.dll")
+  set(LAPIAN_SOUNDTOUCH_LIB "${LAPIAN_SOUNDTOUCH_ROOT}/build-msvc/Release/SoundTouch.lib")
+  if(NOT EXISTS "${LAPIAN_SOUNDTOUCH_DLL}" OR NOT EXISTS "${LAPIAN_SOUNDTOUCH_LIB}")
+    message(FATAL_ERROR "SoundTouch is not built. Run scripts\\build-soundtouch.ps1 first.")
+  endif()
+  add_library(soundtouch SHARED IMPORTED)
+  set_target_properties(soundtouch PROPERTIES
+    IMPORTED_LOCATION "${LAPIAN_SOUNDTOUCH_DLL}"
+    IMPORTED_IMPLIB "${LAPIAN_SOUNDTOUCH_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${LAPIAN_SOUNDTOUCH_ROOT}/soundtouch/include")
+  function(lapian_copy_soundtouch_dll target)
+    set(_lapian_soundtouch_dll
+        "${CMAKE_SOURCE_DIR}/third_party/soundtouch/build-msvc/Release/SoundTouch.dll")
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_lapian_soundtouch_dll}"
+              "$<TARGET_FILE_DIR:${target}>"
+      COMMENT "Copy SoundTouch DLL")
+  endfunction()
 endif()
-add_library(soundtouch SHARED IMPORTED)
-set_target_properties(soundtouch PROPERTIES
-  IMPORTED_LOCATION "${LAPIAN_SOUNDTOUCH_DLL}"
-  IMPORTED_IMPLIB "${LAPIAN_SOUNDTOUCH_LIB}"
-  INTERFACE_INCLUDE_DIRECTORIES "${LAPIAN_SOUNDTOUCH_ROOT}/soundtouch/include")
-function(lapian_copy_soundtouch_dll target)
-  # Resolve inside the function: tests are configured in a separate directory
-  # scope, so src/ variables are not visible there.
-  set(_lapian_soundtouch_dll
-      "${CMAKE_SOURCE_DIR}/third_party/soundtouch/build-msvc/Release/SoundTouch.dll")
-  add_custom_command(TARGET ${target} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_lapian_soundtouch_dll}"
-            "$<TARGET_FILE_DIR:${target}>"
-    COMMENT "Copy SoundTouch DLL")
-endfunction()
 
-# T3.1 音频：FFmpeg 解码 + WASAPI shared mode，不依赖 Qt，便于单测。
+if(WIN32)
+  set(LAPIAN_AUDIO_RENDERER audio/WasapiRenderer.cpp)
+else()
+  set(LAPIAN_AUDIO_RENDERER audio/CoreAudioRenderer.cpp)
+endif()
+
 add_library(lapian_audio STATIC
   audio/AudioDecoder.cpp
   audio/AudioDecoder.h
@@ -221,20 +241,24 @@ add_library(lapian_audio STATIC
   audio/WaveformGenerator.h
   audio/TimeStretch.cpp
   audio/TimeStretch.h
-  audio/WasapiRenderer.cpp
+  ${LAPIAN_AUDIO_RENDERER}
   audio/WasapiRenderer.h)
 lapian_apply_common_options(lapian_audio)
 target_include_directories(lapian_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-# T8.6：AudioEngine/WaveformGenerator 增加可增长读层入口（GrowingFormat）。
-target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt soundtouch)
+if(WIN32)
+  target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online ole32 uuid avrt soundtouch)
+else()
+  target_link_libraries(lapian_audio PUBLIC lapian::ffmpeg lapian_online soundtouch
+    "${LAPIAN_AUDIOUNIT_FRAMEWORK}" "${LAPIAN_COREAUDIO_FRAMEWORK}")
+endif()
 
 # UI v2 壳层（2026-10-26，3A；3D 起是唯一布局）：Tokens/Theme/PlayerShell/
 # PlayerSplitter/TopBar/BannerSlot/StageStack/TransportBar。
-qt_add_executable(lapian WIN32
+qt_add_executable(lapian WIN32 MACOSX_BUNDLE
   app/main.cpp
   app/MainWindow.cpp
   app/MainWindow.h
-  app/GfxWidget.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/GfxWidget.cpp,app/GfxWidgetMac.cpp>
   app/GfxWidget.h
   app/ui/Tokens.h
   app/ui/Theme.h
@@ -273,15 +297,15 @@ qt_add_executable(lapian WIN32
   app/OnlineAuthTestRunner.h
   app/OnlineCacheTestRunner.cpp
   app/OnlineCacheTestRunner.h
-  app/OnlineCacheManageTestRunner.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/OnlineCacheManageTestRunner.cpp,app/OnlineCacheManageTestRunnerMac.cpp>
   app/OnlineCacheManageTestRunner.h
   app/OnlineDragPreviewTestRunner.cpp
   app/OnlineDragPreviewTestRunner.h
-  app/OnlineFaultTestRunner.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/OnlineFaultTestRunner.cpp,app/OnlineFaultTestRunnerMac.cpp>
   app/OnlineFaultTestRunner.h
   app/OnlineFetchTestRunner.cpp
   app/OnlineFetchTestRunner.h
-  app/OnlineGrowingTestRunner.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/OnlineGrowingTestRunner.cpp,app/OnlineGrowingTestRunnerMac.cpp>
   app/OnlineGrowingTestRunner.h
   app/OnlineBufferTestRunner.cpp
   app/OnlineBufferTestRunner.h
@@ -309,23 +333,37 @@ qt_add_executable(lapian WIN32
   app/OnlineResolveDialog.h
   app/OnlineResolveTestRunner.cpp
   app/OnlineResolveTestRunner.h
-  app/RobustTestRunner.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/RobustTestRunner.cpp,app/RobustTestRunnerMac.cpp>
   app/RobustTestRunner.h
   app/PlaybackController.cpp
   app/PlaybackController.h
-  app/ProcessMemory.cpp
+  $<IF:$<PLATFORM_ID:Windows>,app/ProcessMemory.cpp,app/ProcessMemoryMac.cpp>
   app/ProcessMemory.h
   app/SnapshotService.cpp
   app/SnapshotService.h)
 lapian_apply_common_options(lapian)
 target_include_directories(lapian PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(lapian PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
-                                     lapian_timeline lapian_audio lapian_marks
-                                     lapian_mark_ui lapian_snapshot lapian_settings
-                                     lapian_soak lapian_online
-                                     lapian::ffmpeg
-                                     Qt6::Widgets windowscodecs ole32 psapi)
+if(WIN32)
+  target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
+                                       lapian_timeline lapian_audio lapian_marks
+                                       lapian_mark_ui lapian_snapshot lapian_settings
+                                       lapian_soak lapian_online
+                                       lapian::ffmpeg
+                                       Qt6::Widgets windowscodecs ole32 psapi)
+else()
+  target_link_libraries(lapian PRIVATE lapian_core lapian_media lapian_framemath
+                                       lapian_timeline lapian_audio lapian_marks
+                                       lapian_mark_ui lapian_snapshot lapian_settings
+                                       lapian_soak lapian_online
+                                       lapian::ffmpeg
+                                       Qt6::Widgets)
+  set_target_properties(lapian PROPERTIES
+    MACOSX_BUNDLE_BUNDLE_NAME "Lapian"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "org.happinessjo.lapian-player"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+endif()
 
 # T8.13 诊断（只在本地构建产物里生成 .map，用于把崩溃 RVA 映射到符号；不参与分发）
 if(MSVC)
@@ -336,64 +374,52 @@ lapian_copy_ffmpeg_dlls(lapian)
 lapian_copy_soundtouch_dll(lapian)
 lapian_set_output_dir(lapian)
 
-# 环境自检（控制台）：Qt/FFmpeg/D3D11 版本与可用性，构建脚本据此判定
-add_executable(lapian_env_check
-  tools/env_check/main.cpp)
-lapian_apply_common_options(lapian_env_check)
-target_include_directories(lapian_env_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_definitions(lapian_env_check PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(lapian_env_check PRIVATE lapian_core lapian::ffmpeg Qt6::Core)
-lapian_copy_ffmpeg_dlls(lapian_env_check)
-lapian_set_output_dir(lapian_env_check)
+if(WIN32)
+  # Windows 开发探针；macOS 使用 CTest 与产品内回归探针。
+  add_executable(lapian_env_check tools/env_check/main.cpp)
+  lapian_apply_common_options(lapian_env_check)
+  target_include_directories(lapian_env_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_definitions(lapian_env_check PRIVATE LAPIAN_VERSION="${PROJECT_VERSION}")
+  target_link_libraries(lapian_env_check PRIVATE lapian_core lapian::ffmpeg Qt6::Core)
+  lapian_copy_ffmpeg_dlls(lapian_env_check)
+  lapian_set_output_dir(lapian_env_check)
 
-# T1.1 媒体探测开发工具（控制台；只读元数据，不渲染、不解码、不入分发）
-add_executable(lapian_media_probe
-  tools/media_probe/main.cpp)
-lapian_apply_common_options(lapian_media_probe)
-target_link_libraries(lapian_media_probe PRIVATE lapian_media)
-lapian_copy_ffmpeg_dlls(lapian_media_probe)
-lapian_set_output_dir(lapian_media_probe)
+  add_executable(lapian_media_probe tools/media_probe/main.cpp)
+  lapian_apply_common_options(lapian_media_probe)
+  target_link_libraries(lapian_media_probe PRIVATE lapian_media)
+  lapian_copy_ffmpeg_dlls(lapian_media_probe)
+  lapian_set_output_dir(lapian_media_probe)
 
-# T1.2 解码探针（控制台；只解码首帧/N 帧并打印元数据，不渲染、不入分发）
-add_executable(lapian_decode_probe
-  tools/decode_probe/main.cpp)
-lapian_apply_common_options(lapian_decode_probe)
-target_link_libraries(lapian_decode_probe PRIVATE lapian_media)
-lapian_copy_ffmpeg_dlls(lapian_decode_probe)
-lapian_set_output_dir(lapian_decode_probe)
+  add_executable(lapian_decode_probe tools/decode_probe/main.cpp)
+  lapian_apply_common_options(lapian_decode_probe)
+  target_link_libraries(lapian_decode_probe PRIVATE lapian_media)
+  lapian_copy_ffmpeg_dlls(lapian_decode_probe)
+  lapian_set_output_dir(lapian_decode_probe)
 
-# T0.3 精确 seek 探针（控制台；不渲染、不缓存，只测关键帧回退+解码到目标帧的成本）
-add_executable(lapian_seek_probe
-  tools/seek_probe/main.cpp)
-lapian_apply_common_options(lapian_seek_probe)
-target_link_libraries(lapian_seek_probe PRIVATE lapian::ffmpeg)
-lapian_copy_ffmpeg_dlls(lapian_seek_probe)
-lapian_set_output_dir(lapian_seek_probe)
+  add_executable(lapian_seek_probe tools/seek_probe/main.cpp)
+  lapian_apply_common_options(lapian_seek_probe)
+  target_link_libraries(lapian_seek_probe PRIVATE lapian::ffmpeg)
+  lapian_copy_ffmpeg_dlls(lapian_seek_probe)
+  lapian_set_output_dir(lapian_seek_probe)
 
-# T3.1 音频链路探针（控制台；打印设备格式/播放位置/underrun，不入分发）
-add_executable(lapian_audio_probe
-  tools/audio_probe/main.cpp)
-lapian_apply_common_options(lapian_audio_probe)
-target_link_libraries(lapian_audio_probe PRIVATE lapian_audio)
-lapian_copy_ffmpeg_dlls(lapian_audio_probe)
-lapian_copy_soundtouch_dll(lapian_audio_probe)
-lapian_set_output_dir(lapian_audio_probe)
+  add_executable(lapian_audio_probe tools/audio_probe/main.cpp)
+  lapian_apply_common_options(lapian_audio_probe)
+  target_link_libraries(lapian_audio_probe PRIVATE lapian_audio)
+  lapian_copy_ffmpeg_dlls(lapian_audio_probe)
+  lapian_copy_soundtouch_dll(lapian_audio_probe)
+  lapian_set_output_dir(lapian_audio_probe)
 
-# T3.5 波形生成探针（控制台；打印生成耗时/bucket 数，不入分发）
-add_executable(lapian_waveform_probe
-  tools/waveform_probe/main.cpp)
-lapian_apply_common_options(lapian_waveform_probe)
-target_link_libraries(lapian_waveform_probe PRIVATE lapian_audio)
-lapian_copy_ffmpeg_dlls(lapian_waveform_probe)
-lapian_copy_soundtouch_dll(lapian_waveform_probe)
-lapian_set_output_dir(lapian_waveform_probe)
+  add_executable(lapian_waveform_probe tools/waveform_probe/main.cpp)
+  lapian_apply_common_options(lapian_waveform_probe)
+  target_link_libraries(lapian_waveform_probe PRIVATE lapian_audio)
+  lapian_copy_ffmpeg_dlls(lapian_waveform_probe)
+  lapian_copy_soundtouch_dll(lapian_waveform_probe)
+  lapian_set_output_dir(lapian_waveform_probe)
 
-# T8.10 DASH 双输入 spike（开发工具；不入分发）：总字节/init-index/双容器/
-# 首帧/首包/seek fan-out 的真实样本验证。
-add_executable(lapian_dash_spike
-  tools/dash_spike/main.cpp)
-lapian_apply_common_options(lapian_dash_spike)
-target_link_libraries(lapian_dash_spike PRIVATE lapian_media lapian_audio)
-lapian_copy_ffmpeg_dlls(lapian_dash_spike)
-lapian_copy_soundtouch_dll(lapian_dash_spike)
-lapian_set_output_dir(lapian_dash_spike)
+  add_executable(lapian_dash_spike tools/dash_spike/main.cpp)
+  lapian_apply_common_options(lapian_dash_spike)
+  target_link_libraries(lapian_dash_spike PRIVATE lapian_media lapian_audio)
+  lapian_copy_ffmpeg_dlls(lapian_dash_spike)
+  lapian_copy_soundtouch_dll(lapian_dash_spike)
+  lapian_set_output_dir(lapian_dash_spike)
+endif()
