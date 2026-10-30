@@ -21,9 +21,12 @@
 
 > 把一支 MAD / PV 拆到帧：**看剪辑点、看转场、看构图、看踩点**，然后记下来。
 
-> **macOS 用户：** 主线目前只提供 Windows 版；Apple Silicon 版由第三方 fork 维护，
-> 非本项目官方发布。见 [luoboruodai/lapian-player](https://github.com/luoboruodai/lapian-player)
-> 的 [Releases](https://github.com/luoboruodai/lapian-player/releases)。
+## macOS 版本（第三方 fork，非官方）
+
+**主线目前只提供 Windows 版。** macOS Apple Silicon 版由
+[luoboruodai/lapian-player](https://github.com/luoboruodai/lapian-player) 维护，
+非本项目官方发布；安装包、构建说明与问题反馈请见该仓库的
+[Releases](https://github.com/luoboruodai/lapian-player/releases)。
 
 ## 为什么做这个
 
@@ -89,13 +92,7 @@ MAD / PV 的功力常常就在 **1–3 帧**之间：切点早一帧还是晚一
 
 > 未做代码签名，首次运行会有 SmartScreen 提示。
 
-### macOS（第三方 fork，非官方）
-
-macOS Apple Silicon 版由 [luoboruodai/lapian-player](https://github.com/luoboruodai/lapian-player) 维护，
-不在本项目主线发布范围内。安装包、构建说明与问题反馈请见该仓库的
-[Releases](https://github.com/luoboruodai/lapian-player/releases)。
-
-> 该构建由第三方维护，不是本项目官方产物；本项目主线仍只支持 Windows。
+> macOS 版由第三方 fork 维护，不在本仓库发布；见页首「macOS 版本（第三方 fork，非官方）」。
 
 ## 快速开始
 
